@@ -78,7 +78,9 @@ class CryptoTest < Minitest::Test
     assert_equal 'héllo 👋', a.open(payload, 'aad')['text'], 'the sender can read its own message'
     assert_raises(Tailchat::CryptoError) { b.open(payload, 'moved') }
     assert_raises(Tailchat::NoKeyError) { c.open(payload, 'aad') }
-    assert_raises(Tailchat::CryptoError) { b.open(payload, 'aad', expect_from: 'devX') }
+    b.add_device('id' => 'devA', 'userId' => 'alice')
+    assert_equal 'héllo 👋', b.open(payload, 'aad', sender_id: 'alice')['text']
+    assert_raises(Tailchat::CryptoError) { b.open(payload, 'aad', sender_id: 'mallory') }
     env['ct'] = C.b64u(C.unb64u(env['ct']).tap { |s| s.setbyte(0, s.getbyte(0) ^ 1) })
     assert_raises(Tailchat::CryptoError) { b.open(JSON.generate(env), 'aad') }
   end
@@ -105,7 +107,10 @@ class CryptoTest < Minitest::Test
     assert_raises(Tailchat::CryptoError) { C.decrypt_file(blob.byteslice(0, blob.bytesize - 1), file) }
     # Dropping the last chunk entirely (and lying about the size) fails on the last-chunk flag.
     two = blob.byteslice(0, 2 * (C::CHUNK + 16))
-    assert_raises(Tailchat::CryptoError) { C.decrypt_file(two, file.merge('size' => 2 * C::CHUNK, 'sha256' => nil)) }
+    digest = C.b64u(C.sha256(C.sha256(bytes.byteslice(0, C::CHUNK)) + C.sha256(bytes.byteslice(C::CHUNK, C::CHUNK))))
+    error = assert_raises(Tailchat::CryptoError) { C.decrypt_file(two, file.merge('size' => 2 * C::CHUNK, 'sha256' => digest)) }
+    assert_match(/decryption failed/, error.message)
+    assert_raises(Tailchat::CryptoError) { C.decrypt_file(blob, file.merge('sha256' => nil)) }
     flipped = blob.dup
     flipped.setbyte(C::CHUNK + 20, flipped.getbyte(C::CHUNK + 20) ^ 0x80)
     assert_raises(Tailchat::CryptoError) { C.decrypt_file(flipped, file) }

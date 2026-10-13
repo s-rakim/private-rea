@@ -10,7 +10,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::api::{Chat, Client, Message};
-use crate::crypto::{b64u, chat_aad, new_message_id, random_bytes, security_code, DeviceKey, Envelope, KeyRing, OpenError, PublicJwk};
+use crate::crypto::{
+    b64u, chat_aad, new_message_id, random_bytes, security_code, DeviceKey, Envelope, KeyRing, OpenError, PublicJwk,
+};
 use crate::error::{Context, Error, Result};
 use crate::file::{decrypt_stream, encrypted_size, EncryptReader, FileKey};
 use crate::media::{candidate_names, extension_for, guess_mime, kind_for, safe_file_name, unique_path};
@@ -52,6 +54,7 @@ pub struct FileRef {
     pub name: Option<String>,
     #[serde(default)]
     pub mime: Option<String>,
+    /// Required (PROTOCOL.md §5): files without a checksum are refused.
     #[serde(default)]
     pub sha256: Option<String>,
 }
@@ -94,14 +97,28 @@ pub fn resolve_profile(opts: &Options) -> Result<(String, Option<String>, PathBu
                 .map(|entries| {
                     entries
                         .filter_map(|e| e.ok().map(|e| e.path()))
-                        .filter(|p| p.extension().is_some_and(|x| x == "json") && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
+                        .filter(|p| {
+                            p.extension().is_some_and(|x| x == "json")
+                                && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
             match found.as_slice() {
                 [one] => one.clone(),
-                [] => return Err(Error::msg("no server configured: pass --server https://<machine>.<tailnet>.ts.net (or set TAILCHAT_SERVER)")),
-                _ => return Err(Error::msg("several servers are configured: pass --server URL (or --state PATH) to pick one")),
+                [] => {
+                    return Err(Error::msg(
+                        "no server configured: pass --server https://<machine>.<tailnet>.ts.net (or set TAILCHAT_SERVER)",
+                    ))
+                }
+                many => {
+                    let names: Vec<String> =
+                        many.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
+                    return Err(Error::msg(format!(
+                        "several devices are set up ({}): pass --server URL (and --dev-user NAME) or --state PATH to pick one",
+                        names.join(", ")
+                    )));
+                }
             }
         }
     };
@@ -272,7 +289,9 @@ impl Session {
             .filter(|c| {
                 c.name.as_deref().is_some_and(|n| n.to_lowercase() == lower)
                     || (c.kind == "direct"
-                        && c.members.iter().any(|m| m.user_id != self.state.user_id && m.user_id.split('@').next() == Some(target)))
+                        && c.members
+                            .iter()
+                            .any(|m| m.user_id != self.state.user_id && m.user_id.split('@').next() == Some(target)))
             })
             .collect();
         match matches.as_slice() {
@@ -330,7 +349,11 @@ impl Session {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
         if let Some(max) = self.max_upload() {
             if encrypted_size(size) > max {
-                return Err(Error::msg(format!("{name} is {}; the server accepts at most {}", human_bytes(size), human_bytes(max))));
+                return Err(Error::msg(format!(
+                    "{name} is {}; the server accepts at most {}",
+                    human_bytes(size),
+                    human_bytes(max)
+                )));
             }
         }
         let mime = guess_mime(&name);
@@ -470,7 +493,8 @@ impl Session {
             } else {
                 let body = if m.kind == "system" {
                     let event: Value = m.payload.as_deref().and_then(|p| serde_json::from_str(p).ok()).unwrap_or(Value::Null);
-                    let users: Vec<&str> = event["users"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                    let users: Vec<&str> =
+                        event["users"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
                     format!("* {} {} {}", m.sender_id, event["event"].as_str().unwrap_or("changed the chat"), users.join(", "))
                         .trim_end()
                         .to_string()
@@ -528,9 +552,11 @@ impl Session {
                 }
             };
             let kind = content["kind"].as_str().unwrap_or("file");
-            let name = file.name.as_deref().and_then(safe_file_name).unwrap_or_else(|| {
-                format!("{kind}-{}.{}", m.id, extension_for(file.mime.as_deref().unwrap_or("")))
-            });
+            let name = file
+                .name
+                .as_deref()
+                .and_then(safe_file_name)
+                .unwrap_or_else(|| format!("{kind}-{}.{}", m.id, extension_for(file.mime.as_deref().unwrap_or(""))));
             match self.receive_file(dir, &name, &file, m.created_at) {
                 Ok(Some(path)) => {
                     summary.saved += 1;
@@ -556,6 +582,8 @@ impl Session {
 
     /// Returns `None` if an identical file is already in `dir`.
     fn receive_file(&mut self, dir: &Path, name: &str, file: &FileRef, created_at: i64) -> Result<Option<PathBuf>> {
+        let expected =
+            file.sha256.as_deref().ok_or_else(|| Error::msg("the sender gave no sha256 checksum; refusing the file"))?;
         let mut target = None;
         for candidate in candidate_names(dir, name) {
             match fs::metadata(&candidate) {
@@ -564,13 +592,8 @@ impl Session {
                     break;
                 }
                 Ok(meta) if meta.is_file() && meta.len() == file.size => {
-                    let same = match &file.sha256 {
-                        Some(expected) => {
-                            let f = fs::File::open(&candidate).ctx(candidate.display())?;
-                            crate::file::chunked_sha256(BufReader::new(f)).map(|(_, sha)| sha == *expected).unwrap_or(false)
-                        }
-                        None => true,
-                    };
+                    let f = fs::File::open(&candidate).ctx(candidate.display())?;
+                    let same = crate::file::chunked_sha256(BufReader::new(f)).is_ok_and(|(_, sha)| sha == expected);
                     if same {
                         return Ok(None);
                     }
@@ -595,7 +618,7 @@ impl Session {
         let mut progress = Progress::new(name.to_string(), file.size, self.quiet);
         let result = (|| -> Result<()> {
             let mut writer = BufWriter::with_capacity(1 << 20, out);
-            decrypt_stream(BufReader::with_capacity(1 << 18, body), &mut writer, &key, file.size, file.sha256.as_deref(), |n| {
+            decrypt_stream(BufReader::with_capacity(1 << 18, body), &mut writer, &key, file.size, Some(expected), |n| {
                 progress.update(n)
             })?;
             let out = writer.into_inner().map_err(|e| Error::msg(e.to_string()))?;
@@ -664,9 +687,8 @@ impl Session {
                     continue;
                 }
                 seen.insert(name.clone());
-                let old_enough = mtime
-                    .and_then(|t| SystemTime::now().duration_since(t).ok())
-                    .is_some_and(|age| age >= opts.settle);
+                let old_enough =
+                    mtime.and_then(|t| SystemTime::now().duration_since(t).ok()).is_some_and(|age| age >= opts.settle);
                 let p = pending.entry(name.clone()).or_insert_with(|| Pending {
                     size,
                     mtime,
@@ -714,7 +736,11 @@ impl Session {
                 }
             }
             if opts.once && pending.is_empty() {
-                return if failed_once == 0 { Ok(()) } else { Err(Error::msg(format!("{failed_once} file(s) could not be sent"))) };
+                return if failed_once == 0 {
+                    Ok(())
+                } else {
+                    Err(Error::msg(format!("{failed_once} file(s) could not be sent")))
+                };
             }
             std::thread::sleep(opts.interval);
         }

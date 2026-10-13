@@ -32,7 +32,7 @@ async function call(method, url, body, extra = {}) {
 
 async function open(message) {
   try {
-    const content = await state.ring.open(message.payload, chatAad(message.chatId, message.id));
+    const content = await state.ring.open(message.payload, chatAad(message.chatId, message.id), message.senderId);
     return { content, error: null };
   } catch (err) {
     return { content: null, error: err.code || err.message };

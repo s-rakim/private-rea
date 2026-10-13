@@ -294,7 +294,9 @@ module Tailchat
         raise CryptoError, 'Encrypted file has the wrong size' unless @received == @expected
         decrypt_chunk(@buffer, last: true)
         @buffer = ''.b
-        if @sha256 && !OpenSSL.secure_compare(Crypto.b64u(Crypto.sha256(@digests)), @sha256.to_s)
+        # sha256 is required (§5): without it a sender could hand different
+        # recipients different files under one message.
+        unless @sha256.is_a?(String) && OpenSSL.secure_compare(Crypto.b64u(Crypto.sha256(@digests)), @sha256)
           raise CryptoError, 'File checksum mismatch'
         end
         @bytes_written
@@ -328,20 +330,25 @@ module Tailchat
   class KeyRing
     attr_reader :device_id
 
+    # user_id: the tailnet user this device belongs to.
     # fetch_devices: ->(ids) { [{"id","userId","publicKey"}, …] } (GET /api/keys)
-    def initialize(device_id:, private_key:, fetch_devices: nil)
+    def initialize(device_id:, private_key:, user_id: nil, fetch_devices: nil)
       @device_id = device_id
       @private_key = private_key
       @fetch_devices = fetch_devices
       @devices = {} # id -> {"userId", "key" => OpenSSL::PKey::EC}
       @wrap_keys = {}
       @lock = Mutex.new
-      add_device('id' => device_id, 'publicKey' => Crypto.public_jwk(private_key))
+      add_device('id' => device_id, 'userId' => user_id, 'publicKey' => Crypto.public_jwk(private_key))
     end
 
     def add_device(device)
       id = device['id']
-      return if @lock.synchronize { @devices.key?(id) }
+      known = @lock.synchronize { @devices[id] }
+      if known
+        known['userId'] ||= device['userId']
+        return
+      end
       entry = { 'userId' => device['userId'], 'key' => Crypto.import_public_jwk(device['publicKey']) }
       @lock.synchronize { @devices[id] ||= entry }
     end
@@ -381,11 +388,14 @@ module Tailchat
       JSON.generate({ 'v' => 1, 'from' => @device_id, 'iv' => Crypto.b64u(iv), 'ct' => Crypto.b64u(ct), 'keys' => keys })
     end
 
-    # Returns the decrypted content Hash. Pass expect_from to require that the
-    # envelope came from that device (the server's `senderDevice`).
-    def open(payload, aad, expect_from: nil)
+    # Returns the decrypted content Hash. sender_id: the user the server says
+    # sent it; the sealing device must be one of theirs, or the server is
+    # relabelling messages (§3).
+    def open(payload, aad, sender_id: nil)
       env = Envelope.parse(payload)
-      raise CryptoError, "envelope is from #{env.from}, server says #{expect_from}" if expect_from && env.from != expect_from
+      if sender_id && (owner = device_user(env.from)) != sender_id
+        raise CryptoError, "message was sealed by device #{env.from} of #{owner.inspect}, not by #{sender_id}"
+      end
       wrapped = env.keys[@device_id] or raise NoKeyError, 'Not encrypted for this device'
       content_key = Crypto.aes_kw_unwrap(wrap_key(env.from, @device_id), Crypto.unb64u(wrapped))
       plain = Crypto.gcm_decrypt(content_key, env.iv, env.ct, aad).force_encoding(Encoding::UTF_8)

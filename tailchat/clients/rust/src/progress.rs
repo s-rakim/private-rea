@@ -48,7 +48,7 @@ impl Progress {
             return;
         }
         self.last_draw = Some(now);
-        let pct = if self.total == 0 { 100 } else { (done.saturating_mul(100) / self.total).min(100) };
+        let pct = done.saturating_mul(100).checked_div(self.total).map_or(100, |p| p.min(100));
         let width = 24;
         let filled = (pct as usize * width) / 100;
         let bar = format!("{}{}", "#".repeat(filled), "-".repeat(width - filled));
@@ -81,7 +81,13 @@ impl Progress {
         }
         let secs = self.start.elapsed().as_secs_f64();
         let clear = if self.tty { "\r\x1b[K" } else { "" };
-        eprintln!("{clear}{verb} {} ({}, {:.1}s, {}/s)", self.label, human_bytes(self.total), secs, human_bytes(self.rate(self.total)));
+        eprintln!(
+            "{clear}{verb} {} ({}, {:.1}s, {}/s)",
+            self.label,
+            human_bytes(self.total),
+            secs,
+            human_bytes(self.rate(self.total))
+        );
     }
 
     /// Clear the bar without a summary (on failure).

@@ -155,8 +155,10 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["photo.jpg", "photo (2).jpg", "photo (3).jpg"]);
-        let plain: Vec<String> =
-            candidate_names(Path::new("/d"), "README").take(2).map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        let plain: Vec<String> = candidate_names(Path::new("/d"), "README")
+            .take(2)
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
         assert_eq!(plain, ["README", "README (2)"]);
     }
 }

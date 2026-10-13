@@ -134,7 +134,11 @@ pub fn start_server(tmp: &TempDir) -> Server {
     let start = Instant::now();
     loop {
         if let Some(status) = server.child.try_wait().unwrap() {
-            panic!("the server ({}) exited with {status}:\n{}", server.label, fs::read_to_string(&server.log).unwrap_or_default());
+            panic!(
+                "the server ({}) exited with {status}:\n{}",
+                server.label,
+                fs::read_to_string(&server.log).unwrap_or_default()
+            );
         }
         if answers_401(port) {
             break;
@@ -200,10 +204,8 @@ impl Peer {
         args["cmd"] = json!(cmd);
         writeln!(self.stdin, "{args}").unwrap();
         self.stdin.flush().unwrap();
-        let line = self
-            .lines
-            .recv_timeout(Duration::from_secs(120))
-            .unwrap_or_else(|_| panic!("the JS peer did not answer {cmd}"));
+        let line =
+            self.lines.recv_timeout(Duration::from_secs(120)).unwrap_or_else(|_| panic!("the JS peer did not answer {cmd}"));
         let reply: Value = serde_json::from_str(&line).unwrap_or_else(|_| panic!("JS peer said: {line}"));
         assert_eq!(reply["id"], json!(id));
         assert!(reply["ok"] == json!(true), "JS peer {cmd} failed: {}", reply["error"].as_str().unwrap_or(&line));

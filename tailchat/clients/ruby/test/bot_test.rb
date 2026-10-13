@@ -86,6 +86,18 @@ class BotTest < Minitest::Test
     assert_equal second.seq, wait_until { c = me.chat(chat['id']); c['members'].find { |m| m['userId'] == "#{user}@dev" && m['readSeq'] >= second.seq } && second.seq }
   end
 
+  def test_bot_reconnects_and_catches_up_after_a_dropped_connection
+    bot = start(EchoBot.build(**bot_options(unique('echo'))))
+    me = client(unique('sender'))
+    chat = me.direct_chat(bot.client.user_id)
+    bot.client.instance_variable_get(:@socket).shutdown # the network drops
+    sent = me.send_text(chat['id'], 'while you were away')
+    assert_equal 'while you were away', reply_to(me, bot, sent).text
+    assert wait_until { bot.client.listening? }
+    live = me.send_text(chat['id'], 'and now?')
+    assert_equal 'and now?', reply_to(me, bot, live).text
+  end
+
   def test_own_messages_only_in_the_self_chat
     user = unique('owner')
     bot = start(EchoBot.build(**bot_options(user)))

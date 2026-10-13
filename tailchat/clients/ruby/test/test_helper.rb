@@ -46,17 +46,20 @@ module TestSupport
     server&.close
   end
 
-  # One dev-mode server for the whole run.
+  # One dev-mode server and one scratch directory for the whole run (module
+  # state: module_function copies would give each test instance its own).
+  SHARED = { lock: Mutex.new }
+
   def server
-    @server ||= TestServer.new.tap(&:start)
+    SHARED[:lock].synchronize { SHARED[:server] ||= TestServer.new.tap(&:start) }
+  end
+
+  def scratch
+    SHARED[:lock].synchronize { SHARED[:scratch] ||= Dir.mktmpdir('tailchat-rb-test-') }
   end
 
   def unique(name)
     "#{name}-#{Tailchat::Crypto.b64u(Tailchat::Crypto.random_bytes(4)).downcase.tr('_', 'x')}"[0, 32]
-  end
-
-  def scratch
-    @scratch ||= Dir.mktmpdir('tailchat-ruby-test-')
   end
 
   def client(user, **options)
@@ -91,20 +94,27 @@ module TestSupport
   end
 
   class TestServer
-    attr_reader :base, :log_path
+    attr_reader :base, :log_path, :ca_path
+
+    # tls: serve HTTPS with a throwaway CA (TAILCHAT_TLS_CERT / TAILCHAT_TLS_KEY).
+    def initialize(tls: false)
+      @tls = tls
+    end
 
     def start
       TestSupport.ensure_node_modules
-      @data = Dir.mktmpdir('tailchat-server-')
+      @data = Dir.mktmpdir('tailchat-rb-server-')
       @log_path = File.join(@data, 'server.log')
       port = TestSupport.free_port
       env = {
         'TAILCHAT_AUTH' => 'dev', 'TAILCHAT_HOST' => '127.0.0.1', 'TAILCHAT_PORT' => port.to_s,
         'TAILCHAT_DATA' => File.join(@data, 'data'),
       }
+      env.merge!(make_certificates) if @tls
+      $stderr.puts "# Tailchat server under test: #{TestSupport.server_command.join(' ')} (port #{port})"
       @pid = Process.spawn(env, *TestSupport.server_command, chdir: TestSupport::TAILCHAT_ROOT,
                                                                out: @log_path, err: @log_path, pgroup: true)
-      @base = "http://127.0.0.1:#{port}"
+      @base = "#{@tls ? 'https' : 'http'}://127.0.0.1:#{port}"
       wait_for_port(port)
       at_exit { stop }
     end
@@ -121,6 +131,42 @@ module TestSupport
     end
 
     private
+
+    # A CA and a certificate for 127.0.0.1 / localhost signed by it.
+    def make_certificates
+      ca_key = OpenSSL::PKey::EC.generate('prime256v1')
+      ca = certificate('/CN=Tailchat test CA', ca_key, ca_key.public_to_der) do |ext|
+        [ext.create_extension('basicConstraints', 'CA:TRUE', true), ext.create_extension('keyUsage', 'keyCertSign,cRLSign', true)]
+      end
+      key = OpenSSL::PKey::EC.generate('prime256v1')
+      leaf = certificate('/CN=127.0.0.1', ca_key, key.public_to_der, issuer: ca) do |ext|
+        [ext.create_extension('basicConstraints', 'CA:FALSE', true),
+         ext.create_extension('subjectAltName', 'IP:127.0.0.1,DNS:localhost'),
+         ext.create_extension('extendedKeyUsage', 'serverAuth')]
+      end
+      @ca_path = File.join(@data, 'ca.pem')
+      File.write(@ca_path, ca.to_pem)
+      File.write(File.join(@data, 'cert.pem'), leaf.to_pem)
+      File.write(File.join(@data, 'key.pem'), key.private_to_pem, perm: 0o600)
+      { 'TAILCHAT_TLS_CERT' => File.join(@data, 'cert.pem'), 'TAILCHAT_TLS_KEY' => File.join(@data, 'key.pem') }
+    end
+
+    def certificate(subject, signing_key, public_der, issuer: nil)
+      cert = OpenSSL::X509::Certificate.new
+      cert.version = 2
+      cert.serial = rand(1 << 60)
+      cert.subject = OpenSSL::X509::Name.parse(subject)
+      cert.issuer = issuer ? issuer.subject : cert.subject
+      cert.public_key = OpenSSL::PKey.read(public_der)
+      cert.not_before = Time.now - 60
+      cert.not_after = Time.now + 3600
+      ext = OpenSSL::X509::ExtensionFactory.new
+      ext.subject_certificate = cert
+      ext.issuer_certificate = issuer || cert
+      yield(ext).each { |e| cert.add_extension(e) }
+      cert.sign(signing_key, OpenSSL::Digest.new('SHA256'))
+      cert
+    end
 
     def wait_for_port(port)
       deadline = Time.now + 30
@@ -167,7 +213,6 @@ module TestSupport
 end
 
 Minitest.after_run do
-  TestSupport.instance_variable_get(:@server)&.stop
-  scratch = TestSupport.instance_variable_get(:@scratch)
-  FileUtils.rm_rf(scratch) if scratch
+  TestSupport::SHARED[:server]&.stop
+  FileUtils.rm_rf(TestSupport::SHARED[:scratch]) if TestSupport::SHARED[:scratch]
 end

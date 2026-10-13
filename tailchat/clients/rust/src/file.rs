@@ -55,10 +55,7 @@ impl FileKey {
     }
 
     pub fn from_b64u(key: &str, prefix: &str) -> Result<Self> {
-        Ok(FileKey {
-            key: Zeroizing::new(unb64u_n::<32>(key, "file key")?),
-            prefix: unb64u_n::<8>(prefix, "file prefix")?,
-        })
+        Ok(FileKey { key: Zeroizing::new(unb64u_n::<32>(key, "file key")?), prefix: unb64u_n::<8>(prefix, "file prefix")? })
     }
 
     fn cipher(&self) -> Aes256Gcm {
@@ -354,7 +351,8 @@ mod tests {
         let data = pattern(2 * CHUNK + 10);
         let (blob, sha) = encrypt(&data, &key);
         let size = data.len() as u64;
-        let fails = |blob: &[u8], size: u64, sha: Option<&str>| decrypt_stream(blob, Vec::new(), &key, size, sha, |_| {}).is_err();
+        let fails =
+            |blob: &[u8], size: u64, sha: Option<&str>| decrypt_stream(blob, Vec::new(), &key, size, sha, |_| {}).is_err();
 
         assert!(fails(&blob[..blob.len() - 1], size, None), "truncated");
         assert!(fails(&[&blob[..], b"x"].concat(), size, None), "trailing bytes");

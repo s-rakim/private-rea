@@ -2,7 +2,7 @@
 name = "tailchat-drop"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 description = "End-to-end encrypted file drop for Tailchat on your Tailscale tailnet"
 license = "UNLICENSED"
 publish = false

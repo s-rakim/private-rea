@@ -4,6 +4,7 @@
 # text frames, fragmentation, ping/pong and the close handshake. Enough for
 # Tailchat's realtime channel without any gems.
 require 'base64'
+require 'ipaddr'
 require 'openssl'
 require 'socket'
 require 'uri'
@@ -32,19 +33,20 @@ module Tailchat
     OP_PING = 0x9
     OP_PONG = 0xA
 
-    def self.connect(url, headers: {}, ssl_context: nil, timeout: 10)
-      new(url, headers: headers, ssl_context: ssl_context, timeout: timeout)
+    # cert_store: an OpenSSL::X509::Store to trust instead of the system CAs.
+    def self.connect(url, headers: {}, cert_store: nil, timeout: 10)
+      new(url, headers: headers, cert_store: cert_store, timeout: timeout)
     end
 
-    def initialize(url, headers: {}, ssl_context: nil, timeout: 10)
+    def initialize(url, headers: {}, cert_store: nil, timeout: 10)
       uri = URI(url)
       raise ArgumentError, "not a ws:// or wss:// URL: #{url}" unless %w[ws wss].include?(uri.scheme)
       @buffer = ''.b
       @write_lock = Mutex.new
       @closed = false
-      tcp = Socket.tcp(uri.host, uri.port, connect_timeout: timeout)
+      tcp = Socket.tcp(uri.hostname, uri.port, connect_timeout: timeout)
       tcp.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
-      @io = uri.scheme == 'wss' ? start_tls(tcp, uri.host, ssl_context) : tcp
+      @io = uri.scheme == 'wss' ? start_tls(tcp, uri.hostname, cert_store) : tcp
       handshake(uri, headers, timeout)
     rescue StandardError
       tcp&.close
@@ -118,14 +120,26 @@ module Tailchat
 
     private
 
-    def start_tls(tcp, host, context)
-      context ||= OpenSSL::SSL::SSLContext.new.tap(&:set_params) # verifies against the system CA store
+    # Always verifies the certificate chain and the host name.
+    def start_tls(tcp, host, cert_store)
+      ip = ip_address?(host)
+      context = OpenSSL::SSL::SSLContext.new
+      # SNI (and so verify_hostname) takes names only; post_connection_check
+      # below verifies IP addresses too.
+      context.set_params({ verify_mode: OpenSSL::SSL::VERIFY_PEER, verify_hostname: !ip, cert_store: cert_store }.compact)
       ssl = OpenSSL::SSL::SSLSocket.new(tcp, context)
-      ssl.hostname = host
+      ssl.hostname = host unless ip
       ssl.sync_close = true
       ssl.connect
-      ssl.post_connection_check(host) if context.verify_mode != OpenSSL::SSL::VERIFY_NONE
+      ssl.post_connection_check(host)
       ssl
+    end
+
+    def ip_address?(host)
+      IPAddr.new(host)
+      true
+    rescue IPAddr::Error
+      false
     end
 
     def handshake(uri, headers, timeout)

@@ -582,7 +582,9 @@ func (c *Client) Decrypt(ctx context.Context, m *Message) *Decrypted {
 		out.Err = err
 		return out
 	}
-	if sender.UserID != m.SenderID || (m.SenderDevice != nil && *m.SenderDevice != env.From) {
+	// The wrapped key authenticates env.From; the server's senderId must be
+	// that device's owner, or the server is misattributing the message.
+	if sender.UserID != m.SenderID {
 		out.Err = ErrSenderMismatch
 		return out
 	}

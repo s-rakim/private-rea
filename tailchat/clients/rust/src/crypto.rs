@@ -30,17 +30,13 @@ pub fn b64u(bytes: &[u8]) -> String {
 
 /// Decode base64url; trailing `=` padding is tolerated.
 pub fn unb64u(text: &str) -> Result<Vec<u8>> {
-    URL_SAFE_NO_PAD
-        .decode(text.trim_end_matches('='))
-        .map_err(|_| Error::msg("invalid base64url"))
+    URL_SAFE_NO_PAD.decode(text.trim_end_matches('=')).map_err(|_| Error::msg("invalid base64url"))
 }
 
 /// Decode base64url into exactly `N` bytes.
 pub fn unb64u_n<const N: usize>(text: &str, what: &str) -> Result<[u8; N]> {
     let raw = unb64u(text).map_err(|e| e.context(what))?;
-    raw.as_slice()
-        .try_into()
-        .map_err(|_| Error::msg(format!("{what}: expected {N} bytes, got {}", raw.len())))
+    raw.as_slice().try_into().map_err(|_| Error::msg(format!("{what}: expected {N} bytes, got {}", raw.len())))
 }
 
 pub fn random_bytes<const N: usize>() -> [u8; N] {
@@ -222,7 +218,7 @@ pub struct Envelope {
 impl Envelope {
     pub fn parse(payload: &str) -> Result<Self> {
         let env: Envelope = serde_json::from_str(payload).map_err(|e| Error::msg(format!("malformed envelope: {e}")))?;
-        if env.v != Value::from(1) {
+        if env.v != 1 {
             return Err(Error::msg("unsupported envelope version"));
         }
         Ok(env)
@@ -393,8 +389,7 @@ mod tests {
     #[test]
     fn aes_kw_rfc3394_256_bit_data_256_bit_kek() {
         let kek: [u8; 32] = hex("000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F").try_into().unwrap();
-        let data: [u8; 32] =
-            hex("00112233445566778899AABBCCDDEEFF000102030405060708090A0B0C0D0E0F").try_into().unwrap();
+        let data: [u8; 32] = hex("00112233445566778899AABBCCDDEEFF000102030405060708090A0B0C0D0E0F").try_into().unwrap();
         let expected = hex("28C9F404C4B810F4 CBCCB35CFB87F826 3F5786E2D80ED326 CBC7F0E71A99F43B FB988B9B7A02DD21");
         let wrapped = aes_kw_wrap(&kek, &data);
         assert_eq!(wrapped.to_vec(), expected);

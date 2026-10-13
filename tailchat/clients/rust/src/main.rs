@@ -138,11 +138,11 @@ fn main() -> ExitCode {
         Err(e) => return usage_error(&e.to_string()),
     };
     if args.flag("--help") {
-        print!("{USAGE}");
+        let _ = std::io::stdout().write_all(USAGE.as_bytes());
         return ExitCode::SUCCESS;
     }
     if args.flag("--version") {
-        println!("tailchat-drop {}", env!("CARGO_PKG_VERSION"));
+        let _ = writeln!(std::io::stdout(), "tailchat-drop {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
     let Some(command) = args.positionals.first().cloned() else {
@@ -152,6 +152,8 @@ fn main() -> ExitCode {
     let rest = &args.positionals[1..];
     match run(&command, rest, &args) {
         Ok(code) => code,
+        // The reader went away (`| head`): stop quietly, like SIGPIPE would.
+        Err(Error::BrokenPipe) => ExitCode::from(141),
         Err(e) => {
             eprintln!("error: {e}");
             if e.status() == Some(401) {
@@ -170,7 +172,8 @@ fn run(command: &str, rest: &[String], args: &Args) -> Result<ExitCode> {
         quiet: args.flag("--quiet"),
     };
     let stdout = std::io::stdout();
-    let send_options = || SendOptions { caption: args.value("--caption").map(str::to_string), as_document: args.flag("--document") };
+    let send_options =
+        || SendOptions { caption: args.value("--caption").map(str::to_string), as_document: args.flag("--document") };
     match command {
         "register" => {
             args.only(command, &["--name", "--force"])?;

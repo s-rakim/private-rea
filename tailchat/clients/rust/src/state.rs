@@ -38,7 +38,8 @@ pub fn config_dir() -> Option<PathBuf> {
 /// One state file per server (and per dev user): `chat.example.ts.net.json`.
 pub fn default_file_name(server: &str, dev_user: Option<&str>) -> String {
     let host = server.split_once("://").map_or(server, |(_, rest)| rest).trim_end_matches('/');
-    let mut slug: String = host.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
+    let mut slug: String =
+        host.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
     if let Some(user) = dev_user {
         slug.push_str("+dev-");
         slug.extend(user.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }));

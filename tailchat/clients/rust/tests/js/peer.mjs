@@ -48,7 +48,7 @@ async function history(chatId) {
   for (const m of messages) {
     if (m.kind !== 'msg' || !m.payload) continue;
     try {
-      out.push({ id: m.id, senderId: m.senderId, content: await ring.open(m.payload, chatAad(chatId, m.id)) });
+      out.push({ id: m.id, senderId: m.senderId, content: await ring.open(m.payload, chatAad(chatId, m.id), m.senderId) });
     } catch (err) {
       out.push({ id: m.id, senderId: m.senderId, error: String(err.message || err) });
     }
@@ -65,7 +65,7 @@ const commands = {
     ring = new KeyRing({
       deviceId: reg.device.id,
       privateKey: keys.privateKey,
-      fetchPublicKeys: async (ids) => (await call('GET', `/api/keys?ids=${ids.join(',')}`)).devices,
+      fetchPublicKeys: async (ids) => (await call('GET', `/api/keys?ids=${ids.map(encodeURIComponent).join(',')}`)).devices,
     });
     return { userId: reg.device.userId, deviceId: reg.device.id };
   },

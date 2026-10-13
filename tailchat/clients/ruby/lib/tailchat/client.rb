@@ -41,9 +41,10 @@ module Tailchat
     # state:       where the device key and token live (created 0600)
     # device_name: shown in the user's "Linked devices"
     # dev_user:    dev mode only: sends X-Dev-User so the server treats us as <dev_user>@dev
-    # ssl_context: an OpenSSL::SSL::SSLContext for custom CAs (defaults verify against the system store)
+    # ca_file:     a PEM file of CAs to trust instead of the system store (ts.net
+    #              certificates are publicly trusted, so you rarely need it)
     def initialize(server: ENV['TAILCHAT_SERVER'], state: nil, device_name: nil, dev_user: nil, logger: nil,
-                   ssl_context: nil, open_timeout: 10, read_timeout: 60)
+                   ca_file: nil, open_timeout: 10, read_timeout: 60)
       raise ArgumentError, 'server: is required (or set TAILCHAT_SERVER)' if server.to_s.empty?
       @server = server.to_s.chomp('/')
       @uri = URI(@server)
@@ -56,7 +57,7 @@ module Tailchat
       @state_path = File.expand_path(state || File.join(Dir.home, '.tailchat', "#{dev_user || 'device'}.json"))
       @device_name = device_name || "Tailchat Ruby on #{Socket.gethostname}"
       @logger = logger || Logger.new($stderr, progname: 'tailchat', level: Logger::INFO)
-      @ssl_context = ssl_context
+      @cert_store = ca_file && OpenSSL::X509::Store.new.tap { |store| store.add_file(File.expand_path(ca_file)) }
       @open_timeout = open_timeout
       @read_timeout = read_timeout
       @lock = Mutex.new
@@ -104,6 +105,7 @@ module Tailchat
         state = register!
         KeyRing.new(
           device_id: state['deviceId'],
+          user_id: state['userId'],
           private_key: OpenSSL::PKey.read(state['privateKey']),
           fetch_devices: ->(ids) { get("/api/keys?#{URI.encode_www_form(ids: ids.join(','))}")['devices'] },
         )
@@ -135,6 +137,11 @@ module Tailchat
       raw_messages(chat_id, before: before, after: after, limit: limit)['messages'].map { |m| open_message(m) }
     end
 
+    # One message by id, decrypted.
+    def message(message_id)
+      open_message(get("/api/messages/#{seg(message_id)}")['message'])
+    end
+
     # {"messages" => [...], "hasMore" => bool} straight from the server.
     def raw_messages(chat_id, before: nil, after: nil, limit: nil)
       query = { before: before, after: after, limit: limit }.compact
@@ -146,11 +153,9 @@ module Tailchat
     def open_message(raw)
       return Message.new(raw, client: self, content: system_content(raw)) if raw['kind'] == 'system'
       return Message.new(raw, client: self, error: Error.new('no payload (deleted, or a view-once already opened)')) unless raw['payload']
-      content = keyring.open(raw['payload'], Crypto.chat_aad(raw['chatId'], raw['id']), expect_from: raw['senderDevice'])
-      # The envelope proves which device sealed it; make sure that device
-      # belongs to the user the server says sent it.
-      owner = keyring.device_user(raw['senderDevice'])
-      raise CryptoError, "device #{raw['senderDevice']} belongs to #{owner}, not #{raw['senderId']}" if owner && owner != raw['senderId']
+      # The envelope proves which device sealed it; KeyRing#open checks that
+      # device belongs to the user the server says sent it.
+      content = keyring.open(raw['payload'], Crypto.chat_aad(raw['chatId'], raw['id']), sender_id: raw['senderId'])
       Message.new(raw, client: self, content: content)
     rescue CryptoError => e
       Message.new(raw, client: self, error: e)
@@ -190,7 +195,7 @@ module Tailchat
     # Encrypts and uploads a file; returns the content's `file` object.
     def upload_file(source, name: nil, mime: nil)
       io, size, close = open_source(source)
-      name ||= source.is_a?(String) ? File.basename(source) : 'file'
+      name ||= source.is_a?(String) || source.is_a?(Pathname) ? File.basename(source.to_s) : 'file'
       Tempfile.create(['tailchat-upload', '.bin']) do |tmp|
         tmp.binmode
         file = Crypto.encrypt_stream(io, tmp, size)
@@ -337,7 +342,7 @@ module Tailchat
 
     def open_socket
       extra = @dev_user ? { 'X-Dev-User' => @dev_user } : {}
-      ws = WebSocket.connect(ws_url, headers: extra, ssl_context: @ssl_context, timeout: @open_timeout)
+      ws = WebSocket.connect(ws_url, headers: extra, cert_store: @cert_store, timeout: @open_timeout)
       ws.send_text(JSON.generate({ type: 'auth', token: register!['token'] }))
       loop do
         text = ws.read(timeout: @open_timeout) or raise WebSocket::Error, 'timed out waiting for ready'
@@ -402,10 +407,10 @@ module Tailchat
     # Tailnet traffic goes straight to the peer: never through an HTTP proxy.
     def new_http(read_timeout: @read_timeout)
       http = Net::HTTP.new(@uri.host, @uri.port, nil)
-      http.use_ssl = @uri.scheme == 'https'
-      if http.use_ssl? && @ssl_context
-        http.cert_store = @ssl_context.cert_store if @ssl_context.cert_store
-        http.verify_mode = @ssl_context.verify_mode
+      if @uri.scheme == 'https'
+        http.use_ssl = true
+        http.verify_mode = OpenSSL::SSL::VERIFY_PEER
+        http.cert_store = @cert_store if @cert_store
       end
       http.open_timeout = @open_timeout
       http.read_timeout = read_timeout

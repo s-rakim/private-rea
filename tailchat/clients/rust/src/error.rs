@@ -9,6 +9,8 @@ pub enum Error {
     Http { status: u16, message: String },
     /// Anything else, already phrased for a human.
     Msg(String),
+    /// Our stdout was closed (`tailchat-drop history x | head`).
+    BrokenPipe,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -21,7 +23,7 @@ impl Error {
     pub fn status(&self) -> Option<u16> {
         match self {
             Error::Http { status, .. } => Some(*status),
-            Error::Msg(_) => None,
+            Error::Msg(_) | Error::BrokenPipe => None,
         }
     }
 
@@ -30,6 +32,7 @@ impl Error {
         match self {
             Error::Http { status, message } => Error::Http { status, message: format!("{what}: {message}") },
             Error::Msg(m) => Error::Msg(format!("{what}: {m}")),
+            Error::BrokenPipe => Error::BrokenPipe,
         }
     }
 }
@@ -39,6 +42,7 @@ impl fmt::Display for Error {
         match self {
             Error::Http { status, message } => write!(f, "{message} (HTTP {status})"),
             Error::Msg(m) => f.write_str(m),
+            Error::BrokenPipe => f.write_str("broken pipe"),
         }
     }
 }
@@ -47,7 +51,11 @@ impl std::error::Error for Error {}
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
-        Error::Msg(e.to_string())
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            Error::BrokenPipe
+        } else {
+            Error::Msg(e.to_string())
+        }
     }
 }
 
