@@ -171,6 +171,19 @@ communities. Channels and community management are in the web app.
 | `clients/rust` | `tailchat-drop`: send, receive and watch folders of files |
 | `clients/ruby` | bot framework with example bots |
 
+### Android app
+
+`mobile/` is an Expo app that opens your server's web app in a full-screen
+WebView, with camera, microphone and location for calls and sharing, and the
+share sheet for saving files. Install Tailscale on the phone, open Tailchat and
+enter your server address. APKs are on the repository's Releases page.
+
+The **Android APK** workflow builds it on [EAS](https://expo.dev) and publishes
+a release with the APK. Add an `EXPO_TOKEN` repository secret (an access token
+from expo.dev account settings), then run the workflow from the Actions tab or
+push a `mobile-v*` tag. To build by hand: `cd mobile && npm ci && npx eas-cli
+build --platform android --profile apk`.
+
 ## Development
 
 ```sh
