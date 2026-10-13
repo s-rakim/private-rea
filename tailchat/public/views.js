@@ -228,6 +228,40 @@ function chatsTab() {
     iconButton('close', 'Dismiss', () => A.dismissSecurityAlerts({ devices: true })),
   )) : null;
 
+  const sharing = S.history.sharing;
+  const historyBanners = A.historyAsks().map((r) => {
+    const d = A.ownDevice(r.deviceId);
+    const busy = sharing?.deviceId === r.deviceId;
+    return slots.get(`history:${r.deviceId}`, `${d.name}:${r.updatedAt}:${busy ? sharing.count : sharing ? 'other' : ''}`, () => h(
+      'div',
+      { class: 'banner' },
+      icon('history'),
+      h(
+        'div',
+        { class: 'grow' },
+        h('div', null, busy ? `Sharing chat history with ${d.name}… ${sharing.count} messages so far` : `${d.name} is asking for your chat history`),
+        busy ? null : h('div', { class: 'muted small' }, `Linked ${listTime(d.createdAt)}. Only share it if you linked that device yourself.`),
+        busy || sharing ? null : h('button', { type: 'button', class: 'link', onclick: () => O.shareHistoryDialog(r.deviceId) }, 'Review and share'),
+      ),
+      busy ? null : iconButton('close', 'Not now', () => O.declineHistoryAsk(r.deviceId)),
+    ));
+  });
+  const mine = S.history.requests.get(S.device.id);
+  const waiting = mine?.state === 'pending' && S.prefs.historyBannerHidden !== mine.updatedAt
+    ? slots.get('history-waiting', `${mine.updatedAt}:${S.deviceCodes.get(S.device.id)}`, () => h(
+      'div',
+      { class: 'banner' },
+      icon('history'),
+      h(
+        'div',
+        { class: 'grow' },
+        h('div', null, 'Waiting for your chat history'),
+        h('div', { class: 'muted small' }, `Open Tailchat on one of your other devices and tap Review and share. This device's code is ${S.deviceCodes.get(S.device.id) || '…'}.`),
+      ),
+      iconButton('close', 'Hide', () => A.savePrefs({ historyBannerHidden: mine.updatedAt })),
+    ))
+    : null;
+
   let list;
   const q = S.search.trim().toLowerCase();
   if (q) list = searchResults(q);
@@ -259,6 +293,8 @@ function chatsTab() {
     q ? null : filters,
     offline,
     linkedBanner,
+    historyBanners,
+    waiting,
     banner,
     h('div', { class: 'list' }, list),
     h('button', { type: 'button', class: 'fab', 'aria-label': 'New chat', title: 'New chat', onclick: () => openPanel('new-chat') }, icon('chat')),
@@ -719,12 +755,19 @@ function newChatPanel() {
     !q ? [
       action('group', 'New group', () => startNewGroup()),
       action('broadcast', 'New broadcast', () => newBroadcast()),
-      action('link', 'Invite someone to Tailchat', () => navigator.clipboard.writeText(location.origin).then(() => toast('Tailchat address copied. Anyone on your tailnet can open it.'))),
+      action('link', 'Invite people to Tailchat', () => O.inviteToTailnetDialog(), 'Friends and family need Tailscale to reach you'),
       userRow(S.me, () => startDirect(S.me.id), 'Message yourself'),
     ] : null,
     h('div', { class: 'list-section' }, 'Contacts on Tailchat'),
     users.map((u) => userRow(u, () => startDirect(u.id))),
-    !users.length ? h('div', { class: 'empty' }, q ? 'No contacts found' : 'Nobody else on your tailnet has opened Tailchat yet. Send them your Tailchat address.') : null,
+    !users.length
+      ? h(
+        'div',
+        { class: 'empty' },
+        q ? 'No contacts found' : 'Nobody else has opened Tailchat yet. People show up here once they have.',
+        q ? null : h('div', null, h('button', { type: 'button', class: 'link', onclick: () => O.inviteToTailnetDialog() }, 'How to invite people')),
+      )
+      : null,
   ]);
 }
 
@@ -873,7 +916,7 @@ function profilePanel() {
         S.me.avatar && S.me.avatar.startsWith('/api/avatars/') ? { label: 'Remove photo', icon: 'delete', onClick: () => api.patch('/api/me', { avatar: null }).catch((e) => toast(e.message)) } : null,
       ]),
     }, avatar(S.me, 'lg')))),
-    h('div', { class: 'card' }, h('h3', null, 'Your name'), h('div', { class: 'editable-line', onclick: () => edit('name', 'Your name', 60) }, h('span', { class: 'grow' }, S.me.name), icon('edit')), h('p', { class: 'muted small' }, 'Everyone on your tailnet who uses Tailchat sees this name.')),
+    h('div', { class: 'card' }, h('h3', null, 'Your name'), h('div', { class: 'editable-line', onclick: () => edit('name', 'Your name', 60) }, h('span', { class: 'grow' }, S.me.name), icon('edit')), h('p', { class: 'muted small' }, 'Everyone who uses this Tailchat sees this name, including people it is shared with.')),
     h('div', { class: 'card' }, h('h3', null, 'About'), h('div', { class: 'editable-line', onclick: () => edit('about', 'About', 140, true) }, h('span', { class: 'grow' }, S.me.about || 'Hey there! I am using Tailchat.'), icon('edit'))),
     h('div', { class: 'card' }, h('h3', null, 'Tailnet login'), h('div', null, S.me.id), h('p', { class: 'muted small' }, 'Tailchat knows who you are from your Tailscale identity. There are no passwords.')),
   ], 'settings');
@@ -919,18 +962,35 @@ function notificationsPanel() {
 let devicesCache = null;
 function devicesPanel() {
   if (!devicesCache) {
-    devicesCache = { list: null };
-    api.get('/api/devices').then(({ devices }) => { devicesCache.list = devices; render(); }).catch((e) => toast(e.message));
+    const cache = (devicesCache = { loaded: false });
+    A.loadHistory().then(() => { cache.loaded = true; render(); }).catch((e) => toast(e.message));
   }
-  const list = (devicesCache.list || []).filter((d) => !d.revokedAt);
+  const list = devicesCache.loaded ? S.ownDevices : [];
   return panelShell('Linked devices', [
-    h('div', { class: 'card' }, h('p', null, 'To use Tailchat on another device, open this address on it while it is connected to your tailnet:'), h('div', { class: 'invite-link' }, location.origin), h('button', { type: 'button', class: 'btn plain', onclick: () => navigator.clipboard.writeText(location.origin).then(() => toast('Address copied')) }, 'Copy address'), h('p', { class: 'muted small' }, 'Each device gets its own encryption key. Messages sent before a device was linked stay unreadable on it.')),
+    h(
+      'div',
+      { class: 'card' },
+      h('p', null, `Link a phone, tablet or computer anywhere in the world: install Tailscale on it, sign in with the same account you use here (${S.me.id}), then open this address:`),
+      h('div', { class: 'invite-link' }, location.origin),
+      h('button', { type: 'button', class: 'btn plain', onclick: () => navigator.clipboard.writeText(location.origin).then(() => toast('Address copied')) }, 'Copy address'),
+      h('p', { class: 'muted small' }, "Tailscale connects your devices over the internet wherever they are, with nothing to set up on your router. Each device gets its own encryption key, and its code below lets you check it's really yours."),
+    ),
+    h('div', { class: 'list-section' }, 'Chat history'),
+    historyCard(list),
     h('div', { class: 'list-section' }, `${list.length} active device${list.length === 1 ? '' : 's'}`),
     list.map((d) => h(
       'div',
       { class: 'row' },
       h('div', { class: 'row-icon' }, icon('devices')),
-      h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, d.name, d.id === S.device.id ? ' (this device)' : ''), h('div', { class: 'preview' }, `Linked ${listTime(d.createdAt)} · active ${listTime(d.lastActive)}`)),
+      h(
+        'div',
+        { class: 'body' },
+        h('div', { class: 'name ellipsis' }, d.name, d.id === S.device.id ? ' (this device)' : ''),
+        h('div', { class: 'preview' }, `Linked ${listTime(d.createdAt)} · active ${listTime(d.lastActive)}`),
+        S.badKeys.has(d.id)
+          ? h('div', { class: 'preview warn-text' }, "Its key isn't the one this device saw before")
+          : h('div', { class: 'preview mono' }, `Code ${S.deviceCodes.get(d.id) || '…'}`),
+      ),
       d.id !== S.device.id ? h('button', { type: 'button', class: 'btn plain small', onclick: async () => {
         if (!(await confirmDialog(`Log out ${d.name}?`, 'It will stop receiving messages and its key will no longer be used.', 'Log out', 'danger'))) return;
         await api.del(`/api/devices/${encodeURIComponent(d.id)}`).catch((e) => toast(e.message));
@@ -939,6 +999,38 @@ function devicesPanel() {
       } }, 'Log out') : null,
     )),
   ], null);
+}
+
+// What this device knows about getting history from your other devices.
+function historyCard(list) {
+  const others = list.filter((d) => d.id !== S.device.id);
+  const mine = S.history.requests.get(S.device.id);
+  const by = A.ownDevice(mine?.byDevice)?.name || 'Your other device';
+  const ask = (label) => h('button', {
+    type: 'button',
+    class: 'btn primary',
+    onclick: () => A.requestHistory().then(() => toast('Asked your other devices. Approve it on one of them.')).catch((e) => toast(e.message)),
+  }, label);
+  if (!others.length) {
+    return h('div', { class: 'card' }, h('p', { class: 'muted small' }, "Messages sent before a device was linked can't be read on it until another of your devices shares them. Link a second device to use this."));
+  }
+  if (mine?.state === 'pending') {
+    return h(
+      'div',
+      { class: 'card' },
+      h('p', null, 'Waiting for one of your other devices to share your chat history. Open Tailchat on it and tap Review and share, then check it shows this code:'),
+      h('div', { class: 'code' }, (S.deviceCodes.get(S.device.id) || '…').split(' ').map((g) => h('span', null, g))),
+      h('button', { type: 'button', class: 'btn plain', onclick: () => A.declineHistory(S.device.id).catch((e) => toast(e.message)) }, 'Cancel'),
+    );
+  }
+  return h(
+    'div',
+    { class: 'card' },
+    h('p', null, "Messages sent before this device was linked can't be read here until one of your other devices shares them. Your history stays end-to-end encrypted on the way."),
+    mine?.state === 'done' ? h('p', { class: 'muted small' }, `${by} shared ${mine.shared} message${mine.shared === 1 ? '' : 's'} ${listTime(mine.updatedAt)}.`) : null,
+    mine?.state === 'declined' && mine.byDevice !== S.device.id ? h('p', { class: 'muted small' }, `${by} didn't share ${listTime(mine.updatedAt)}.`) : null,
+    ask(mine ? 'Ask again' : 'Get chat history from my other devices'),
+  );
 }
 
 function helpPanel() {

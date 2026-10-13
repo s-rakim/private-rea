@@ -424,6 +424,15 @@ function messageRow(m, chat, flags) {
       : res.code === 'KEY_CHANGED' ? "This message's encryption key doesn't match the one this device saw before, so it was not opened."
         : "This message couldn't be decrypted.";
     parts.push(h('div', { class: 'text undecryptable', title: res.error }, icon('lock'), why));
+    if (m.viewOnce && res.code === 'NO_KEY') {
+      parts.push(h('div', { class: 'muted small' }, "View once messages aren't sent to devices you link later."));
+    } else if (historyOffer(res)) {
+      parts.push(h('button', {
+        type: 'button',
+        class: 'link small',
+        onclick: () => A.requestHistory().then(() => toast('Asked your other devices for your chat history. Approve it on one of them.')).catch((e) => toast(e.message)),
+      }, 'Get it from your other devices'));
+    }
   } else if (c.type === 'deleted') {
     parts.push(h('div', { class: 'text deleted' }, icon('block'), mine ? 'You deleted this message' : 'This message was deleted'));
   } else if (c.type === 'opened' || (m.viewOnce && !mine)) {
@@ -518,6 +527,11 @@ function messageRow(m, chat, flags) {
   );
 }
 
+// Whether to offer asking your other devices for an unreadable message.
+function historyOffer(res) {
+  return res?.code === 'NO_KEY' && S.ownDevices.some((d) => d.id !== S.device.id) && S.history.requests.get(S.device.id)?.state !== 'pending';
+}
+
 function rowSig(m, chat, flags) {
   const res = A.contentOf(m);
   const c = res?.ok;
@@ -525,7 +539,7 @@ function rowSig(m, chat, flags) {
   const fs = fid ? S.files.get(fid) : null;
   const up = S.uploads.get(m.id);
   return JSON.stringify([
-    A.contentKey(m), res ? (res.ok ? 1 : res.error ? 2 : 0) : 0, m.kind === 'system' ? m.payload : 0,
+    A.contentKey(m), res ? (res.ok ? 1 : res.error ? 2 : 0) : 0, m.kind === 'system' ? m.payload : 0, historyOffer(res),
     m.reactions, m.votes, m.starred, m.opened, m.pending, m.failed, m.deletedAt, m.payload === null,
     A.isMe(m.senderId) ? A.tickState(m, chat) : 0,
     fs ? [!!fs.url, fs.progress === undefined ? -1 : Math.round(fs.progress * 40), fs.error || ''] : 0,
@@ -690,6 +704,7 @@ function chatMenuItems(chat) {
       onClick: () => (muted ? api.patch(`/api/chats/${encodeURIComponent(chat.id)}/prefs`, { mutedUntil: 0 }).catch((e) => toast(e.message)) : O.muteDialog(chat)),
     },
     !chat.me.left && (!A.isGroupish(chat) || !chat.adminsOnlyEdit || chat.me.role === 'admin') ? { label: 'Disappearing messages', icon: 'timer', onClick: () => O.disappearingDialog(chat) } : null,
+    { label: 'Export chat', icon: 'download', onClick: () => O.exportChatDialog(chat) },
     { label: 'Clear chat', icon: 'delete', onClick: () => clearChat(chat) },
     other && !self ? { label: other.blocked ? `Unblock ${other.name}` : `Block ${other.name}`, icon: 'block', danger: !other.blocked, onClick: () => blockUser(other) } : null,
     A.isGroupish(chat) && !chat.me.left ? { label: exitLabel(chat), icon: 'exit', danger: true, onClick: () => exitGroup(chat) } : null,
@@ -779,10 +794,16 @@ function header(chat) {
 }
 
 const fetchedPins = new Map();
+let pinsEpoch = 0;
 
 function pinnedBar(chat) {
   const id = chat.pinnedMessage;
   if (!id) return null;
+  if (pinsEpoch !== S.history.epoch) {
+    // Chat history arrived: pinned messages may open now.
+    fetchedPins.clear();
+    pinsEpoch = S.history.epoch;
+  }
   let m = A.box(chat.id).list.find((x) => x.id === id) || fetchedPins.get(id);
   if (!m && !fetchedPins.has(id)) {
     fetchedPins.set(id, null);

@@ -2,7 +2,7 @@
 // views.js; this module owns the data and everything that talks to the server.
 import { Api, ApiError, Realtime, kvGet, kvSet } from './api.js';
 import { CallManager } from './calls.js';
-import { KeyRing, callAad, chatAad, decryptFile, encryptFile, generateDeviceKeys, newMessageId, statusAad } from './crypto.js';
+import { KeyRing, callAad, chatAad, codeFromFingerprint, decryptFile, deviceCode, encryptFile, generateDeviceKeys, keyFingerprint, newMessageId, statusAad } from './crypto.js';
 import { describeMedia, kindFor } from './media.js';
 import { toast } from './ui.js';
 
@@ -38,6 +38,10 @@ export const S = {
   editing: null,
   highlight: null,
   uploads: new Map(), // temp message id -> progress
+  ownDevices: [], // this account's linked devices
+  deviceCodes: new Map(), // deviceId -> code of the key this device actually uses for it
+  badKeys: new Set(), // own devices the server lists with a key other than the pinned one
+  history: { requests: new Map(), sharing: null, loaded: false, epoch: 0 }, // chat history between your devices
   prefs: loadPrefs(),
 };
 
@@ -115,6 +119,7 @@ export async function boot(setStatus) {
       api.token = null;
     }
   }
+  const fresh = !stored;
   if (!stored) {
     setStatus('Creating encryption keys for this device…');
     const keys = await generateDeviceKeys();
@@ -149,9 +154,15 @@ export async function boot(setStatus) {
     onPin: S.savePins,
   });
   await S.ring.addPublicKey(stored.deviceId, stored.publicJwk, S.me.id);
+  // This device's code comes from the key it holds, never from the server.
+  S.deviceCodes.set(stored.deviceId, await deviceCode(stored.publicJwk));
   setStatus('Loading your chats…');
   await Promise.all([loadUsers(), loadChats(), loadStatuses(), loadCalls()]);
   await checkOwnDevices().catch((err) => console.warn('device check failed', err));
+  await loadHistory().catch((err) => console.warn('history requests failed', err));
+  // A newly linked device asks your other devices for the history it can't
+  // read; one of them has to say yes.
+  if (fresh && S.ownDevices.some((d) => d.id !== S.device.id)) requestHistory().catch(() => {});
   realtime = new Realtime(api, {
     onEvent: handleEvent,
     onOpen: catchUp,
@@ -212,7 +223,7 @@ export async function loadCalls() {
 
 async function catchUp() {
   try {
-    await Promise.all([loadUsers(), loadChats(), loadStatuses()]);
+    await Promise.all([loadUsers(), loadChats(), loadStatuses(), loadHistory()]);
     for (const [chatId, box] of S.msgs) {
       if (!box.loaded || !S.chats.has(chatId)) continue;
       const last = box.list.filter((m) => !m.pending).at(-1);
@@ -312,15 +323,20 @@ async function sealFor(chat, content, messageId) {
 export async function decryptMessage(m) {
   if (m.kind !== 'msg' || !m.payload || m.deletedAt) return;
   const key = contentKey(m);
-  if (S.content.has(key)) return;
-  S.content.set(key, { pending: true });
+  const cached = S.content.get(key);
+  // History shared since is worth another try, even while a try without it
+  // is still running.
+  if (cached && !(m.historyKey && (cached.code === 'NO_KEY' || (cached.pending && !cached.history)))) return;
+  const attempt = { pending: true, history: !!m.historyKey };
+  S.content.set(key, attempt);
+  let result;
   try {
     const chat = await chatOf(m.chatId);
-    const content = isChannel(chat) ? channelPost(m.payload) : await S.ring.open(m.payload, chatAad(m.chatId, m.id), m.senderId);
-    S.content.set(key, { ok: content });
+    result = { ok: isChannel(chat) ? channelPost(m.payload) : await S.ring.open(m.payload, chatAad(m.chatId, m.id), m.senderId, m.historyKey) };
   } catch (err) {
-    S.content.set(key, { error: err.message, code: err.code });
+    result = { error: err.message, code: err.code };
   }
+  if (S.content.get(key) === attempt) S.content.set(key, result);
   render();
 }
 
@@ -529,6 +545,168 @@ export function dismissSecurityAlerts({ users = [], devices = false } = {}) {
   const left = { ...(a.users || {}) };
   for (const u of users) delete left[u];
   savePrefs({ securityAlerts: { users: left, devices: devices ? [] : a.devices || [] } });
+}
+
+// ---------- chat history between your own devices (PROTOCOL.md §9) ----------
+
+export async function loadHistory() {
+  const [{ requests }, { devices }] = await Promise.all([api.get('/api/history/requests'), api.get('/api/devices')]);
+  S.ownDevices = devices.filter((d) => !d.revokedAt && d.userId === S.me.id);
+  // Another device's code is computed from the key this device pinned for
+  // it, which is the key history would be encrypted to. If the server's
+  // list shows a different key, sharing with that device is refused.
+  for (const d of S.ownDevices) {
+    if (d.id === S.device.id) continue;
+    try {
+      await S.ring.ownDevice(d.id);
+      const pin = S.pins.get(d.id);
+      if (!pin) throw new Error('not pinned');
+      S.deviceCodes.set(d.id, codeFromFingerprint(pin.fp));
+      if (pin.fp !== (await keyFingerprint(d.publicKey))) S.badKeys.add(d.id);
+    } catch (err) {
+      S.deviceCodes.delete(d.id);
+      if (err.code === 'KEY_CHANGED') S.badKeys.add(d.id);
+    }
+  }
+  const before = S.history.requests.get(S.device.id);
+  S.history.requests = new Map(requests.map((r) => [r.deviceId, r]));
+  const now = S.history.requests.get(S.device.id);
+  // An answer that came while this device was offline.
+  if (S.history.loaded && now) ownRequestChanged(before, now);
+  S.history.loaded = true;
+  render();
+}
+
+export const ownDevice = (id) => S.ownDevices.find((d) => d.id === id);
+
+// Requests from your other devices that this one can answer.
+export function historyAsks() {
+  return [...S.history.requests.values()].filter((r) => r.state === 'pending' && r.deviceId !== S.device.id && ownDevice(r.deviceId));
+}
+
+export async function requestHistory() {
+  const { request } = await api.post('/api/history/request');
+  S.history.requests.set(request.deviceId, request);
+  render();
+  return request;
+}
+
+export async function declineHistory(deviceId) {
+  await api.del(`/api/history/requests/${encodeURIComponent(deviceId)}`);
+}
+
+function historyChanged(r) {
+  if (!r?.deviceId) return;
+  const before = S.history.requests.get(r.deviceId);
+  if (r.state === 'gone') S.history.requests.delete(r.deviceId);
+  else S.history.requests.set(r.deviceId, r);
+  if (!ownDevice(r.deviceId) && r.state !== 'gone') loadHistory().catch(() => {});
+  if (r.deviceId === S.device.id) ownRequestChanged(before, r);
+}
+
+function ownRequestChanged(before, r) {
+  if (before?.state === r.state && before?.updatedAt === r.updatedAt) return;
+  const by = ownDevice(r.byDevice)?.name || 'your other device';
+  if (r.state === 'done') {
+    toast(r.shared ? `Chat history arrived from ${by}` : `${by} had no older messages to share`, 6000);
+    reloadHistory();
+  } else if (r.state === 'declined' && r.byDevice !== S.device.id) {
+    toast(`${by} didn't share chat history`, 6000);
+  }
+}
+
+// Fetches the messages already on screen again, now that more of them can
+// be opened here. Drafts and unsent messages stay where they are.
+export function reloadHistory() {
+  S.history.epoch++;
+  S.starred = null;
+  loadChats().catch(() => {});
+  for (const [chatId, b] of S.msgs) {
+    if (b.loaded) refetchBox(chatId).catch(() => {});
+  }
+}
+
+async function refetchBox(chatId) {
+  const sent = box(chatId).list.filter((m) => !m.pending);
+  if (!sent.length) return;
+  const last = sent.at(-1).seq;
+  let after = sent[0].seq - 1;
+  while (after < last) {
+    const { messages, hasMore } = await api.get(`/api/chats/${encodeURIComponent(chatId)}/messages?after=${after}&limit=200`);
+    for (const m of messages) if (m.seq <= last) upsertMessage(m);
+    if (!hasMore || !messages.length) break;
+    after = messages.at(-1).seq;
+  }
+  render();
+}
+
+// Re-encrypts the key of every message this device can read for another
+// device of yours that asked for it. onProgress(count) as it goes.
+// code: the device code the user compared, so the history goes to exactly
+// that key.
+export async function shareHistory(deviceId, code, onProgress) {
+  if (S.history.sharing) throw new Error('Already sharing chat history');
+  const target = ownDevice(deviceId);
+  if (!target || deviceId === S.device.id) throw new Error('That device is not one of yours');
+  await S.ring.ownDevice(deviceId);
+  const pin = S.pins.get(deviceId);
+  if (S.badKeys.has(deviceId) || !pin || codeFromFingerprint(pin.fp) !== code) {
+    throw new Error("That device's key doesn't match the code you checked, so nothing was shared");
+  }
+  S.history.sharing = { deviceId, count: 0 };
+  render();
+  let batch = [];
+  const flush = async (done = false) => {
+    await api.post('/api/history/keys', { deviceId, keys: batch, done });
+    batch = [];
+  };
+  try {
+    for (const chat of [...S.chats.values()].filter((c) => !isChannel(c))) {
+      let before = 0;
+      for (;;) {
+        const { messages, hasMore } = await api.get(`/api/chats/${encodeURIComponent(chat.id)}/messages?limit=200${before ? `&before=${before}` : ''}`);
+        for (const m of messages) {
+          if (m.kind !== 'msg' || !m.payload || m.deletedAt || m.viewOnce) continue;
+          try {
+            if (JSON.parse(m.payload).keys?.[deviceId]) continue; // it can read this one already
+            batch.push({ messageId: m.id, key: await S.ring.reshare(m.payload, chatAad(m.chatId, m.id), m.senderId, m.historyKey, deviceId) });
+            S.history.sharing.count++;
+          } catch {
+            // not readable here either, or not genuine: skipped
+          }
+          if (batch.length >= 200) await flush();
+        }
+        onProgress?.(S.history.sharing.count);
+        render();
+        if (!hasMore || !messages.length) break;
+        before = messages[0].seq;
+      }
+    }
+    await flush(true);
+    return S.history.sharing.count;
+  } finally {
+    S.history.sharing = null;
+    render();
+  }
+}
+
+// One message's content for an export: from the cache, or opened now.
+export async function readMessage(m) {
+  const known = contentOf(m);
+  if (known?.ok || (known?.error && !(known.code === 'NO_KEY' && m.historyKey))) return known;
+  try {
+    const chat = await chatOf(m.chatId);
+    return { ok: isChannel(chat) ? channelPost(m.payload) : await S.ring.open(m.payload, chatAad(m.chatId, m.id), m.senderId, m.historyKey) };
+  } catch (err) {
+    return { error: err.message, code: err.code };
+  }
+}
+
+// Decrypts an attachment without keeping it around.
+export async function fileBlob(file) {
+  const hit = S.files.get(file.id);
+  if (hit?.blob) return hit.blob;
+  return decryptFile(await api.download(file.id), file, safeMime(file.mime));
 }
 
 // Encrypts and sends. `content` is the plaintext message (PROTOCOL.md §4).
@@ -819,6 +997,7 @@ function handleEvent(e) {
       break;
     case 'devices':
       if (S.knownDevices.has(e.userId)) checkDevicesOf(e.userId).catch(() => {});
+      if (isMe(e.userId)) loadHistory().catch(() => {});
       for (const [chatId, chat] of S.chats) if (chat.members.some((m) => m.userId === e.userId)) S.chatDevices.delete(chatId);
       break;
     case 'status':
@@ -830,6 +1009,9 @@ function handleEvent(e) {
     case 'call':
       calls.handle(e).catch((err) => toast(err.message));
       if (e.action === 'ended') loadCalls();
+      break;
+    case 'history':
+      historyChanged(e.request);
       break;
     case 'auth-failed':
       toast('This device was logged out. Reload to link it again.', 10_000);

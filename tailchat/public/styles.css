@@ -492,3 +492,12 @@ button.e2e-note { font: inherit; font-size: 12.5px; cursor: pointer; }
 .empty.small svg, .muted.small svg { width: 12px; height: 12px; fill: currentColor; vertical-align: -1px; }
 .security-bar { background: color-mix(in srgb, #e9a100 14%, var(--panel)); }
 .security-bar svg { fill: #e9a100; }
+
+/* inviting people, linked devices and chat history */
+.steps { list-style: none; padding: 0; margin: 12px 0; display: grid; gap: 10px; }
+.steps li { display: flex; gap: 10px; align-items: flex-start; }
+.steps .step { flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--primary); color: #fff; font-size: 12px; font-weight: 600; display: grid; place-items: center; }
+.invite-link.inline { display: inline; padding: 2px 6px; margin: 0; }
+.preview.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+button.link.small { font-size: 12.5px; padding: 0; margin-top: 4px; background: none; border: 0; text-align: left; }
+.preview.warn-text { color: #c62828; }

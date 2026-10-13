@@ -1,8 +1,9 @@
 // Dialogs and full-screen layers shared by the screens: pickers, message
 // info, media viewer, status viewer and composer, calls, group invites.
-import { S, api, calls, render, nameOf, isMe, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel } from './app.js';
+import { S, api, calls, render, nameOf, isMe, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, ownDevice, shareHistory, declineHistory } from './app.js';
 import { h, icon, iconButton, avatar, dialog, toast, viewer, timeOf, listTime, dayLabel, fileSize, duration, reconcile } from './ui.js';
 import { securityCode } from './crypto.js';
+import { exportChat } from './export.js';
 import { kindFor, safeName } from './media.js';
 
 // ---------- small helpers for content from other people ----------
@@ -73,7 +74,7 @@ export function pickUsers({ title, exclude = [], multiple = true, okLabel = 'Don
           else chosen.add(u.id);
           draw();
         }))
-        : [h('div', { class: 'empty' }, users.length ? 'No matches' : 'Nobody else on your tailnet has opened Tailchat yet. Share your Tailchat address with them.')]);
+        : [h('div', { class: 'empty' }, users.length ? 'No matches' : 'Nobody else has opened Tailchat yet. See New chat › Invite people to Tailchat.')]);
       reconcile(chips, [...chosen].map((id) => h('span', { class: 'chip' }, nameOf(id))));
       const ok = d?.box.querySelector('footer .btn.primary');
       if (ok) ok.disabled = !chosen.size;
@@ -252,6 +253,130 @@ export async function securityCodeDialog(chat) {
       { label: 'Copy code', onClick: () => navigator.clipboard.writeText(code).then(() => toast('Code copied')) },
       { label: 'Done', kind: 'primary', onClick: (close) => close() },
     ],
+  });
+}
+
+// ---------- people, devices and chat history ----------
+
+const ADMIN_MACHINES = 'https://login.tailscale.com/admin/machines';
+
+// Tailchat only answers inside your tailnet, so inviting someone means
+// giving them Tailscale access to this one machine.
+export function inviteToTailnetDialog() {
+  const step = (n, ...children) => h('li', null, h('span', { class: 'step' }, String(n)), h('div', null, ...children));
+  dialog({
+    title: 'Invite people to Tailchat',
+    content: [
+      h('p', null, 'Tailchat only works inside your tailnet, so the people you want to chat with need Tailscale first. Once they open Tailchat they show up under New chat, and you can message them, call them and add them to groups.'),
+      h('p', { class: 'muted small' }, 'Only a Tailscale admin, usually whoever set up Tailchat, can share the machine. If that isn\'t you, send them these steps.'),
+      h(
+        'ol',
+        { class: 'steps' },
+        step(1, 'Open the ', h('a', { href: ADMIN_MACHINES, target: '_blank', rel: 'noopener noreferrer' }, 'Tailscale admin console'), ' and find this Tailchat machine.'),
+        step(2, 'Open its ⋯ menu, choose ', h('b', null, 'Share'), ', and send them the share link or enter their email. They can reach this one machine and nothing else on your tailnet.'),
+        step(3, 'They install Tailscale (free), sign in with any account and accept the share.'),
+        step(4, 'They open ', h('span', { class: 'invite-link inline' }, location.origin), ' and Tailchat sets them up.'),
+      ),
+      h('p', { class: 'muted small' }, "Everyone who uses this Tailchat, including people you share it with, can see each other's names, photos and status updates and can message each other. To add someone to your whole tailnet instead, use Users › Invite users in the admin console."),
+    ],
+    actions: [
+      { label: 'Copy Tailchat address', onClick: () => navigator.clipboard.writeText(location.origin).then(() => toast('Tailchat address copied')) },
+      { label: 'Done', kind: 'primary', onClick: (close) => close() },
+    ],
+  });
+}
+
+const codeBlock = (code) => h('div', { class: 'code' }, (code || '…').split(' ').map((g) => h('span', null, g)));
+
+// Another device of yours asked for the chat history it can't read.
+export function shareHistoryDialog(deviceId) {
+  const d = ownDevice(deviceId);
+  if (!d) return;
+  // The code is worked out from the key this device would encrypt to.
+  const code = S.deviceCodes.get(deviceId);
+  if (S.badKeys.has(deviceId) || !code) {
+    dialog({
+      title: "Can't share chat history",
+      content: [
+        h('p', null, S.badKeys.has(deviceId)
+          ? `The key Tailchat's server lists for ${d.name} isn't the one this device saw for it, so its code can't be trusted. Nothing will be shared with it.`
+          : `This device couldn't check ${d.name}'s key. Make sure you're online and try again.`),
+        h('p', { class: 'muted' }, "If you didn't link that device, log it out from Linked devices."),
+      ],
+      actions: [{ label: 'OK', kind: 'primary', onClick: (close) => close() }],
+    });
+    return;
+  }
+  dialog({
+    title: 'Share chat history?',
+    content: [
+      h('p', null, `${d.name}, linked ${listTime(d.createdAt)}, is asking for the messages it can't read yet.`),
+      h('div', { class: 'card center' }, icon('shield'), codeBlock(code)),
+      h('p', null, "Check that this code matches the one shown on that device. If it does, this device re-encrypts your chat history for it. It stays end-to-end encrypted: Tailchat's server can't read it."),
+      h('p', { class: 'muted' }, "If the codes don't match, or you didn't link that device, don't share. Log it out from Linked devices instead. View once messages and channels aren't shared."),
+    ],
+    actions: [
+      { label: 'Not now', onClick: (close) => { close(); declineHistoryAsk(deviceId); } },
+      {
+        label: 'Share',
+        kind: 'primary',
+        onClick: (close) => {
+          close();
+          shareHistory(deviceId, code)
+            .then((n) => toast(n ? `Shared ${n} message${n === 1 ? '' : 's'} with ${d.name}` : `No older messages to share with ${d.name}`, 5000))
+            .catch((err) => toast(err.message));
+        },
+      },
+    ],
+  });
+}
+
+export function declineHistoryAsk(deviceId) {
+  declineHistory(deviceId)
+    .then(() => toast('Not shared. That device can ask again from Linked devices.'))
+    .catch((err) => toast(err.message));
+}
+
+// ---------- export chat ----------
+
+export function exportChatDialog(chat) {
+  dialog({
+    title: 'Export chat',
+    content: [
+      h('p', null, `Save your messages with ${chatTitle(chat)} as a file you can keep or send somewhere else.`),
+      h('p', { class: 'muted' }, "The exported file isn't encrypted, so anyone you give it to can read it. Including media can make it large."),
+    ],
+    actions: [
+      { label: 'Cancel', onClick: (close) => close() },
+      { label: 'Without media', onClick: (close) => { close(); runExport(chat, false); } },
+      { label: 'Include media', kind: 'primary', onClick: (close) => { close(); runExport(chat, true); } },
+    ],
+  });
+}
+
+async function runExport(chat, media) {
+  const status = h('p', null, 'Loading messages…');
+  let cancelled = false;
+  const progress = dialog({ title: 'Exporting chat', content: status, onClose: () => { cancelled = true; } });
+  let result;
+  try {
+    result = await exportChat(chat, { media, onProgress: (t) => { status.textContent = t; } });
+  } catch (err) {
+    progress.close();
+    toast(err.message);
+    return;
+  }
+  if (cancelled) return;
+  progress.close();
+  const file = new File([result.blob], result.name, { type: result.blob.type });
+  const canShare = typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] });
+  dialog({
+    title: 'Chat exported',
+    content: [h('p', null, `${result.name} (${fileSize(result.blob.size)})`)],
+    actions: [
+      canShare ? { label: 'Share…', onClick: () => navigator.share({ files: [file], title: result.name }).catch(() => {}) } : null,
+      { label: 'Save', kind: 'primary', onClick: (close) => { close(); saveBlob(result.blob, result.name); } },
+    ].filter(Boolean),
   });
 }
 
@@ -565,7 +690,7 @@ export function textStatusDialog() {
   }));
   dialog({
     title: 'Text status',
-    content: [area, swatches, h('p', { class: 'muted' }, `Status updates are end-to-end encrypted and disappear after 24 hours. Everyone using Tailchat on your tailnet can see them, except people you've blocked.`)],
+    content: [area, swatches, h('p', { class: 'muted' }, `Status updates are end-to-end encrypted and disappear after 24 hours. Everyone who uses this Tailchat can see them, including people it's shared with, except people you've blocked.`)],
     actions: [
       { label: 'Cancel', onClick: (close) => close() },
       {
