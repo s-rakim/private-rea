@@ -79,10 +79,21 @@ func New(opts Options) (*Client, error) {
 	}
 	hc := opts.HTTPClient
 	if hc == nil {
-		hc = &http.Client{}
+		hc = DefaultHTTPClient()
 	}
 	return &Client{base: u, devUser: opts.DevUser, http: hc, devices: map[string]*Device{}}, nil
 }
+
+// DefaultHTTPClient connects directly, ignoring HTTP(S)_PROXY: the server is
+// on the tailnet, and tailnet traffic should not be handed to a proxy.
+func DefaultHTTPClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = nil
+	return &http.Client{Transport: tr}
+}
+
+// Server is the normalised server URL.
+func (c *Client) Server() string { return c.base.String() }
 
 // Use loads a registered device's credentials.
 func (c *Client) Use(st *State) error {

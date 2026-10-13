@@ -204,3 +204,11 @@ test('security codes are stable and order independent', async () => {
   assert.match(one, /^(\d{5} ){11}\d{5}$/);
   assert.equal(await securityCode([...devices].reverse()), one);
 });
+
+test('a single message can be fetched by id', async () => {
+  const { chat } = await alice.call('POST', '/api/chats/direct', { userId: 'bob@dev' });
+  const sent = await send(alice, chat.id, { type: 'text', text: 'one' });
+  const { message } = await bob.call('GET', `/api/messages/${sent.id}`);
+  assert.equal(message.seq, sent.seq);
+  await assert.rejects(carol.call('GET', `/api/messages/${sent.id}`), (e) => e.status === 404);
+});

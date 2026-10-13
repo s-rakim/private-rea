@@ -150,6 +150,7 @@ type Decrypted struct {
 type Event struct {
 	Type    string          `json:"type"`
 	Message *Message        `json:"message,omitempty"`
+	Chat    *Chat           `json:"chat,omitempty"`
 	ChatID  string          `json:"chatId,omitempty"`
 	ID      string          `json:"id,omitempty"`
 	UserID  string          `json:"userId,omitempty"`

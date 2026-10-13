@@ -205,6 +205,11 @@ impl Client {
         Self::json(resp, &format!("POST {path}"))
     }
 
+    pub fn delete(&self, path: &str) -> Result<()> {
+        let resp = self.decorate(self.agent.delete(self.url(path))).call()?;
+        Self::check(resp, &format!("DELETE {path}")).map(|_| ())
+    }
+
     // ---------- endpoints ----------
 
     pub fn register(&self, name: &str, public_key: &PublicJwk) -> Result<Registered> {

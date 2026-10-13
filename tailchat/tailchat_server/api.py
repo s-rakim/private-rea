@@ -952,6 +952,13 @@ class Api:
             self.broadcast_chat(chat["id"])
             return {"message": self.message_view(m, uid)}
 
+        @r.add("GET", "/api/messages/:id")
+        async def get_message(ctx: Context):
+            m = self.require_message(ctx.params["id"], ctx.user["id"])
+            if self.db.get("SELECT 1 FROM hidden WHERE user_id = ? AND message_id = ?", ctx.user["id"], m["id"]):
+                fail(404, "No such message")
+            return {"message": self.message_view(m, ctx.user["id"])}
+
         @r.add("PUT", "/api/messages/:id")
         async def edit(ctx: Context):
             body = await read_json(ctx.request, MAX_PAYLOAD + 64 * 1024)

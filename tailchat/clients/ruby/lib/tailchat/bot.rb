@@ -32,6 +32,16 @@ module Tailchat
 
     attr_reader :client, :logger
 
+    # Bot.new options from the environment: TAILCHAT_SERVER, TAILCHAT_DEV_USER
+    # (dev mode only) and TAILCHAT_STATE (default ~/.tailchat/<slug>.json).
+    def self.env_options(slug)
+      {
+        server: ENV.fetch('TAILCHAT_SERVER', nil),
+        dev_user: ENV['TAILCHAT_DEV_USER'].to_s.empty? ? nil : ENV['TAILCHAT_DEV_USER'],
+        state: ENV['TAILCHAT_STATE'].to_s.empty? ? File.join(Dir.home, '.tailchat', "#{slug}.json") : ENV['TAILCHAT_STATE'],
+      }
+    end
+
     # handle_own: what to do with messages your own tailnet user sends from
     # other devices. Bots run as a real user (tagged devices have no identity),
     # so the default, :self_chat, only answers them in your "message yourself"

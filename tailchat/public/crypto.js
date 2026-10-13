@@ -172,7 +172,7 @@ export async function decryptFile(encrypted, file, mime = 'application/octet-str
     digests.push(new Uint8Array(await subtle.digest('SHA-256', pt)));
     parts.push(pt);
   }
-  if (file.sha256 && b64u(await chunkedDigest(digests)) !== file.sha256) throw new Error('File checksum mismatch');
+  if (!file.sha256 || b64u(await chunkedDigest(digests)) !== file.sha256) throw new Error('File checksum mismatch');
   return new Blob(parts, { type: mime });
 }
 

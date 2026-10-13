@@ -385,14 +385,10 @@ namespace {
 struct SinkState {
   int fd;
   std::string path;
-  uint64_t written = 0;
-  Progress* progress;
-  uint64_t total;
 };
 void sink_to_fd(void* user, const uint8_t* data, size_t len) {
   auto* s = static_cast<SinkState*>(user);
   write_all(s->fd, data, len, s->path);
-  s->written += len;
 }
 }  // namespace
 
@@ -419,7 +415,7 @@ DownloadResult Client::download(const Json& message, const std::string& outDir, 
   int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
   if (fd < 0) sys_fail("create " + tmp);
   const uint64_t total = encrypted_size(static_cast<uint64_t>(size));
-  SinkState sink{fd, tmp, 0, &progress, total};
+  SinkState sink{fd, tmp};
   try {
     FileDecryptor dec(unb64u(file.str("key")), unb64u(file.str("prefix")), static_cast<uint64_t>(size), file.str("sha256"),
                       sink_to_fd, &sink);

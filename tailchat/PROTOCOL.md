@@ -13,7 +13,8 @@ The server is only reachable on your tailnet. There are no passwords:
 | `direct` | The server listens on its Tailscale IP and asks the local `tailscaled` (LocalAPI `whois`) which user owns the connecting address. Requests from outside `100.64.0.0/10` / `fd7a:115c:a1e0::/48` are refused. |
 | `dev` | Local testing only, loopback only. The user comes from the `tailchat_dev_user` cookie (set at `/dev/login`) or an `X-Dev-User` header. |
 
-Your Tailscale login name (`alice@example.com`) is your user id. Tagged
+Your Tailscale login name (`alice@example.com`) is your user id (in dev mode,
+`NAME@dev`). The first request from a new tailnet user creates their account. Tagged
 devices have no user identity and cannot use Tailchat.
 
 Each browser or client is a **device**. A device registers a public key once
@@ -73,7 +74,10 @@ A message's `payload` is this JSON object, serialised to a string:
   with `GET /api/keys?ids=<from>` (logged-out devices are still listed), derive
   the wrap key, unwrap, then open `ct`. A device that was linked after a
   message was sent has no entry and can't read it — the same as WhatsApp.
-* Clients should show a contact's **security code** so people can compare it
+* Your own sends also come back to you over the WebSocket (other devices of
+  yours need them); match them by message id.
+* Clients should show a contact's **security code** (computed over that
+  contact's devices only) so people can compare it
   in person. For each device: `d = b64u(SHA-256(x || y))` over the raw 32-byte
   coordinates. Sort the `d` strings, join them with no separator, and hash:
   `h = SHA-256(UTF-8 of the joined string)`. Group `i` (0-11) is
@@ -103,6 +107,12 @@ Any content may also carry:
 Reactions, poll votes (option **indices** only), stars, receipts and
 view-once opens are plain API calls, not encrypted content.
 
+Messages with `kind: "system"` are written by the server (group created,
+members added or removed, settings changed, message pinned). Their `payload` is
+plain JSON such as `{"event": "added", "users": [...]}` or
+`{"event": "renamed", "name": "..."}`, they have no `senderDevice`, and they
+are never decrypted. `senderId` is the person who caused the event.
+
 ## 5. Files
 
 Attachments are encrypted on the device before upload, in 1 MiB chunks:
@@ -117,13 +127,21 @@ blob      = concat over i of AES-256-GCM(fileKey, iv_i, chunk_i, aad_i)   # each
 ```
 
 `POST /api/files` with the blob as `application/octet-stream` returns
-`{"id"}`. The message content's `file` object carries what the recipients
+`{"id"}`. The upload needs an exact `Content-Length` (no chunked transfer
+encoding): `size + 16 × chunks`. When posting the message, list every
+attachment's id in the message's `files` array: that list, not the id inside
+the encrypted content, is what lets recipients download it. The message content's `file` object carries what the recipients
 need: `{ "id", "key": b64u(fileKey), "prefix": b64u(prefix), "size": plaintextBytes, "name", "mime", "sha256" }`, where
 `sha256 = b64u(SHA-256(SHA-256(chunk_0) || SHA-256(chunk_1) || …))` over the
 plaintext chunks (a chunked digest, so clients can hash while streaming).
 `GET /api/files/:id` returns the blob to anyone who can see a message (or
 status) that references it. The "last chunk" flag in the AAD means a server
 can't truncate a file without the decryption failing.
+
+`name` comes from the sender: receivers must strip path components and
+control characters before saving, and never overwrite an existing file.
+`sha256` is required for new messages; receivers must reject a file whose
+digest doesn't match.
 
 Profile and group photos are the exception: they are uploaded unencrypted with
 `POST /api/files?public=1` and served from `/api/avatars/:id`.
@@ -179,6 +197,7 @@ Group calls are a mesh of up to 8 people.
 | `POST/DELETE /api/chats/:id/invite`, `GET /api/invite/:code`, `POST /api/invite/:code/join` | invite links |
 | `GET /api/chats/:id/devices` | recipients' device keys |
 | `GET /api/chats/:id/messages?before=&after=&limit=`, `POST /api/chats/:id/messages {id, payload, files, viewOnce}` | history, send |
+| `GET /api/messages/:id` | one message |
 | `PUT /api/messages/:id {payload}`, `DELETE /api/messages/:id?for=everyone\|me` | edit, delete |
 | `POST /api/messages/:id/react {emoji\|null}`, `/star {starred}`, `/vote {options}`, `/opened` | message actions |
 | `POST /api/chats/:id/pin {messageId\|null}`, `POST /api/chats/:id/receipts {delivered, read}` | pin, receipts |

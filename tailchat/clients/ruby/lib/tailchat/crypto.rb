@@ -88,8 +88,10 @@ module Tailchat
         OpenSSL::ASN1::Sequence.new([OpenSSL::ASN1::ObjectId.new('id-ecPublicKey'), OpenSSL::ASN1::ObjectId.new(CURVE)]),
         OpenSSL::ASN1::BitString.new("\x04".b + x + y),
       ])
-      OpenSSL::PKey::EC.new(spki.to_der)
-    rescue OpenSSL::PKey::PKeyError, OpenSSL::ASN1::ASN1Error => e
+      key = OpenSSL::PKey.read(spki.to_der)
+      raise CryptoError, 'not an EC key' unless key.is_a?(OpenSSL::PKey::EC)
+      key
+    rescue OpenSSL::PKey::PKeyError, OpenSSL::ASN1::ASN1Error, ArgumentError => e
       raise CryptoError, "invalid public key: #{e.message}"
     end
 
