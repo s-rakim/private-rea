@@ -1,0 +1,10 @@
+# binaries from `go build ./cmd/...`
+/tailchat
+/tailchat-gateway
+/bin/
+*.exe
+*.test
+*.out
+# never commit tsnet state or device keys
+tsnet-*/
+*.state.json

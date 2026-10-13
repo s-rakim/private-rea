@@ -71,7 +71,9 @@ module Tailchat
         return nil if timeout && message.nil? && @buffer.empty? && !wait_readable(timeout)
         fin, op, payload = read_frame
         case op
-        when OP_PING then write_frame(OP_PONG, payload)
+        when OP_PING # may arrive between the fragments of a message
+          write_frame(OP_PONG, payload)
+          next
         when OP_PONG then next
         when OP_CLOSE
           code = payload.bytesize >= 2 ? payload.unpack1('n') : 1005
