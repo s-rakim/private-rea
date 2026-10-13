@@ -1,0 +1,20 @@
+{
+  "name": "tailchat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A WhatsApp-style messenger that lives on your Tailscale tailnet, with end-to-end encrypted chats and file sharing",
+  "type": "module",
+  "license": "UNLICENSED",
+  "author": "Malcolm Opondo",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning server/index.js",
+    "dev": "TAILCHAT_AUTH=dev node --no-warnings=ExperimentalWarning server/index.js",
+    "test": "node --no-warnings=ExperimentalWarning --test test/*.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
