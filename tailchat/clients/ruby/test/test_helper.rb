@@ -16,6 +16,11 @@ module TestSupport
 
   module_function
 
+  # VERBOSE=1 shows the bots' logs.
+  def logger
+    ENV['VERBOSE'].to_s.empty? ? QUIET : Logger.new($stderr, progname: 'bot')
+  end
+
   # How to start the server under test, in order of preference:
   #   1. TAILCHAT_SERVER_CMD (a shell command, run from tailchat/)
   #   2. the Python port, if tailchat/tailchat_server/__main__.py exists
@@ -69,10 +74,20 @@ module TestSupport
     end
   end
 
+  # The first event from `queue` matching the block.
+  def next_event(queue, timeout = 8)
+    deadline = Time.now + timeout
+    loop do
+      left = deadline - Time.now
+      event = left.positive? ? queue.pop(timeout: left) : nil
+      raise Minitest::Assertion, 'timed out waiting for an event' unless event
+      return event if yield(event)
+    end
+  end
+
   # Loads an example script (they only run their bot when executed directly).
   def load_example(name)
-    @loaded ||= {}
-    @loaded[name] ||= load(File.join(EXAMPLES, name)) || true
+    require File.join(EXAMPLES, name)
   end
 
   class TestServer

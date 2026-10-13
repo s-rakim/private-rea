@@ -103,7 +103,7 @@ async function chatMode() {
     fileSize: plain.length,
     fileName,
     codeGo: await securityCode((await call('GET', `/api/users/${encodeURIComponent(goUser)}/devices`)).devices),
-    codeJs: await securityCode((await call('GET', `/api/users/${encodeURIComponent(me)}/devices`)).devices),
+    codeJs: await securityCode((await call('GET', `/api/users/${encodeURIComponent(reg.device.userId)}/devices`)).devices),
   });
 
   const want = JSON.parse(await nextLine());

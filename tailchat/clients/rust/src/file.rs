@@ -133,7 +133,7 @@ impl<'a, R: Read> EncryptReader<'a, R> {
         let iv = chunk_iv(&self.prefix, index).map_err(|e| io::Error::other(e.to_string()))?;
         let tag = self
             .cipher
-            .encrypt_in_place_detached(Nonce::from_slice(&iv), chunk_aad(index, last).as_bytes(), &mut self.buf[..])
+            .encrypt_in_place_detached(&Nonce::from(iv), chunk_aad(index, last).as_bytes(), &mut self.buf[..])
             .map_err(|_| io::Error::other("encryption failed"))?;
         self.buf.extend_from_slice(&tag);
         self.pos = 0;
@@ -200,9 +200,10 @@ pub fn decrypt_stream<R: Read, W: Write>(
             }
         })?;
         let (data, tag) = buf[..len + TAG].split_at_mut(len);
+        let tag = Tag::from(<[u8; TAG]>::try_from(&*tag).expect("16-byte tag"));
         let iv = chunk_iv(&key.prefix, index)?;
         cipher
-            .decrypt_in_place_detached(Nonce::from_slice(&iv), chunk_aad(index, last).as_bytes(), data, Tag::from_slice(tag))
+            .decrypt_in_place_detached(&Nonce::from(iv), chunk_aad(index, last).as_bytes(), data, &tag)
             .map_err(|_| Error::msg(format!("chunk {index} failed authentication (corrupted or tampered file)")))?;
         digests.update(Sha256::digest(&*data));
         output.write_all(data)?;
@@ -307,10 +308,10 @@ mod tests {
         let (blob, sha) = encrypt(&data, &key);
         let cipher = Aes256Gcm::new((&[9u8; 32]).into());
         let c0 = cipher
-            .encrypt(Nonce::from_slice(&chunk_iv(&[7u8; 8], 0).unwrap()), Payload { msg: &data[..CHUNK], aad: b"tailchat/v1|file|0|0" })
+            .encrypt(&Nonce::from(chunk_iv(&[7u8; 8], 0).unwrap()), Payload { msg: &data[..CHUNK], aad: b"tailchat/v1|file|0|0" })
             .unwrap();
         let c1 = cipher
-            .encrypt(Nonce::from_slice(&chunk_iv(&[7u8; 8], 1).unwrap()), Payload { msg: &data[CHUNK..], aad: b"tailchat/v1|file|1|1" })
+            .encrypt(&Nonce::from(chunk_iv(&[7u8; 8], 1).unwrap()), Payload { msg: &data[CHUNK..], aad: b"tailchat/v1|file|1|1" })
             .unwrap();
         assert_eq!(blob, [c0, c1].concat());
         let mut both = sha256(&data[..CHUNK]).to_vec();

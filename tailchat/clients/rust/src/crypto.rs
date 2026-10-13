@@ -11,7 +11,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use hkdf::Hkdf;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
-use p256::{EncodedPoint, FieldBytes, PublicKey, SecretKey};
+use p256::{PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -88,8 +88,12 @@ impl PublicJwk {
         }
         let x = unb64u_n::<32>(&self.x, "public key x")?;
         let y = unb64u_n::<32>(&self.y, "public key y")?;
-        let point = EncodedPoint::from_affine_coordinates(&FieldBytes::from(x), &FieldBytes::from(y), false);
-        Option::from(PublicKey::from_encoded_point(&point)).ok_or_else(|| Error::msg("public key is not a valid P-256 point"))
+        let mut sec1 = [0u8; 65];
+        sec1[0] = 0x04; // uncompressed
+        sec1[1..33].copy_from_slice(&x);
+        sec1[33..].copy_from_slice(&y);
+        // Rejects points that are not on the curve (and the identity).
+        PublicKey::from_sec1_bytes(&sec1).map_err(|_| Error::msg("public key is not a valid P-256 point"))
     }
 
     /// The 64 raw bytes x || y.
@@ -301,7 +305,7 @@ impl KeyRing {
         let iv = random_bytes::<12>();
         let plaintext = serde_json::to_vec(content)?;
         let ct = Aes256Gcm::new(content_key.as_ref().into())
-            .encrypt(Nonce::from_slice(&iv), Payload { msg: &plaintext, aad: aad.as_bytes() })
+            .encrypt(&Nonce::from(iv), Payload { msg: &plaintext, aad: aad.as_bytes() })
             .map_err(|_| Error::msg("encryption failed"))?;
         let mut ids: Vec<String> = recipients.iter().map(|(id, _)| id.clone()).collect();
         ids.push(self.device_id.clone());
@@ -328,7 +332,7 @@ impl KeyRing {
         let iv = unb64u_n::<12>(&env.iv, "envelope iv").map_err(OpenError::Failed)?;
         let ct = unb64u(&env.ct).map_err(OpenError::Failed)?;
         let pt = Aes256Gcm::new(content_key.as_ref().into())
-            .decrypt(Nonce::from_slice(&iv), Payload { msg: &ct, aad: aad.as_bytes() })
+            .decrypt(&Nonce::from(iv), Payload { msg: &ct, aad: aad.as_bytes() })
             .map_err(|_| OpenError::Failed(Error::msg("message failed authentication (wrong chat/message id, or tampered)")))?;
         serde_json::from_slice(&pt).map_err(|e| OpenError::Failed(Error::msg(format!("decrypted content is not JSON: {e}"))))
     }

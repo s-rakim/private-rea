@@ -355,9 +355,28 @@ func (c *Client) Messages(ctx context.Context, chatID string, before int64, limi
 	return res.Messages, res.HasMore, c.do(ctx, "GET", p, nil, &res)
 }
 
-// FindMessage looks a message id up in this user's chats (there is no
-// GET /api/messages/:id). chatID narrows the search when not empty.
+// GetMessage fetches one message by id.
+func (c *Client) GetMessage(ctx context.Context, id string) (*Message, error) {
+	var res struct {
+		Message Message `json:"message"`
+	}
+	return &res.Message, c.do(ctx, "GET", "/api/messages/"+url.PathEscape(id), nil, &res)
+}
+
+// FindMessage fetches a message by id. Servers without GET /api/messages/:id
+// (it answers 405 there) are searched chat by chat; chatID narrows that
+// search when not empty.
 func (c *Client) FindMessage(ctx context.Context, messageID, chatID string) (*Message, error) {
+	m, err := c.GetMessage(ctx, messageID)
+	if err == nil {
+		if chatID != "" && m.ChatID != chatID {
+			return nil, fmt.Errorf("message %s is not in chat %s", messageID, chatID)
+		}
+		return m, nil
+	}
+	if !IsStatus(err, 405) {
+		return nil, err
+	}
 	var ids []string
 	if chatID != "" {
 		ids = []string{chatID}
@@ -592,6 +611,9 @@ func (c *Client) Decrypt(ctx context.Context, m *Message) *Decrypted {
 func (c *Client) Download(ctx context.Context, f *FileRef, w io.Writer) error {
 	if f == nil || f.ID == "" {
 		return errors.New("message has no file")
+	}
+	if f.SHA256 == "" {
+		return errors.New("file has no sha256 checksum, refusing it (PROTOCOL.md §5)")
 	}
 	req, err := c.newRequest(ctx, "GET", "/api/files/"+url.PathEscape(f.ID), nil)
 	if err != nil {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 from aiohttp import web
@@ -12,6 +13,8 @@ from .config import load_config
 
 
 def main() -> None:
+    # Messages are encrypted, but metadata and uploads are still private.
+    os.umask(0o077)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
         config = load_config()

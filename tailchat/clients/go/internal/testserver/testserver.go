@@ -51,6 +51,8 @@ func Command(ctx context.Context) (*exec.Cmd, string, error) {
 		}
 		cmd = exec.CommandContext(ctx, py, "-m", "tailchat_server")
 		desc = "python3 -m tailchat_server"
+	case !fileExists(filepath.Join(root, "server", "index.js")):
+		return nil, "", fmt.Errorf("no server found in %s (neither tailchat_server/__main__.py nor server/index.js); set TAILCHAT_SERVER_CMD", root)
 	default:
 		node, err := exec.LookPath("node")
 		if err != nil {

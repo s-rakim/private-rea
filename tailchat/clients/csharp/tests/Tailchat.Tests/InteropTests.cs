@@ -315,7 +315,11 @@ public sealed class InteropTests : IDisposable
             // Wait until the listener's socket is up (the user shows as online).
             for (int i = 0; i < 100; i++)
             {
-                if ((await observer.Api.GetUsersAsync()).Any(u => u.Id == $"{name}@dev" && u.Online == true)) break;
+                if ((await observer.Api.GetUsersAsync()).Any(u => u.Id == $"{name}@dev" && u.Online == true))
+                {
+                    _output.WriteLine($"listener online after {i * 100} ms");
+                    break;
+                }
                 await Task.Delay(100);
             }
         }

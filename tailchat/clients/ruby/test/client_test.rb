@@ -39,6 +39,7 @@ class ClientTest < Minitest::Test
     early = alice.send_text(group['id'], 'before the new device')
     bob_laptop = Tailchat::Client.new(server: server.base, dev_user: bob.dev_user, logger: QUIET,
                                       state: File.join(scratch, "#{bob.dev_user}-laptop.json"))
+    bob_laptop.register!
     late = alice.send_text(group['id'], 'after the new device')
 
     texts = bob_laptop.history(group['id']).select(&:readable?).map(&:text)
@@ -57,10 +58,10 @@ class ClientTest < Minitest::Test
     chat = ruby.direct_chat(js.user_id)
     events = Queue.new
     listener = Thread.new { ruby.listen { |e| events << e } }
-    assert_equal 'ready', events.pop['type']
+    assert_equal 'ready', events.pop(timeout: 10)&.fetch('type')
     sent = js.call('sendText', chatId: chat['id'], text: 'over the socket')['message']
 
-    event = wait_until { e = events.pop; e if e['type'] == 'message' && e['message']['id'] == sent['id'] }
+    event = next_event(events) { |e| e['type'] == 'message' && e['message']['id'] == sent['id'] }
     msg = ruby.open_message(event['message'])
     assert_equal 'over the socket', msg.text
 

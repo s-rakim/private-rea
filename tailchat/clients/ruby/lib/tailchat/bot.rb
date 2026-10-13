@@ -10,9 +10,10 @@ module Tailchat
   #   bot.run
   #
   # Handlers run one at a time on the bot's dispatcher thread (scheduled jobs
-  # too), so they never race each other. Every incoming message gets a
-  # delivered receipt when it arrives and a read receipt once handled.
-  # Messages that arrived while the bot was offline are handled on (re)connect.
+  # too), so they never race each other. Every incoming message is marked
+  # delivered and read as soon as it is decrypted, before the handlers run.
+  # Messages that arrived while the bot was offline (after its last read
+  # receipt) are handled on (re)connect.
   class Bot
     Command = Struct.new(:name, :aliases, :description, :handler)
 
@@ -265,14 +266,16 @@ module Tailchat
       return if raw['senderDevice'] == client.device_id
       return if raw['senderId'] == client.user_id && !answer_own?(chat_id)
 
-      receipt(chat_id, delivered: seq)
       msg = client.open_message(raw)
+      # Ticks go out before the handlers run: once a handler replies, the
+      # server marks the message read itself without a "receipt" event, so a
+      # later receipt would never reach the sender's receipt listeners.
+      receipt(chat_id, delivered: seq, read: seq) unless raw['senderId'] == client.user_id
       if msg.error
         logger.info("skipping message #{msg.id} in #{chat_id}: #{msg.error.message}")
       else
         dispatch(msg)
       end
-      receipt(chat_id, read: seq)
     end
 
     def dispatch(msg)

@@ -1,0 +1,59 @@
+# Tailchat on Docker.
+#
+# The tailscale container joins your tailnet as its own machine ("tailchat")
+# and serves https://tailchat.<your-tailnet>.ts.net with a real certificate.
+# The tailchat container shares its network, so tailscale serve reaches it on
+# 127.0.0.1 and passes along who each visitor is. Nothing is published on the
+# Docker host and Funnel stays off, so only your tailnet can reach it.
+#
+#   1. In the Tailscale admin console enable MagicDNS and HTTPS certificates,
+#      and create an auth key (Settings > Keys).
+#   2. echo "TS_AUTHKEY=tskey-auth-..." > .env
+#   3. docker compose up -d --build
+#   4. open https://tailchat.<your-tailnet>.ts.net from any device on the tailnet
+services:
+  tailscale:
+    image: tailscale/tailscale:stable
+    hostname: ${TAILCHAT_HOSTNAME:-tailchat}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env (tailscale admin console > Settings > Keys)}
+      TS_HOSTNAME: ${TAILCHAT_HOSTNAME:-tailchat}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_USERSPACE: "false"
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./docker/serve.json:/config/serve.json:ro
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+
+  tailchat:
+    build: .
+    image: tailchat:latest
+    network_mode: service:tailscale
+    depends_on:
+      - tailscale
+    environment:
+      TAILCHAT_AUTH: serve
+      TAILCHAT_HOST: 127.0.0.1
+      TAILCHAT_PORT: "8443"
+      TAILCHAT_MAX_UPLOAD_MB: ${TAILCHAT_MAX_UPLOAD_MB:-2048}
+    volumes:
+      - tailchat-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+volumes:
+  tailscale-state:
+  tailchat-data:

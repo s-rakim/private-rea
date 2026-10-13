@@ -165,6 +165,12 @@ public static class CliApp
         {
             return 130;
         }
+        catch (ApiException e) when (e.Status == 401)
+        {
+            var state = options.GetValueOrDefault("--state") ?? ClientState.DefaultPath(options.GetValueOrDefault("--dev-user"));
+            await stderr.WriteLineAsync($"tailchat: {e.Message}\n(this device's token was rejected; delete {state} to register a new device)");
+            return 1;
+        }
         catch (TailchatException e)
         {
             await stderr.WriteLineAsync($"tailchat: {e.Message}");
