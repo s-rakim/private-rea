@@ -79,10 +79,15 @@ def create_app(config: Config) -> web.Application:
     api = Api(db, hub, config)
     resolver = IdentityResolver(config)
     public_dir = config.public_dir.resolve()
+    # tailscale serve adds the secret in front of every path (see config.py).
+    prefix = f"/{config.serve_secret}" if config.serve_secret else ""
+
+    def local_path(request: web.Request) -> str:
+        return request.path[len(prefix) :]
 
     async def handle_api(request: web.Request) -> web.StreamResponse:
         try:
-            route, params = api.router.match(request.method, request.path)
+            route, params = api.router.match(request.method, local_path(request))
             if route is None:
                 return json_response({"error": "Not found"}, 404)
             if route == "method":
@@ -129,7 +134,7 @@ def create_app(config: Config) -> web.Application:
         )
 
     async def handle_static(request: web.Request) -> web.StreamResponse:
-        path = request.path
+        path = local_path(request)
         try:
             # The app shell is only served to people on the tailnet, too.
             if path == "/" or path.startswith("/invite/"):
@@ -177,11 +182,11 @@ def create_app(config: Config) -> web.Application:
     app = web.Application(client_max_size=1024**2)
     app.on_response_prepare.append(security_headers)
     app["api"] = api
-    app.router.add_route("*", "/api/{tail:.*}", handle_api)
-    app.router.add_get("/ws", handle_ws)
+    app.router.add_route("*", prefix + "/api/{tail:.*}", handle_api)
+    app.router.add_get(prefix + "/ws", handle_ws)
     if config.auth == "dev":
         app.router.add_get("/dev/login", dev_login)
-    app.router.add_route("GET", "/{tail:.*}", handle_static)
+    app.router.add_route("GET", prefix + "/{tail:.*}", handle_static)
     app.cleanup_ctx.append(sweeper)
     return app
 
