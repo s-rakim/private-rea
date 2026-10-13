@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Awaitable, Callable
 
 from aiohttp import WSMsgType, web
+
+log = logging.getLogger("tailchat")
 
 
 class Socket:
@@ -83,14 +86,17 @@ class Hub:
                     continue
                 try:
                     msg = json.loads(frame.data)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 if not isinstance(msg, dict):
                     continue
                 try:
                     self.on_message(sock, msg)
                 except Exception as err:  # a bad frame must not kill the socket
-                    sock.send(json.dumps({"type": "error", "message": str(err)}))
+                    status = getattr(err, "status", 500)
+                    if status == 500:
+                        log.exception("websocket frame failed", exc_info=err)
+                    sock.send(json.dumps({"type": "error", "message": "Internal error" if status == 500 else str(err)}))
         finally:
             sockets.discard(sock)
             sock.stop()

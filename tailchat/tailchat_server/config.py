@@ -20,6 +20,7 @@ class Config:
     public_dir: Path
     tls_cert: str
     tls_key: str
+    allowed_hosts: tuple[str, ...]
     tailscale_socket: str
     max_upload_bytes: int
     status_hours: int
@@ -51,14 +52,23 @@ def load_config(env: dict | None = None) -> Config:
         raise ValueError("TAILCHAT_AUTH=dev only listens on loopback (set TAILCHAT_HOST=127.0.0.1)")
     if auth == "direct" and not host:
         raise ValueError("TAILCHAT_AUTH=direct needs TAILCHAT_HOST set to this machine's Tailscale IP (tailscale ip -4)")
+    tls_cert, tls_key = env.get("TAILCHAT_TLS_CERT", ""), env.get("TAILCHAT_TLS_KEY", "")
+    if bool(tls_cert) != bool(tls_key):
+        raise ValueError("Set both TAILCHAT_TLS_CERT and TAILCHAT_TLS_KEY, or neither")
+    # Browsers only allow the web app's crypto over HTTPS, and plain HTTP on
+    # the tailnet IP would let a web page rebind its own name to it.
+    if auth == "direct" and not tls_cert:
+        raise ValueError("TAILCHAT_AUTH=direct needs TAILCHAT_TLS_CERT and TAILCHAT_TLS_KEY (from `tailscale cert`)")
+    allowed = tuple(h.strip().lower().rstrip(".") for h in env.get("TAILCHAT_ALLOWED_HOSTS", "").split(",") if h.strip())
     return Config(
         auth=auth,
         host=host,
         port=_int(env, "TAILCHAT_PORT", 8443),
         data_dir=Path(env.get("TAILCHAT_DATA") or ROOT / "data").resolve(),
         public_dir=ROOT / "public",
-        tls_cert=env.get("TAILCHAT_TLS_CERT", ""),
-        tls_key=env.get("TAILCHAT_TLS_KEY", ""),
+        tls_cert=tls_cert,
+        tls_key=tls_key,
+        allowed_hosts=allowed,
         tailscale_socket=env.get("TAILSCALE_SOCKET", "/var/run/tailscale/tailscaled.sock"),
         max_upload_bytes=_int(env, "TAILCHAT_MAX_UPLOAD_MB", 2048) * 1024 * 1024,
         status_hours=_int(env, "TAILCHAT_STATUS_HOURS", 24),

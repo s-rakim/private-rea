@@ -87,6 +87,32 @@ def https_url(value: str | None) -> str | None:
     return value if value and value.startswith("https://") and len(value) < 2048 else None
 
 
+def host_name(value: str | None) -> str:
+    """The name in a Host header, without the port."""
+    value = (value or "").strip().lower()
+    if value.startswith("["):
+        end = value.find("]")
+        return value[1:end] if end > 0 else ""
+    if value.count(":") == 1:
+        value = value.split(":", 1)[0]
+    return value.rstrip(".")
+
+
+def allowed_host(value: str | None, config: Config) -> bool:
+    """Whether a request's Host is a name for this server. A web page can
+    point its own domain at a tailnet or loopback address (DNS rebinding);
+    its requests then carry that domain as Host and are refused here."""
+    name = host_name(value)
+    if not name:
+        return False
+    if name in config.allowed_hosts or name == "localhost":
+        return True
+    ip = _addr(name)
+    if ip is not None:
+        return ip.is_loopback or (config.auth != "dev" and is_tailnet_address(name))
+    return config.auth != "dev" and name.endswith(".ts.net")
+
+
 def peer(request) -> tuple[str | None, int | None]:
     info = request.transport.get_extra_info("peername") if request.transport else None
     if not info:
@@ -125,9 +151,19 @@ class IdentityResolver:
     async def identify(self, request) -> Identity:
         addr, port = peer(request)
         mode = self.config.auth
+        if not allowed_host(request.headers.get("Host"), self.config):
+            raise IdentityError(
+                "Open Tailchat at its https://<machine>.<tailnet>.ts.net address "
+                "(add other names to TAILCHAT_ALLOWED_HOSTS).",
+                421,
+            )
         if mode == "serve":
             if not is_loopback(addr):
                 raise IdentityError("Tailchat only accepts connections through `tailscale serve`.")
+            # Funnel would put Tailchat on the public internet. tailscaled
+            # marks those requests and never sends an identity with them.
+            if "Tailscale-Funnel-Request" in request.headers:
+                raise IdentityError("Tailchat is only for your tailnet. Turn off Funnel for it.")
             login = decode_header_word(request.headers.get("Tailscale-User-Login"))
             if not login:
                 raise IdentityError(

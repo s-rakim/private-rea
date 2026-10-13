@@ -49,6 +49,8 @@ SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "Permissions-Policy": "camera=(self), microphone=(self), geolocation=(self), display-capture=(self)",
     "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Strict-Transport-Security": "max-age=31536000",
 }
 
 DEV_LOGIN_PAGE = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -62,6 +64,13 @@ def error_response(err: Exception) -> web.Response:
     if status == 500:
         log.exception("request failed", exc_info=err)
     return json_response({"error": "Internal error" if status == 500 else str(err)}, status)
+
+
+def cross_origin(request: web.Request) -> bool:
+    # Browsers send Origin with every WebSocket upgrade and every non-GET
+    # fetch; it must be this site. Other clients send none.
+    origin = request.headers.get("Origin")
+    return origin is not None and urlsplit(origin).netloc != request.host
 
 
 def create_app(config: Config) -> web.Application:
@@ -78,6 +87,8 @@ def create_app(config: Config) -> web.Application:
                 return json_response({"error": "Not found"}, 404)
             if route == "method":
                 return json_response({"error": "Method not allowed"}, 405)
+            if request.method not in ("GET", "HEAD") and cross_origin(request):
+                raise HttpError(403, "Cross-origin request refused")
             identity = await resolver.identify(request)
             user = api.upsert_user(identity)
             ctx = Context(request=request, params=params, identity=identity, user=user)
@@ -97,9 +108,7 @@ def create_app(config: Config) -> web.Application:
 
     async def handle_ws(request: web.Request) -> web.StreamResponse:
         try:
-            # Browsers always send Origin on WebSocket upgrades; it must be this site.
-            origin = request.headers.get("Origin")
-            if origin and urlsplit(origin).netloc != request.host:
+            if cross_origin(request):
                 raise HttpError(403, "Cross-origin WebSocket refused")
             identity = await resolver.identify(request)
             api.upsert_user(identity)
@@ -116,10 +125,7 @@ def create_app(config: Config) -> web.Application:
         return web.Response(
             text=DEV_LOGIN_PAGE,
             content_type="text/html",
-            headers={
-                **SECURITY_HEADERS,
-                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
-            },
+            headers={"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"},
         )
 
     async def handle_static(request: web.Request) -> web.StreamResponse:
@@ -140,7 +146,6 @@ def create_app(config: Config) -> web.Application:
             return web.FileResponse(
                 file,
                 headers={
-                    **SECURITY_HEADERS,
                     "Content-Type": MIME.get(file.suffix, "application/octet-stream"),
                     "Cache-Control": "no-cache",
                 },
@@ -165,7 +170,12 @@ def create_app(config: Config) -> web.Application:
         await hub.close()
         db.close()
 
+    async def security_headers(request: web.Request, response: web.StreamResponse) -> None:
+        for name, value in SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
+
     app = web.Application(client_max_size=1024**2)
+    app.on_response_prepare.append(security_headers)
     app["api"] = api
     app.router.add_route("*", "/api/{tail:.*}", handle_api)
     app.router.add_get("/ws", handle_ws)

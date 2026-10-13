@@ -118,6 +118,9 @@ CREATE TABLE IF NOT EXISTS file_links (
   status_id TEXT
 );
 CREATE INDEX IF NOT EXISTS file_links_file ON file_links(file_id);
+CREATE INDEX IF NOT EXISTS files_owner ON files(owner);
+CREATE INDEX IF NOT EXISTS users_avatar ON users(avatar) WHERE avatar IS NOT NULL;
+CREATE INDEX IF NOT EXISTS chats_avatar ON chats(avatar) WHERE avatar IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS statuses (
   id TEXT PRIMARY KEY,

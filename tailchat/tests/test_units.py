@@ -5,7 +5,7 @@ import unittest
 
 from tailchat_server.api import is_emoji
 from tailchat_server.config import load_config
-from tailchat_server.tailnet import decode_header_word, https_url, is_loopback, is_tailnet_address
+from tailchat_server.tailnet import allowed_host, decode_header_word, host_name, https_url, is_loopback, is_tailnet_address
 
 
 class TailnetTests(unittest.TestCase):
@@ -45,6 +45,25 @@ class TailnetTests(unittest.TestCase):
         self.assertIsNone(https_url(None))
 
 
+class HostTests(unittest.TestCase):
+    def test_host_name(self):
+        self.assertEqual(host_name("Chat.Example.ts.net:443"), "chat.example.ts.net")
+        self.assertEqual(host_name("[::1]:8443"), "::1")
+        self.assertEqual(host_name("localhost."), "localhost")
+        self.assertEqual(host_name(None), "")
+
+    def test_allowed_hosts(self):
+        serve = load_config({"TAILCHAT_ALLOWED_HOSTS": "chat.home.arpa"})
+        dev = load_config({"TAILCHAT_AUTH": "dev"})
+        for host in ["tailchat.tail1234.ts.net", "127.0.0.1:8443", "localhost", "100.100.1.2", "[fd7a:115c:a1e0::5]", "chat.home.arpa"]:
+            self.assertTrue(allowed_host(host, serve), host)
+        for host in ["evil.example", "ts.net.evil.example", "192.168.1.2", "", "tailchat"]:
+            self.assertFalse(allowed_host(host, serve), host)
+        self.assertTrue(allowed_host("127.0.0.1:8443", dev))
+        self.assertFalse(allowed_host("tailchat.tail1234.ts.net", dev))
+        self.assertFalse(allowed_host("100.100.1.2", dev))
+
+
 class EmojiTests(unittest.TestCase):
     def test_accepts_emoji(self):
         for e in ["👍", "❤️", "👍🏽", "👩‍👩‍👧", "🇰🇪", "1️⃣", "🏴󠁧󠁢󠁳󠁣󠁴󠁿"]:
@@ -61,9 +80,15 @@ class ConfigTests(unittest.TestCase):
             load_config({"TAILCHAT_AUTH": "dev", "TAILCHAT_HOST": "0.0.0.0"})
         self.assertEqual(load_config({"TAILCHAT_AUTH": "dev"}).host, "127.0.0.1")
 
-    def test_direct_mode_needs_host(self):
+    def test_direct_mode_needs_host_and_tls(self):
         with self.assertRaises(ValueError):
-            load_config({"TAILCHAT_AUTH": "direct"})
+            load_config({"TAILCHAT_AUTH": "direct", "TAILCHAT_TLS_CERT": "c", "TAILCHAT_TLS_KEY": "k"})
+        with self.assertRaises(ValueError):
+            load_config({"TAILCHAT_AUTH": "direct", "TAILCHAT_HOST": "100.64.0.1"})
+        with self.assertRaises(ValueError):
+            load_config({"TAILCHAT_TLS_CERT": "c"})
+        direct = {"TAILCHAT_AUTH": "direct", "TAILCHAT_HOST": "100.64.0.1", "TAILCHAT_TLS_CERT": "c", "TAILCHAT_TLS_KEY": "k"}
+        self.assertEqual(load_config(direct).host, "100.64.0.1")
 
     def test_serve_mode_defaults_to_loopback(self):
         self.assertEqual(load_config({}).host, "127.0.0.1")

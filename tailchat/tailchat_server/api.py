@@ -21,6 +21,13 @@ from .hub import Hub, Socket
 from .httputil import Context, HttpError, Router, fail, json_response, new_id, read_json, v_bool, v_int, v_str
 
 MAX_PAYLOAD = 512 * 1024  # an encrypted message envelope, thumbnails included
+MAX_UNUSED_PHOTOS = 20
+# A file no message, status, profile or group uses (SQL, on the files table).
+UNUSED_FILE = (
+    "NOT EXISTS (SELECT 1 FROM file_links l WHERE l.file_id = files.id)"
+    " AND NOT EXISTS (SELECT 1 FROM users u WHERE u.avatar = files.id)"
+    " AND NOT EXISTS (SELECT 1 FROM chats c WHERE c.avatar = files.id)"
+)
 MAX_GROUP = 1024
 BIG = 2**53 - 1
 # Chats with admins, a name and members: groups, community announcement
@@ -64,6 +71,7 @@ class Api:
         self.config = config
         self.router = Router()
         self.calls: dict[str, dict] = {}
+        self.uploading: dict[str, int] = {}  # user id -> bytes being uploaded now
         self._register_routes()
         hub.on_connect = self.presence_changed
         hub.on_disconnect = self._on_disconnect
@@ -551,15 +559,27 @@ class Api:
                 fail(400, "Unknown file")
         return list(dict.fromkeys(files))
 
-    def delete_orphan_files(self, ids) -> None:
+    def delete_orphan_files(self, ids, *, photos: bool = False) -> None:
         for fid in ids:
-            if self.db.get("SELECT 1 FROM file_links WHERE file_id = ?", fid):
-                continue
-            f = self.db.get("SELECT public FROM files WHERE id = ?", fid)
-            if not f or f["public"]:
+            f = self.db.get(f"SELECT public FROM files WHERE id = ? AND {UNUSED_FILE}", fid)
+            if not f or (f["public"] and not photos):
                 continue
             self.db.run("DELETE FROM files WHERE id = ?", fid)
             self.file_path(fid).unlink(missing_ok=True)
+
+    def check_upload_quota(self, user_id: str, length: int, is_public: bool) -> None:
+        """Uploads wait on the server until they're sent; cap how much one
+        person can leave waiting, so nobody can fill the disk."""
+        if is_public:
+            row = self.db.get(f"SELECT COUNT(*) AS n FROM files WHERE owner = ? AND public = 1 AND {UNUSED_FILE}", user_id)
+            if row["n"] >= MAX_UNUSED_PHOTOS:
+                fail(429, "Too many photos uploaded without being used. Try again tomorrow.")
+            return
+        row = self.db.get(
+            f"SELECT COALESCE(SUM(size), 0) AS n FROM files WHERE owner = ? AND public = 0 AND {UNUSED_FILE}", user_id
+        )
+        if row["n"] + self.uploading.get(user_id, 0) + length > 2 * self.config.max_upload_bytes:
+            fail(429, "Too many files waiting to be sent. Send or cancel some first.")
 
     def wipe_message(self, m: dict) -> None:
         files = json.loads(m["files"])
@@ -581,12 +601,10 @@ class Api:
             self.hub.send_to_users(self.ever_member_ids(m["chat_id"]), {"type": "message-gone", "chatId": m["chat_id"], "id": m["id"]})
         for s in db.all("SELECT * FROM statuses WHERE expires_at <= ?", t):
             self._delete_status(s)
-        # Uploads that never made it into a message or status.
-        stale = db.all(
-            "SELECT id FROM files WHERE public = 0 AND created_at < ? AND id NOT IN (SELECT file_id FROM file_links)",
-            t - 24 * 3600 * 1000,
-        )
-        self.delete_orphan_files([r["id"] for r in stale])
+        # Uploads that never made it into a message or status, and photos
+        # nobody uses as a profile or group photo any more.
+        stale = db.all(f"SELECT id FROM files WHERE {UNUSED_FILE} AND created_at < ?", t - 24 * 3600 * 1000)
+        self.delete_orphan_files([r["id"] for r in stale], photos=True)
 
     def _delete_status(self, s: dict) -> None:
         self.db.run("DELETE FROM file_links WHERE status_id = ?", s["id"])
@@ -602,7 +620,7 @@ class Api:
         if chat["type"] == "channel":
             try:
                 post = json.loads(payload)
-            except ValueError:
+            except (ValueError, RecursionError):
                 post = None
             if not isinstance(post, dict) or not isinstance(post.get("type"), str) or "ct" in post:
                 fail(400, "A channel post must be a JSON object with a type")
@@ -1418,10 +1436,13 @@ class Api:
                 fail(413, "Photos are limited to 5 MB")
             if request.headers.get("Content-Type") != "application/octet-stream":
                 fail(415, "Upload files as application/octet-stream")
+            uid = ctx.user["id"]
+            self.check_upload_quota(uid, length, is_public)
             file_id = new_id()
             final = self.file_path(file_id)
             tmp = final.with_name(final.name + ".part")
             received = 0
+            self.uploading[uid] = self.uploading.get(uid, 0) + length
             try:
                 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "wb") as out:
@@ -1433,13 +1454,17 @@ class Api:
                 if received != length:
                     fail(400, "Upload was cut short")
                 tmp.rename(final)
+                db.run(
+                    "INSERT INTO files (id, owner, size, public, created_at) VALUES (?, ?, ?, ?, ?)",
+                    file_id, uid, length, int(is_public), now(),
+                )
             except BaseException:
                 tmp.unlink(missing_ok=True)
                 raise
-            db.run(
-                "INSERT INTO files (id, owner, size, public, created_at) VALUES (?, ?, ?, ?, ?)",
-                file_id, ctx.user["id"], length, int(is_public), now(),
-            )
+            finally:
+                self.uploading[uid] -= length
+                if not self.uploading[uid]:
+                    del self.uploading[uid]
             return {"id": file_id, "size": length}
 
         @r.add("GET", "/api/files/:id")

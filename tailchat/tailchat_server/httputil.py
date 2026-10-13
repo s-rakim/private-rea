@@ -50,7 +50,7 @@ async def read_json(request: web.Request, limit: int = 1024 * 1024) -> dict:
         return {}
     try:
         value = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         fail(400, "Malformed JSON")
     if not isinstance(value, dict):
         fail(400, "Expected a JSON object")
