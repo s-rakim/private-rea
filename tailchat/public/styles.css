@@ -490,3 +490,5 @@ button.e2e-note { font: inherit; font-size: 12.5px; cursor: pointer; }
 .e2e-note.warn { background: color-mix(in srgb, var(--danger) 10%, var(--chat-bg)); color: var(--text); }
 .e2e-note.warn svg { fill: var(--danger); }
 .empty.small svg, .muted.small svg { width: 12px; height: 12px; fill: currentColor; vertical-align: -1px; }
+.security-bar { background: color-mix(in srgb, #e9a100 14%, var(--panel)); }
+.security-bar svg { fill: #e9a100; }

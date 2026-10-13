@@ -124,14 +124,34 @@ export async function boot(setStatus) {
     api.token = reg.token;
     S.device = reg.device;
   }
+  // Every device key this browser has seen is pinned, so the server can't
+  // quietly swap a key or reassign a device to someone else. `users` are the
+  // people whose whole device list this browser has seen; a device that
+  // turns up for one of them later is new.
+  const pinsKey = `pins:${S.me.id}`;
+  const saved = await kvGet(pinsKey).catch(() => null);
+  S.pins = new Map(Object.entries(saved?.pins || {}));
+  S.knownDevices = new Set(saved?.users || []);
+  let pinSave = null;
+  S.savePins = () => {
+    clearTimeout(pinSave);
+    pinSave = setTimeout(() => kvSet(pinsKey, { pins: Object.fromEntries(S.pins), users: [...S.knownDevices] }).catch(() => {}), 300);
+  };
   S.ring = new KeyRing({
     deviceId: stored.deviceId,
     privateKey: stored.privateKey,
-    fetchPublicKeys: async (ids) => (await api.get(`/api/keys?ids=${ids.map(encodeURIComponent).join(',')}`)).devices,
+    fetchPublicKeys: async (ids) => {
+      const { devices } = await api.get(`/api/keys?ids=${ids.map(encodeURIComponent).join(',')}`);
+      noticeDevices(devices);
+      return devices;
+    },
+    pins: S.pins,
+    onPin: S.savePins,
   });
   await S.ring.addPublicKey(stored.deviceId, stored.publicJwk, S.me.id);
   setStatus('Loading your chats…');
   await Promise.all([loadUsers(), loadChats(), loadStatuses(), loadCalls()]);
+  await checkOwnDevices().catch((err) => console.warn('device check failed', err));
   realtime = new Realtime(api, {
     onEvent: handleEvent,
     onOpen: catchUp,
@@ -445,12 +465,59 @@ function mergeLatest(existing, fresh) {
   return [...map.values()].sort((a, c) => (a.pending ? Infinity : a.seq) - (c.pending ? Infinity : c.seq));
 }
 
+// Devices a message for this chat is sealed to. A logged-out device never
+// gets a key, whatever the server says.
 async function devicesFor(chatId) {
   const cached = S.chatDevices.get(chatId);
   if (cached && Date.now() - cached.at < 60_000) return cached.devices;
-  const { devices } = await api.get(`/api/chats/${encodeURIComponent(chatId)}/devices`);
+  const devices = (await api.get(`/api/chats/${encodeURIComponent(chatId)}/devices`)).devices.filter((d) => !d.revokedAt);
+  noticeDevices(devices, { complete: true });
   S.chatDevices.set(chatId, { devices, at: Date.now() });
   return devices;
+}
+
+// ---------- new devices (security code changes) ----------
+
+// Like WhatsApp's "security code changed" notices: a device appearing for
+// someone whose devices this browser already knew means their code changed.
+// A new device on your own account gets a louder warning, since anyone
+// signed in to Tailscale as you could have linked it. `complete` lists hold
+// every active device of the people in them; the first one seen for a person
+// is trusted as it is.
+function noticeDevices(devices, { complete = false } = {}) {
+  const listed = devices.filter((d) => !d.revokedAt);
+  const active = listed.filter((d) => d.id !== S.device.id);
+  const fresh = active.filter((d) => !S.pins.has(d.id) && S.knownDevices.has(d.userId));
+  if (complete) {
+    const firstSight = new Set(listed.map((d) => d.userId).filter((u) => !S.knownDevices.has(u)));
+    for (const u of firstSight) S.knownDevices.add(u);
+    if (firstSight.size) S.savePins();
+  }
+  // Pin what was seen, so each new device is reported once.
+  for (const d of active) {
+    if (!S.pins.has(d.id) && S.knownDevices.has(d.userId)) S.ring.addPublicKey(d.id, d.publicKey, d.userId).catch(() => {});
+  }
+  if (!fresh.length) return;
+  const alerts = { users: { ...(S.prefs.securityAlerts?.users || {}) }, devices: [...(S.prefs.securityAlerts?.devices || [])] };
+  for (const d of fresh) {
+    if (!isMe(d.userId)) alerts.users[d.userId] = Date.now();
+    else if (!alerts.devices.some((x) => x.id === d.id)) alerts.devices.push({ id: d.id, name: String(d.name).slice(0, 80), at: d.createdAt || Date.now() });
+  }
+  savePrefs({ securityAlerts: alerts });
+}
+
+async function checkDevicesOf(userId) {
+  const { devices } = await api.get(`/api/users/${encodeURIComponent(userId)}/devices`);
+  noticeDevices(devices.filter((d) => d.userId === userId), { complete: true });
+}
+
+export const checkOwnDevices = () => checkDevicesOf(S.me.id);
+
+export function dismissSecurityAlerts({ users = [], devices = false } = {}) {
+  const a = S.prefs.securityAlerts || {};
+  const left = { ...(a.users || {}) };
+  for (const u of users) delete left[u];
+  savePrefs({ securityAlerts: { users: left, devices: devices ? [] : a.devices || [] } });
 }
 
 // Encrypts and sends. `content` is the plaintext message (PROTOCOL.md §4).
@@ -733,6 +800,7 @@ function handleEvent(e) {
       if (isMe(e.user.id)) S.me = { ...S.me, ...e.user };
       break;
     case 'devices':
+      if (S.knownDevices.has(e.userId)) checkDevicesOf(e.userId).catch(() => {});
       for (const [chatId, chat] of S.chats) if (chat.members.some((m) => m.userId === e.userId)) S.chatDevices.delete(chatId);
       break;
     case 'status':
@@ -823,7 +891,8 @@ export async function postStatus(content, file) {
     content = { ...content, ...meta, file: { ...keys, id: up.id, name: file.name, mime: file.type, size: file.size } };
     files = [up.id];
   }
-  const { devices } = await api.get('/api/status/devices');
+  const devices = (await api.get('/api/status/devices')).devices.filter((d) => !d.revokedAt);
+  noticeDevices(devices, { complete: true });
   const payload = await S.ring.seal(content, statusAad(S.me.id), devices);
   const { status } = await api.post('/api/status', { payload, files });
   S.statuses.set(status.id, status);

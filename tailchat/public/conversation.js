@@ -420,7 +420,10 @@ function messageRow(m, chat, flags) {
   if (!res || res.pending) {
     parts.push(h('div', { class: 'text undecryptable' }, icon('clock'), 'Decrypting…'));
   } else if (res.error) {
-    parts.push(h('div', { class: 'text undecryptable', title: res.error }, icon('lock'), res.code === 'NO_KEY' ? "This message was sent before this device was linked, so it can't be read here." : "This message couldn't be decrypted."));
+    const why = res.code === 'NO_KEY' ? "This message was sent before this device was linked, so it can't be read here."
+      : res.code === 'KEY_CHANGED' ? "This message's encryption key doesn't match the one this device saw before, so it was not opened."
+        : "This message couldn't be decrypted.";
+    parts.push(h('div', { class: 'text undecryptable', title: res.error }, icon('lock'), why));
   } else if (c.type === 'deleted') {
     parts.push(h('div', { class: 'text deleted' }, icon('block'), mine ? 'You deleted this message' : 'This message was deleted'));
   } else if (c.type === 'opened' || (m.viewOnce && !mine)) {
@@ -798,6 +801,25 @@ function pinnedBar(chat) {
     icon('pin'),
     h('div', { class: 'grow' }, h('div', { class: 'ellipsis' }, text)),
     mayPin ? iconButton('close', 'Unpin', (e) => { e.stopPropagation(); api.post(`/api/chats/${encodeURIComponent(chat.id)}/pin`, { messageId: null }).catch((err) => toast(err.message)); }) : null,
+  ));
+}
+
+// Someone in this chat linked a new device since this browser last saw
+// their devices: their security code changed.
+function securityBar(chat) {
+  if (A.isChannel(chat)) return null;
+  const alerted = S.prefs.securityAlerts?.users || {};
+  const users = chat.members.filter((m) => !m.left && !A.isMe(m.userId) && alerted[m.userId]).map((m) => m.userId);
+  if (!users.length) return null;
+  const text = chat.type === 'direct'
+    ? `${A.nameOf(users[0])}'s security code changed because they linked a new device. Click to verify.`
+    : `Security codes changed for ${users.map(A.nameOf).join(', ')}. Click to verify.`;
+  return slots.get('security', text, () => h(
+    'div',
+    { class: 'pinned-bar security-bar', onclick: () => { O.securityCodeDialog(chat); A.dismissSecurityAlerts({ users }); } },
+    icon('shield'),
+    h('div', { class: 'grow' }, text),
+    iconButton('close', 'Dismiss', (e) => { e.stopPropagation(); A.dismissSecurityAlerts({ users }); }),
   ));
 }
 
@@ -1226,5 +1248,5 @@ export function renderConversation(el, chat) {
   if (S.editing && S.editing.chatId !== chat.id) S.editing = null;
   const v = messagesView(chat);
   renderMessages(chat);
-  reconcile(el, [header(chat), pinnedBar(chat), v.el, v.down, composer(chat)]);
+  reconcile(el, [header(chat), securityBar(chat), pinnedBar(chat), v.el, v.down, composer(chat)]);
 }

@@ -38,24 +38,64 @@ export function importPublicKey(jwk) {
   return subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, ext: true }, { name: 'ECDH', namedCurve: 'P-256' }, true, []);
 }
 
+// Fingerprint of a device key: b64u(SHA-256(x || y)), as in security codes.
+export async function keyFingerprint(jwk) {
+  const raw = new Uint8Array(64);
+  raw.set(unb64u(jwk.x), 0);
+  raw.set(unb64u(jwk.y), 32);
+  return b64u(await subtle.digest('SHA-256', raw));
+}
+
+function keyError(message) {
+  const err = new Error(message);
+  err.code = 'KEY_CHANGED';
+  return err;
+}
+
 // Wrap keys are cached: deriving one costs an ECDH operation.
 export class KeyRing {
-  constructor({ deviceId, privateKey, fetchPublicKeys }) {
+  // pins: optional Map deviceId -> { fp, userId } of keys seen before, which
+  // the caller persists (onPin is called when one is added). A device's key
+  // and owner never change, so a server that swaps either is caught.
+  constructor({ deviceId, privateKey, fetchPublicKeys, pins = null, onPin = null }) {
     this.deviceId = deviceId;
     this.privateKey = privateKey;
-    this.fetchPublicKeys = fetchPublicKeys; // async (ids) => [{id, publicKey}]
+    this.fetchPublicKeys = fetchPublicKeys; // async (ids) => [{id, publicKey, userId}]
     this.publicKeys = new Map(); // deviceId -> CryptoKey
     this.owners = new Map(); // deviceId -> userId
     this.wrapKeys = new Map(); // "S|R" -> CryptoKey
+    this.pins = pins;
+    this.onPin = onPin;
+    this.adding = new Map(); // deviceId -> pending import
   }
 
-  async addPublicKey(deviceId, jwk, userId) {
-    if (userId) this.owners.set(deviceId, userId);
-    if (!this.publicKeys.has(deviceId)) this.publicKeys.set(deviceId, await importPublicKey(jwk));
+  addPublicKey(deviceId, jwk, userId) {
+    const pin = this.pins?.get(deviceId);
+    const known = this.owners.get(deviceId) || pin?.userId;
+    if (known && userId && known !== userId) {
+      return Promise.reject(keyError(`Device ${deviceId} belongs to ${known}, but the server now says ${userId}`));
+    }
+    const owner = known || userId;
+    if (owner) this.owners.set(deviceId, owner);
+    if (this.publicKeys.has(deviceId)) return Promise.resolve();
+    let pending = this.adding.get(deviceId);
+    if (!pending) {
+      pending = (async () => {
+        const fp = await keyFingerprint(jwk);
+        if (pin && pin.fp !== fp) throw keyError(`The key of device ${deviceId} changed`);
+        this.publicKeys.set(deviceId, await importPublicKey(jwk));
+        if (!pin && this.pins && owner) {
+          this.pins.set(deviceId, { fp, userId: owner });
+          this.onPin?.(deviceId);
+        }
+      })().finally(() => this.adding.delete(deviceId));
+      this.adding.set(deviceId, pending);
+    }
+    return pending;
   }
 
   async publicKey(deviceId) {
-    if (!this.publicKeys.has(deviceId)) {
+    if (!this.publicKeys.has(deviceId) || !this.owners.has(deviceId)) {
       const devices = await this.fetchPublicKeys([deviceId]);
       for (const d of devices) await this.addPublicKey(d.id, d.publicKey, d.userId);
     }
@@ -104,10 +144,11 @@ export class KeyRing {
   async open(payload, aad, senderId) {
     const env = typeof payload === 'string' ? JSON.parse(payload) : payload;
     if (env.v !== 1) throw new Error('Unsupported envelope version');
-    if (senderId) {
+    if (typeof env.from !== 'string') throw new Error('Malformed envelope');
+    if (senderId !== undefined) {
       await this.publicKey(env.from);
       const owner = this.owners.get(env.from);
-      if (owner && owner !== senderId) throw new Error('Message was sent from a device that belongs to someone else');
+      if (owner !== senderId) throw new Error(`Message was sealed by a device of ${owner || 'an unknown user'}, not ${senderId}`);
     }
     const wrapped = env.keys?.[this.deviceId];
     if (!wrapped) {
@@ -188,12 +229,7 @@ export async function decryptFile(encrypted, file, mime = 'application/octet-str
 // Security code for a set of device keys (PROTOCOL.md §3).
 export async function securityCode(devices) {
   const digests = [];
-  for (const d of devices) {
-    const raw = new Uint8Array(64);
-    raw.set(unb64u(d.publicKey.x), 0);
-    raw.set(unb64u(d.publicKey.y), 32);
-    digests.push(b64u(await subtle.digest('SHA-256', raw)));
-  }
+  for (const d of devices) digests.push(await keyFingerprint(d.publicKey));
   digests.sort();
   const all = new Uint8Array(await subtle.digest('SHA-256', enc.encode(digests.join(''))));
   const groups = [];

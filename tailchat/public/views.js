@@ -213,6 +213,20 @@ function chatsTab() {
     ))
     : null;
   const offline = !S.online ? slots.get('offline', '1', () => h('div', { class: 'banner warn' }, icon('info'), h('div', null, "Connecting to Tailchat… Messages you send now go out when you're back online."))) : null;
+  const linked = S.prefs.securityAlerts?.devices || [];
+  const linkedBanner = linked.length ? slots.get('linked', JSON.stringify(linked), () => h(
+    'div',
+    { class: 'banner warn' },
+    icon('shield'),
+    h(
+      'div',
+      { class: 'grow' },
+      h('div', null, `New device linked to your account: ${linked.map((d) => d.name).join(', ')}`),
+      h('div', { class: 'muted small' }, "If this wasn't you, log it out now. Anyone signed in to Tailscale as you can link a device."),
+      h('button', { type: 'button', class: 'link', onclick: () => openPanel('devices') }, 'Review linked devices'),
+    ),
+    iconButton('close', 'Dismiss', () => A.dismissSecurityAlerts({ devices: true })),
+  )) : null;
 
   let list;
   const q = S.search.trim().toLowerCase();
@@ -244,6 +258,7 @@ function chatsTab() {
     h('div', { class: 'search' }, icon('search'), chatSearchEl),
     q ? null : filters,
     offline,
+    linkedBanner,
     banner,
     h('div', { class: 'list' }, list),
     h('button', { type: 'button', class: 'fab', 'aria-label': 'New chat', title: 'New chat', onclick: () => openPanel('new-chat') }, icon('chat')),

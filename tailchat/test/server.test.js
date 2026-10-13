@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
-import { chatAad, decryptFile, encryptFile, newMessageId, securityCode } from '../public/crypto.js';
+import { KeyRing, chatAad, decryptFile, encryptFile, newMessageId, securityCode } from '../public/crypto.js';
 import { connectUser, startServer } from './helpers.js';
 
 let server;
@@ -218,5 +218,27 @@ test('a message relabelled to another sender is rejected', async () => {
   const sent = await send(alice, chat.id, { type: 'text', text: 'from alice' });
   const aad = chatAad(chat.id, sent.id);
   assert.equal((await bob.ring.open(sent.payload, aad, 'alice@dev')).text, 'from alice');
-  await assert.rejects(bob.ring.open(sent.payload, aad, 'carol@dev'), /belongs to someone else/);
+  await assert.rejects(bob.ring.open(sent.payload, aad, 'carol@dev'), /sealed by a device of alice@dev, not carol@dev/);
+});
+
+test('pinned device keys and owners cannot change', async () => {
+  const { chat } = await alice.call('POST', '/api/chats/direct', { userId: 'bob@dev' });
+  const sent = await send(alice, chat.id, { type: 'text', text: 'pinned' });
+  const aad = chatAad(chat.id, sent.id);
+  const from = JSON.parse(sent.payload).from;
+  const fetchPublicKeys = async (ids) => (await bob.call('GET', `/api/keys?ids=${ids.join(',')}`)).devices;
+  const ring = (pins, onPin) => new KeyRing({ deviceId: bob.deviceId, privateKey: bob.ring.privateKey, fetchPublicKeys, pins, onPin });
+
+  // First sight pins the key; the same key opens again later.
+  const pins = new Map();
+  const pinned = [];
+  assert.equal((await ring(pins, (id) => pinned.push(id)).open(sent.payload, aad, 'alice@dev')).text, 'pinned');
+  assert.ok(pinned.includes(from));
+  assert.equal((await ring(new Map(pins)).open(sent.payload, aad, 'alice@dev')).text, 'pinned');
+
+  // A server that swaps the key or reassigns the device is caught.
+  const swapped = new Map(pins).set(from, { ...pins.get(from), fp: 'not-the-same-key' });
+  await assert.rejects(ring(swapped).open(sent.payload, aad, 'alice@dev'), (e) => e.code === 'KEY_CHANGED');
+  const moved = new Map(pins).set(from, { ...pins.get(from), userId: 'carol@dev' });
+  await assert.rejects(ring(moved).open(sent.payload, aad, 'alice@dev'), (e) => e.code === 'KEY_CHANGED');
 });
