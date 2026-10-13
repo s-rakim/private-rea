@@ -14,7 +14,3 @@ DCIM/
 
 # PlatformIO build output
 firmware/glasses/.pio/
-
-# Tailchat
-tailchat/node_modules/
-tailchat/data/
