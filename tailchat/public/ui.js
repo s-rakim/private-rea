@@ -20,6 +20,46 @@ export function h(tag, attrs, ...children) {
   return el;
 }
 
+// Puts exactly `nodes` (in order) into `parent`, moving as little as
+// possible so focused inputs and playing media are left alone.
+export function reconcile(parent, nodes) {
+  const list = nodes.flat(Infinity).filter(Boolean);
+  const keep = new Set(list);
+  for (const c of [...parent.childNodes]) if (!keep.has(c)) c.remove();
+  list.forEach((n, i) => {
+    if (parent.childNodes[i] !== n) parent.insertBefore(n, parent.childNodes[i] || null);
+  });
+}
+
+// Caches built elements by key and rebuilds one only when its signature
+// changes.
+export class Slots {
+  constructor() {
+    this.map = new Map();
+  }
+
+  get(key, sig, build) {
+    const hit = this.map.get(key);
+    if (hit && hit.sig === sig) return hit.el;
+    const el = build();
+    this.map.set(key, { sig, el });
+    return el;
+  }
+
+  // Forget everything not used since the last sweep.
+  sweep(used) {
+    for (const k of this.map.keys()) if (!used.has(k)) this.map.delete(k);
+  }
+
+  clear() {
+    this.map.clear();
+  }
+}
+
+export function toggle(checked, onChange, label) {
+  return h('input', { type: 'checkbox', class: 'toggle', checked, 'aria-label': label, onchange: (e) => onChange(e.target.checked) });
+}
+
 function append(el, children) {
   for (const c of children.flat(Infinity)) {
     if (c === null || c === undefined || c === false) continue;
@@ -310,7 +350,9 @@ export function dialog({ title, content, actions = [], wide = false, flush = fal
   const backdrop = h('div', { class: 'backdrop', onclick: (e) => e.target === backdrop && close() }, box);
   layer().append(backdrop);
   document.addEventListener('keydown', onKey);
-  setTimeout(() => box.querySelector('input, textarea, button.btn.primary')?.focus(), 30);
+  setTimeout(() => {
+    if (!box.contains(document.activeElement)) box.querySelector('input, textarea, button.btn.primary')?.focus();
+  }, 30);
   return { close, box };
 }
 
@@ -392,10 +434,11 @@ export function emojiPicker(anchor, onPick) {
   }
 }
 
-export function viewer({ title, subtitle, content, caption, actions = [] }) {
+export function viewer({ title, subtitle, content, caption, actions = [], onClose }) {
   const close = () => {
     el.remove();
     document.removeEventListener('keydown', onKey);
+    onClose?.();
   };
   const onKey = (e) => e.key === 'Escape' && close();
   const el = h(

@@ -672,17 +672,22 @@ class Api:
             if body.get("avatar"):
                 row = db.get("SELECT id FROM files WHERE id = ? AND public = 1", body["avatar"])
                 avatar = row["id"] if row else None
+            if len(others) + 1 > MAX_GROUP:
+                fail(400, f"Groups are limited to {MAX_GROUP} members")
             chat_id = new_id()
+            # Everyone added at creation sees the "created" message, as on WhatsApp.
             with db.tx():
                 db.run(
                     "INSERT INTO chats (id, type, name, description, avatar, created_by, created_at) VALUES (?, 'group', ?, ?, ?, ?, ?)",
                     chat_id, name, description, avatar, ctx.user["id"], now(),
                 )
                 db.run("INSERT INTO members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'admin', ?)", chat_id, ctx.user["id"], now())
+                for uid in others:
+                    db.run("INSERT INTO members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)", chat_id, uid, now())
             chat = self.get_chat(chat_id)
             self.system_message(chat, ctx.user["id"], {"event": "created", "name": name})
             if others:
-                self.add_members(chat, ctx.user["id"], others)
+                self.system_message(chat, ctx.user["id"], {"event": "added", "users": others})
             self.broadcast_chat(chat_id)
             return {"chat": self.chat_view(self.get_chat(chat_id), ctx.user["id"])}
 
