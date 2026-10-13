@@ -12,12 +12,13 @@ Tailscale.
 
 from __future__ import annotations
 
-import base64
 import ipaddress
 import json
 import re
 import time
 from dataclasses import dataclass
+from email.errors import HeaderParseError
+from email.header import decode_header, make_header
 from urllib.parse import quote
 
 import aiohttp
@@ -66,22 +67,24 @@ def is_tailnet_address(raw: str | None) -> bool:
     return ip in TAILNET_V4 if ip.version == 4 else ip in TAILNET_V6
 
 
-_WORD = re.compile(r"=\?utf-8\?([qb])\?([^?]*)\?=", re.IGNORECASE)
+LOGIN = re.compile(r"^[^\s\x00-\x1f\x7f/\\]{1,320}$")
 
 
 def decode_header_word(value: str | None) -> str:
-    """Tailscale-User-Name is RFC 2047 encoded when it is not plain ASCII."""
+    """tailscaled RFC 2047 encodes Tailscale-User-Name and -Login when they
+    aren't plain ASCII. A long value is split into several encoded words,
+    and the whitespace between them isn't part of the text."""
     if not value:
         return ""
+    try:
+        text = str(make_header(decode_header(value)))
+    except (HeaderParseError, LookupError, UnicodeError, ValueError):
+        return value
+    return "".join(ch for ch in text if ch.isprintable())
 
-    def repl(m: re.Match) -> str:
-        enc, text = m.group(1).lower(), m.group(2)
-        if enc == "b":
-            return base64.b64decode(text + "=" * (-len(text) % 4)).decode("utf-8", "replace")
-        raw = re.sub(r"=([0-9a-fA-F]{2})", lambda h: chr(int(h.group(1), 16)), text.replace("_", " "))
-        return raw.encode("latin-1").decode("utf-8", "replace")
 
-    return _WORD.sub(repl, value)
+def https_url(value: str | None) -> str | None:
+    return value if value and value.startswith("https://") and len(value) < 2048 else None
 
 
 def peer(request) -> tuple[str | None, int | None]:
@@ -125,7 +128,7 @@ class IdentityResolver:
         if mode == "serve":
             if not is_loopback(addr):
                 raise IdentityError("Tailchat only accepts connections through `tailscale serve`.")
-            login = request.headers.get("Tailscale-User-Login")
+            login = decode_header_word(request.headers.get("Tailscale-User-Login"))
             if not login:
                 raise IdentityError(
                     "No Tailscale identity on this request. Open Tailchat at its https://<machine>.<tailnet>.ts.net "
@@ -133,10 +136,12 @@ class IdentityResolver:
                     401,
                 )
             login = login.lower()
+            if not LOGIN.match(login):
+                raise IdentityError("Unexpected Tailscale login name.", 400)
             return Identity(
                 login=login,
-                name=decode_header_word(request.headers.get("Tailscale-User-Name")) or login.split("@")[0],
-                avatar_url=request.headers.get("Tailscale-User-Profile-Pic") or None,
+                name=(decode_header_word(request.headers.get("Tailscale-User-Name")) or login.split("@")[0])[:60],
+                avatar_url=https_url(request.headers.get("Tailscale-User-Profile-Pic")),
             )
         if mode == "direct":
             if not is_tailnet_address(addr):
@@ -147,10 +152,13 @@ class IdentityResolver:
             login_name = profile.get("LoginName")
             if node.get("Tags") or not login_name or login_name == "tagged-devices":
                 raise IdentityError("Tagged devices have no user identity, so they cannot use Tailchat.")
+            if not isinstance(login_name, str) or not LOGIN.match(login_name.lower()):
+                raise IdentityError("Unexpected Tailscale login name.", 400)
+            name = profile.get("DisplayName")
             return Identity(
                 login=login_name.lower(),
-                name=profile.get("DisplayName") or login_name.split("@")[0],
-                avatar_url=profile.get("ProfilePicURL") or None,
+                name=(name if isinstance(name, str) and name.strip() else login_name.split("@")[0])[:60],
+                avatar_url=https_url(profile.get("ProfilePicURL") if isinstance(profile.get("ProfilePicURL"), str) else None),
             )
         # dev
         if not is_loopback(addr):

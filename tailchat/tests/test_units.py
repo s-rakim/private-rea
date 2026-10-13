@@ -5,7 +5,7 @@ import unittest
 
 from tailchat_server.api import is_emoji
 from tailchat_server.config import load_config
-from tailchat_server.tailnet import decode_header_word, is_loopback, is_tailnet_address
+from tailchat_server.tailnet import decode_header_word, https_url, is_loopback, is_tailnet_address
 
 
 class TailnetTests(unittest.TestCase):
@@ -29,6 +29,20 @@ class TailnetTests(unittest.TestCase):
         self.assertEqual(decode_header_word("Alice"), "Alice")
         self.assertEqual(decode_header_word("=?utf-8?q?Ren=C3=A9e_Smith?="), "Renée Smith")
         self.assertEqual(decode_header_word("=?utf-8?b?UmVuw6ll?="), "Renée")
+        # Long names arrive as several encoded words; the space between them isn't text.
+        self.assertEqual(decode_header_word("=?utf-8?q?Ren=C3=A9e_?= =?utf-8?q?Smith?="), "Renée Smith")
+        # A character split across two words still decodes.
+        self.assertEqual(decode_header_word("=?utf-8?q?Ren=C3?= =?utf-8?q?=A9e?="), "Renée")
+        self.assertEqual(decode_header_word("=?utf-8?q?ren=C3=A9e@example.com?="), "renée@example.com")
+        # Control characters never make it into a name.
+        self.assertEqual(decode_header_word("=?utf-8?q?Eve=0A=1B[31m?="), "Eve[31m")
+        self.assertEqual(decode_header_word("=?bogus?q?x?="), "=?bogus?q?x?=")
+
+    def test_profile_pictures_must_be_https(self):
+        self.assertEqual(https_url("https://lh3.googleusercontent.com/a/x"), "https://lh3.googleusercontent.com/a/x")
+        self.assertIsNone(https_url("http://example.com/x.png"))
+        self.assertIsNone(https_url("javascript:alert(1)"))
+        self.assertIsNone(https_url(None))
 
 
 class EmojiTests(unittest.TestCase):
