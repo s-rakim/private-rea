@@ -4,18 +4,23 @@ name: Android APK
 # release with a link to the build and the APK attached. Needs an EXPO_TOKEN
 # repository secret (an access token from expo.dev > Account settings).
 #
-# Run it from the Actions tab, or push a tag such as mobile-v0.1.0.
+# Run it from the Actions tab or push a tag such as mobile-v0.1.0. Without a
+# tag, the release is named after the version in tailchat/mobile/app.json.
 
 on:
   workflow_dispatch:
     inputs:
       tag:
         description: Release tag
-        required: true
-        default: mobile-v0.1.0
+        required: false
   push:
     tags:
       - 'mobile-v*'
+    branches:
+      - tailchat-android-apk-6f3lh1
+    paths:
+      - 'tailchat/mobile/**'
+      - '.github/workflows/android-apk.yml'
 
 permissions:
   contents: write
@@ -35,7 +40,7 @@ jobs:
       EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
       EAS_NO_VCS: '1'
       EAS_CLI: eas-cli@24.13.0
-      TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
     steps:
       - name: Check for the Expo token
         run: |
@@ -45,6 +50,11 @@ jobs:
           fi
 
       - uses: actions/checkout@v4
+
+      - name: Pick the release tag
+        run: |
+          [ -n "$TAG" ] || TAG="mobile-v$(jq -r .expo.version app.json)"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v4
         with:
