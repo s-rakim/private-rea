@@ -16,11 +16,6 @@ on:
   push:
     tags:
       - 'mobile-v*'
-    branches:
-      - tailchat-android-apk-6f3lh1
-    paths:
-      - 'tailchat/mobile/**'
-      - '.github/workflows/android-apk.yml'
 
 permissions:
   contents: write
