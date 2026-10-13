@@ -43,6 +43,7 @@ jobs:
       TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
     steps:
       - name: Check for the Expo token
+        working-directory: .
         run: |
           if [ -z "$EXPO_TOKEN" ]; then
             echo "::error::Add an EXPO_TOKEN repository secret (Settings > Secrets and variables > Actions)."
