@@ -1,6 +1,6 @@
 # Tailchat
 
-A WhatsApp-style messenger for your Tailscale tailnet, with end-to-end
+A messenger for your Tailscale tailnet, with end-to-end
 encrypted chats, file sharing, status updates and calls.
 
 Everything is in [`tailchat/`](tailchat/): start with
