@@ -145,8 +145,8 @@ test('disappearing and view-once messages', async () => {
   await alice.call('PATCH', `/api/chats/${chat.id}`, { disappearing: 1 });
   const temp = await send(alice, chat.id, { type: 'text', text: 'poof' });
   assert.ok(temp.expiresAt);
-  await new Promise((r) => setTimeout(r, 1100));
-  server.app.sweep();
+  // The test server sweeps expired messages every 200 ms.
+  await new Promise((r) => setTimeout(r, 1500));
   const { messages } = await carol.call('GET', `/api/chats/${chat.id}/messages`);
   assert.ok(!messages.some((m) => m.id === temp.id));
   await alice.call('PATCH', `/api/chats/${chat.id}`, { disappearing: 0 });

@@ -1,20 +1,18 @@
 {
-  "name": "tailchat",
+  "name": "tailchat-web",
   "version": "0.1.0",
   "private": true,
-  "description": "A WhatsApp-style messenger that lives on your Tailscale tailnet, with end-to-end encrypted chats and file sharing",
+  "description": "Tailchat's browser app and the end-to-end contract tests that drive the Python server with the browser's own crypto code",
   "type": "module",
   "license": "UNLICENSED",
   "author": "Malcolm Opondo",
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22"
   },
   "scripts": {
-    "start": "node --no-warnings=ExperimentalWarning server/index.js",
-    "dev": "TAILCHAT_AUTH=dev node --no-warnings=ExperimentalWarning server/index.js",
-    "test": "node --no-warnings=ExperimentalWarning --test test/*.test.js"
+    "test": "node --test --test-timeout=60000 test/*.test.js"
   },
-  "dependencies": {
+  "devDependencies": {
     "ws": "^8.18.0"
   }
 }
