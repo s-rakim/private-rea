@@ -478,7 +478,7 @@ module Tailchat
         logger.warn("#{@state_path} was readable by others (#{format('%o', mode)}); fixing to 0600")
         File.chmod(0o600, @state_path)
       end
-      state = JSON.parse(File.read(@state_path))
+      state = JSON.parse(File.read(@state_path, encoding: Encoding::UTF_8))
       unless state['server'] == @server
         raise Error, "#{@state_path} holds a device for #{state['server']}, not #{@server}; use another state: path"
       end
