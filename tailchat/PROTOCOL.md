@@ -1,7 +1,8 @@
 # Tailchat protocol
 
-Everything a client needs to talk to a Tailchat server: the web app, and the
-Python, Java, C# and C++ clients in `clients/`, all implement this document.
+Everything a client needs to talk to a Tailchat server: the web app and the
+clients in `clients/` (Python, Java, C#, C++, Go, Rust and Ruby) all implement
+this document.
 
 ## 1. Transport and identity
 
@@ -49,7 +50,8 @@ also wraps for itself (`S == R`), so a sender can read its own messages.
 
 ## 3. Message envelope
 
-A message's `payload` is this JSON object, serialised to a string:
+A message's `payload` is this JSON object, serialised to a string (except in
+channels, see §8):
 
 ```json
 {
@@ -114,7 +116,13 @@ Messages with `kind: "system"` are written by the server (group created,
 members added or removed, settings changed, message pinned). Their `payload` is
 plain JSON such as `{"event": "added", "users": [...]}` or
 `{"event": "renamed", "name": "..."}`, they have no `senderDevice`, and they
-are never decrypted. `senderId` is the person who caused the event.
+are never decrypted. `senderId` is the person who caused the event. Events:
+`created`, `added`, `joined` (`via: "community"` when joined from a community),
+`left`, `removed`, `promoted`, `demoted`, `renamed`, `description`, `photo`,
+`disappearing`, `settings`, `pinned`, `unpinned`, and for communities
+`community` / `community-left` (in a group: added to or removed from the
+community `name`), `community-group` / `community-group-removed` (in the
+announcements: group `name` added or removed) and `deactivated`.
 
 ## 5. Files
 
@@ -210,3 +218,35 @@ Group calls are a mesh of up to 8 people.
 | `POST /api/files[?public=1]`, `GET /api/files/:id`, `GET /api/avatars/:id` | files |
 | `GET/POST /api/status`, `DELETE /api/status/:id`, `POST /api/status/:id/view`, `GET /api/status/devices` | status updates |
 | `GET /api/calls` | call history |
+| `POST /api/chats/community {name, description?, avatar?, members?}` | new community (§8) |
+| `POST /api/communities/:id/groups {name, members?}` or `{groupId}`, `DELETE /api/communities/:id/groups/:groupId` | add a new or existing group, remove a group |
+| `POST /api/communities/:id/groups/:groupId/join`, `DELETE /api/communities/:id` | join a group, deactivate |
+| `POST /api/chats/channel {name, description?, avatar?}`, `GET /api/channels`, `POST /api/channels/:id/follow {follow}` | channels (§8) |
+
+## 8. Communities and channels
+
+A chat's `type` is `direct`, `group`, `community` or `channel`.
+
+**Communities.** A `community` chat is the community's announcements group:
+an ordinary end-to-end encrypted group in which only admins post
+(`adminsOnlySend` and `adminsOnlyEdit` are always on). Its chat view lists
+`groups: [{id, name, description, avatar, members, joined}]`; a group in a
+community has `communityId` and `communityName`. Everyone in one of its groups
+is a member of the community, members can join any of its groups, and
+leaving the community leaves its groups. Linking an existing group needs
+admin rights in both. Deactivating unlinks every group and closes the
+announcements group.
+
+**Channels.** A `channel` is a one-way broadcast that anyone on the tailnet
+can find (`GET /api/channels`) and follow. As on WhatsApp, channel posts are
+**not end-to-end encrypted**: the payload is the content object of §4 as plain
+JSON (it must have a string `type` and must not look like an envelope), and
+attachments carry their file key in that JSON, so the server can read
+everything posted in a channel. Clients must decide between plain JSON and an
+envelope from the chat's `type` alone, never from the payload's shape, and
+must tell people that a channel isn't end-to-end encrypted. Followers read
+the whole history, may react and vote, and can't post. They don't learn about
+each other: the chat view shows them only the admins and themselves (with a
+`followers` count), reactions and votes from others come with `userId: null`,
+and receipts and typing reach admins only. Calls aren't available in channels
+or community announcements.
