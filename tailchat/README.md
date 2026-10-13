@@ -57,7 +57,8 @@ To harden it further:
 
 ### Without Docker
 
-Tailchat can also run as an ordinary program on a computer that has the
+For text messages sent device to device with no server at all, see the setup
+steps in the [main README](../README.md). The full app can also run as an ordinary program on a computer that has the
 Tailscale app installed and signed in, such as your own PC. Turn on **MagicDNS**
 and **HTTPS certificates** in the [admin
 console](https://login.tailscale.com/admin/dns) first, and install
