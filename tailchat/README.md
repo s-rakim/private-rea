@@ -57,27 +57,43 @@ To harden it further:
 
 ### Without Docker
 
-On a machine that already runs Tailscale:
+Tailchat can also run as an ordinary program on a computer that has the
+Tailscale app installed and signed in, such as your own PC. Turn on **MagicDNS**
+and **HTTPS certificates** in the [admin
+console](https://login.tailscale.com/admin/dns) first, and install
+[Python](https://www.python.org/downloads/) 3.10 or newer.
 
-```sh
-cd tailchat
-pip install -r requirements.txt
-TAILCHAT_AUTH=serve python3 -m tailchat_server          # listens on 127.0.0.1:8443
-tailscale serve --bg --https=443 http://127.0.0.1:8443  # never use `tailscale funnel`
-```
+* **Windows**: double-click `start-tailchat.cmd`, or run `.\start-tailchat.cmd`
+  in PowerShell.
+* **Linux and macOS**: run `./start-tailchat.sh`.
 
-If you'd rather not install `tailscaled`, the Go gateway in `clients/go` joins
-the tailnet by itself (tsnet) and does the same job as `tailscale serve`.
+The first run sets up Python packages in `.venv`. It then checks that Tailscale
+is connected, runs `tailscale serve` for you and prints the address to open,
+`https://<this-computer>.<your-tailnet>.ts.net`. Leave the window open while
+you use Tailchat; closing it or pressing Ctrl+C stops the server and turns
+`tailscale serve` off again. Messages and files are kept in `data/`. The first
+time, Tailscale may print a link to allow Serve on your tailnet; open it,
+approve, and the start carries on.
 
-In `serve` mode the server trusts the identity headers on anything that
-connects to it on loopback, so only run it this way on a machine where you
-trust every local user and program. Docker keeps it in its own network
-namespace, which is one reason it's the recommended setup.
+Without Docker, any program on the same computer could connect to the server
+on `127.0.0.1` and claim to be anyone. To stop that, the start script makes a
+random secret (kept in `data/serve-secret`) and has `tailscale serve` add it to
+the front of every request's path. The server answers nothing else, and it
+never reaches a browser. Someone who can run `tailscale serve status` or read
+your files on that computer could still find it, so run Tailchat under an
+account no one else uses.
+
+To run the steps yourself, use `python -m tailchat_server --tailscale`, or set
+`TAILCHAT_SERVE_SECRET` and point `tailscale serve --bg --https=443` at
+`http://127.0.0.1:8443/<secret>` (never use `tailscale funnel`). If you'd
+rather not install the Tailscale app, the Go gateway in `clients/go` joins the
+tailnet by itself (tsnet) and does the same job as `tailscale serve`.
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `TAILCHAT_AUTH` | `serve` | `serve` (behind `tailscale serve`), `direct` (listen on the Tailscale IP and ask tailscaled who connects; needs `TAILCHAT_TLS_CERT`/`_KEY` from `tailscale cert`), or `dev` (local testing, loopback only) |
 | `TAILCHAT_HOST`, `TAILCHAT_PORT` | `127.0.0.1`, `8443` | where the server listens |
+| `TAILCHAT_SERVE_SECRET` | | `serve` mode only: answer only paths that start with `/<secret>/`, which `tailscale serve` adds (the start scripts set this) |
 | `TAILCHAT_ALLOWED_HOSTS` | | extra host names people may use to reach it; `*.ts.net`, tailnet addresses and `localhost` always work |
 | `TAILCHAT_DATA` | `./data` | database and encrypted files |
 | `TAILCHAT_MAX_UPLOAD_MB` | `2048` | largest file |
