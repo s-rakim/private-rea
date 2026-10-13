@@ -45,17 +45,19 @@ export class KeyRing {
     this.privateKey = privateKey;
     this.fetchPublicKeys = fetchPublicKeys; // async (ids) => [{id, publicKey}]
     this.publicKeys = new Map(); // deviceId -> CryptoKey
+    this.owners = new Map(); // deviceId -> userId
     this.wrapKeys = new Map(); // "S|R" -> CryptoKey
   }
 
-  async addPublicKey(deviceId, jwk) {
+  async addPublicKey(deviceId, jwk, userId) {
+    if (userId) this.owners.set(deviceId, userId);
     if (!this.publicKeys.has(deviceId)) this.publicKeys.set(deviceId, await importPublicKey(jwk));
   }
 
   async publicKey(deviceId) {
     if (!this.publicKeys.has(deviceId)) {
       const devices = await this.fetchPublicKeys([deviceId]);
-      for (const d of devices) await this.addPublicKey(d.id, d.publicKey);
+      for (const d of devices) await this.addPublicKey(d.id, d.publicKey, d.userId);
     }
     const key = this.publicKeys.get(deviceId);
     if (!key) throw new Error(`Unknown device ${deviceId}`);
@@ -84,7 +86,7 @@ export class KeyRing {
 
   // recipients: [{id, publicKey}] - every device that may read the message.
   async seal(content, aad, recipients) {
-    for (const d of recipients) await this.addPublicKey(d.id, d.publicKey);
+    for (const d of recipients) await this.addPublicKey(d.id, d.publicKey, d.userId);
     const contentKey = await subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt']);
     const iv = randomBytes(12);
     const ct = await subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc.encode(aad) }, contentKey, enc.encode(JSON.stringify(content)));
@@ -97,9 +99,16 @@ export class KeyRing {
     return JSON.stringify({ v: 1, from: this.deviceId, iv: b64u(iv), ct: b64u(ct), keys });
   }
 
-  async open(payload, aad) {
+  // senderId: the user the server says sent it. The sending device must be
+  // one of theirs, or the server is relabelling messages.
+  async open(payload, aad, senderId) {
     const env = typeof payload === 'string' ? JSON.parse(payload) : payload;
     if (env.v !== 1) throw new Error('Unsupported envelope version');
+    if (senderId) {
+      await this.publicKey(env.from);
+      const owner = this.owners.get(env.from);
+      if (owner && owner !== senderId) throw new Error('Message was sent from a device that belongs to someone else');
+    }
     const wrapped = env.keys?.[this.deviceId];
     if (!wrapped) {
       const err = new Error('Not encrypted for this device');

@@ -70,6 +70,9 @@ A message's `payload` is this JSON object, serialised to a string:
 * `keys` holds one wrapped content key for every device that may read it:
   `GET /api/chats/:id/devices` (all logged-in devices of all current members,
   including the sender's own) or `GET /api/status/devices` for a status.
+* Receivers must check that the envelope's `from` device belongs to the
+  message's `senderId` (the device list from `/api/keys` carries `userId`),
+  so a server can't relabel one member's message as another's.
 * To decrypt: look up your device id in `keys`, fetch the sender's public key
   with `GET /api/keys?ids=<from>` (logged-out devices are still listed), derive
   the wrap key, unwrap, then open `ct`. A device that was linked after a
@@ -126,7 +129,7 @@ aad_i     = "tailchat/v1|file|" + i + "|" + ("1" if last chunk else "0")
 blob      = concat over i of AES-256-GCM(fileKey, iv_i, chunk_i, aad_i)   # each ct is len+16 bytes
 ```
 
-`POST /api/files` with the blob as `application/octet-stream` returns
+`POST /api/files` with the blob as exactly `Content-Type: application/octet-stream` (no parameters) returns
 `{"id"}`. The upload needs an exact `Content-Length` (no chunked transfer
 encoding): `size + 16 × chunks`. When posting the message, list every
 attachment's id in the message's `files` array: that list, not the id inside
@@ -148,7 +151,9 @@ Profile and group photos are the exception: they are uploaded unencrypted with
 
 ## 6. Realtime
 
-`wss://<host>/ws`. The first frame must be `{"type":"auth","token":"<token>"}`;
+`wss://<host>/ws`. The upgrade request carries the same tailnet identity as
+any other request (Tailscale headers in `serve` mode, the dev cookie or
+`X-Dev-User` in dev mode). The first frame must be `{"type":"auth","token":"<token>"}`;
 the server answers `{"type":"ready"}`. Server events:
 
 | `type` | Meaning |

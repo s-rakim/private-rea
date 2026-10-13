@@ -226,7 +226,7 @@ pub struct Cli {
     pub base: String,
     pub state: PathBuf,
     pub user: String,
-    home: PathBuf,
+    pub home: PathBuf,
 }
 
 impl Cli {

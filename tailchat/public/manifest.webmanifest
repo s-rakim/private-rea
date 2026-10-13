@@ -1,0 +1,12 @@
+{
+  "name": "Tailchat",
+  "short_name": "Tailchat",
+  "description": "End-to-end encrypted chat, calls and file sharing on your tailnet",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#111b21",
+  "theme_color": "#008069",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

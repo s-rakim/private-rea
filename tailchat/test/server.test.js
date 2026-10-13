@@ -212,3 +212,11 @@ test('a single message can be fetched by id', async () => {
   assert.equal(message.seq, sent.seq);
   await assert.rejects(carol.call('GET', `/api/messages/${sent.id}`), (e) => e.status === 404);
 });
+
+test('a message relabelled to another sender is rejected', async () => {
+  const { chat } = await alice.call('POST', '/api/chats/direct', { userId: 'bob@dev' });
+  const sent = await send(alice, chat.id, { type: 'text', text: 'from alice' });
+  const aad = chatAad(chat.id, sent.id);
+  assert.equal((await bob.ring.open(sent.payload, aad, 'alice@dev')).text, 'from alice');
+  await assert.rejects(bob.ring.open(sent.payload, aad, 'carol@dev'), /belongs to someone else/);
+});
