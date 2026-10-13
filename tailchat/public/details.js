@@ -485,7 +485,14 @@ export function renderDetails(el, chat) {
     default:
       nodes = slots.get(
         'info',
-        JSON.stringify([chat, chat.type === 'direct' ? S.users.get(A.otherMember(chat)) : chat.members.map((m) => S.users.get(m.userId)), A.box(chat.id).list.length, [...S.files.keys()].length]),
+        JSON.stringify([
+          chat,
+          A.isDeviceChat(chat)
+            ? [A.ownDevice(A.devicePeer(chat)) || null, S.deviceCodes.get(A.devicePeer(chat)) || null]
+            : chat.type === 'direct' ? S.users.get(A.otherMember(chat)) : chat.members.map((m) => S.users.get(m.userId)),
+          A.box(chat.id).list.length,
+          [...S.files.keys()].length,
+        ]),
         () => (A.isGroupish(chat) ? groupInfo(chat) : directInfo(chat)),
       );
   }

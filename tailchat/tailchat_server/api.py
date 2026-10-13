@@ -682,9 +682,10 @@ class Api:
                 fail(400, "A channel post must be a JSON object with a type")
         return payload
 
-    def require_message(self, message_id: str, user_id: str) -> dict:
+    def require_message(self, message_id: str, user_id: str, device: str | None = None) -> dict:
+        """device: the asking device, which must be able to see the message's chat."""
         m = self.db.get("SELECT * FROM messages WHERE id = ?", message_id)
-        if not m or not self.can_see_message(m, user_id):
+        if not m or not self.can_see_message(m, user_id) or (device and not self.visible_to_device(self.get_chat(m["chat_id"]), device)):
             fail(404, "No such message")
         return m
 
@@ -1052,7 +1053,7 @@ class Api:
         @r.add("PATCH", "/api/chats/:id")
         async def update_chat(ctx: Context):
             body = await read_json(ctx.request)
-            chat, member = self.require_member(ctx.params["id"], ctx.user["id"])
+            chat, member = self.require_member(ctx.params["id"], ctx.user["id"], device=ctx.device["id"])
             is_admin = member["role"] == "admin"
             changes: list[dict] = []
             if any(k in body for k in ("name", "description", "avatar")):
@@ -1102,7 +1103,7 @@ class Api:
         @r.add("PATCH", "/api/chats/:id/prefs")
         async def prefs(ctx: Context):
             body = await read_json(ctx.request)
-            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True)
+            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True, device=ctx.device["id"])
             uid = ctx.user["id"]
 
             def set_(column: str, value) -> None:
@@ -1110,9 +1111,17 @@ class Api:
 
             if "pinned" in body:
                 if v_bool(body["pinned"], "pinned", optional=False):
-                    pinned = db.get(
-                        "SELECT COUNT(*) AS n FROM members WHERE user_id = ? AND pinned_at IS NOT NULL AND chat_id != ?", uid, chat["id"]
-                    )["n"]
+                    # Only chats this device can see, so a device chat it can't
+                    # see (or can't any more) doesn't take up a pin here.
+                    pinned = sum(
+                        1
+                        for c in db.all(
+                            """SELECT c.* FROM members m JOIN chats c ON c.id = m.chat_id
+                               WHERE m.user_id = ? AND m.pinned_at IS NOT NULL AND m.chat_id != ?""",
+                            uid, chat["id"],
+                        )
+                        if self.visible_to_device(c, ctx.device["id"])
+                    )
                     if pinned >= 3:
                         fail(400, "You can only pin up to 3 chats")
                     set_("pinned_at", now())
@@ -1130,7 +1139,7 @@ class Api:
 
         @r.add("POST", "/api/chats/:id/clear")
         async def clear(ctx: Context):
-            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True)
+            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True, device=ctx.device["id"])
             seq = self.get_chat(chat["id"])["last_seq"]
             db.run(
                 "UPDATE members SET cleared_seq = ?, read_seq = MAX(read_seq, ?) WHERE chat_id = ? AND user_id = ?",
@@ -1144,7 +1153,7 @@ class Api:
         # former group member's copy is removed for good.
         @r.add("DELETE", "/api/chats/:id")
         async def delete_chat(ctx: Context):
-            chat, member = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True)
+            chat, member = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True, device=ctx.device["id"])
             if chat["type"] in GROUPISH and member["left_at"] is None:
                 fail(400, "Exit the group before deleting it")
             seq = chat["last_seq"]
@@ -1442,6 +1451,10 @@ class Api:
                 if other and self.is_blocked(other, uid):
                     fail(403, "You can't message this contact")
             payload = self.check_payload(chat, body.get("payload"))
+            # The other device is you too, and you can't open your own view
+            # once message.
+            if body.get("viewOnce") is True and chat["device_pair"]:
+                fail(400, "View once isn't available between your own devices")
             if "id" in body:
                 message_id = v_str(body["id"], "id", min=16, max=32)
                 if not all(c.isascii() and (c.isalnum() or c in "-_") for c in message_id):
@@ -1465,10 +1478,8 @@ class Api:
 
         @r.add("GET", "/api/messages/:id")
         async def get_message(ctx: Context):
-            m = self.require_message(ctx.params["id"], ctx.user["id"])
-            if self.db.get("SELECT 1 FROM hidden WHERE user_id = ? AND message_id = ?", ctx.user["id"], m["id"]) or not self.visible_to_device(
-                self.get_chat(m["chat_id"]), ctx.device["id"]
-            ):
+            m = self.require_message(ctx.params["id"], ctx.user["id"], ctx.device["id"])
+            if self.db.get("SELECT 1 FROM hidden WHERE user_id = ? AND message_id = ?", ctx.user["id"], m["id"]):
                 fail(404, "No such message")
             return {"message": self.message_view(m, ctx.user["id"], ctx.device["id"])}
 
@@ -1476,8 +1487,8 @@ class Api:
         async def edit(ctx: Context):
             body = await read_json(ctx.request, MAX_PAYLOAD + 64 * 1024)
             uid = ctx.user["id"]
-            m = self.require_message(ctx.params["id"], uid)
-            if m["sender_id"] != uid or m["kind"] != "msg" or not self.visible_to_device(self.get_chat(m["chat_id"]), ctx.device["id"]):
+            m = self.require_message(ctx.params["id"], uid, ctx.device["id"])
+            if m["sender_id"] != uid or m["kind"] != "msg":
                 fail(403, "You can only edit your own messages")
             if m["deleted_at"]:
                 fail(400, "This message was deleted")
@@ -1496,7 +1507,7 @@ class Api:
         @r.add("DELETE", "/api/messages/:id")
         async def delete_message(ctx: Context):
             uid = ctx.user["id"]
-            m = self.require_message(ctx.params["id"], uid)
+            m = self.require_message(ctx.params["id"], uid, ctx.device["id"])
             if ctx.query.get("for") == "everyone":
                 chat = self.get_chat(m["chat_id"])
                 member = self.active_member(m["chat_id"], uid)
@@ -1520,7 +1531,7 @@ class Api:
         async def react(ctx: Context):
             body = await read_json(ctx.request)
             uid = ctx.user["id"]
-            m = self.require_message(ctx.params["id"], uid)
+            m = self.require_message(ctx.params["id"], uid, ctx.device["id"])
             if not self.active_member(m["chat_id"], uid):
                 fail(403, "You are not in this chat")
             if m["kind"] != "msg" or m["deleted_at"]:
@@ -1543,7 +1554,7 @@ class Api:
         async def star(ctx: Context):
             body = await read_json(ctx.request)
             uid = ctx.user["id"]
-            m = self.require_message(ctx.params["id"], uid)
+            m = self.require_message(ctx.params["id"], uid, ctx.device["id"])
             if v_bool(body.get("starred"), "starred", optional=False):
                 db.run("INSERT OR IGNORE INTO stars (user_id, message_id, at) VALUES (?, ?, ?)", uid, m["id"], now())
             else:
@@ -1556,7 +1567,7 @@ class Api:
         async def vote(ctx: Context):
             body = await read_json(ctx.request)
             uid = ctx.user["id"]
-            m = self.require_message(ctx.params["id"], uid)
+            m = self.require_message(ctx.params["id"], uid, ctx.device["id"])
             if not self.active_member(m["chat_id"], uid):
                 fail(403, "You are not in this chat")
             if m["kind"] != "msg" or m["deleted_at"]:
@@ -1582,7 +1593,7 @@ class Api:
         @r.add("POST", "/api/messages/:id/opened")
         async def opened(ctx: Context):
             uid = ctx.user["id"]
-            m = self.require_message(ctx.params["id"], uid)
+            m = self.require_message(ctx.params["id"], uid, ctx.device["id"])
             if not m["view_once"] or m["sender_id"] == uid:
                 fail(400, "Not a view-once message for you")
             db.run("INSERT OR IGNORE INTO view_once_opened (message_id, user_id, at) VALUES (?, ?, ?)", m["id"], uid, now())
@@ -1593,12 +1604,12 @@ class Api:
         async def pin(ctx: Context):
             body = await read_json(ctx.request)
             uid = ctx.user["id"]
-            chat, member = self.require_member(ctx.params["id"], uid)
+            chat, member = self.require_member(ctx.params["id"], uid, device=ctx.device["id"])
             if chat["type"] in GROUPISH and chat["admins_only_edit"] and member["role"] != "admin":
                 fail(403, "Only admins can pin messages")
             message_id = None
             if body.get("messageId") is not None:
-                m = self.require_message(v_str(body["messageId"], "messageId"), uid)
+                m = self.require_message(v_str(body["messageId"], "messageId"), uid, ctx.device["id"])
                 if m["chat_id"] != chat["id"] or m["kind"] != "msg" or m["deleted_at"]:
                     fail(400, "You can't pin that message")
                 message_id = m["id"]
@@ -1611,7 +1622,7 @@ class Api:
         async def receipts(ctx: Context):
             body = await read_json(ctx.request)
             uid = ctx.user["id"]
-            chat, member = self.require_member(ctx.params["id"], uid, allow_former=True)
+            chat, member = self.require_member(ctx.params["id"], uid, allow_former=True, device=ctx.device["id"])
             ceiling = min(chat["last_seq"], member["left_seq"] if member["left_seq"] is not None else BIG)
             delivered = min(v_int(body.get("delivered"), "delivered", optional=True) or 0, ceiling)
             read = min(v_int(body.get("read"), "read", optional=True) or 0, ceiling)
@@ -1856,6 +1867,9 @@ class Api:
             chat = self.get_chat(chat_id)
             if chat["type"] in ADMIN_POSTS:
                 sock.send(json.dumps({"type": "call", "action": "error", "callId": call_id, "message": "Calls aren't available in channels and community announcements"}))
+                return
+            if chat["device_pair"]:
+                sock.send(json.dumps({"type": "call", "action": "error", "callId": call_id, "message": "You can't call your own device"}))
                 return
             others = [u for u in self.active_member_ids(chat_id) if u != user_id and not self.either_blocked(u, user_id)]
             if chat["type"] == "group" and len(others) > 7:

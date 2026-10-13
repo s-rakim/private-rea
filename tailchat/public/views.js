@@ -163,7 +163,7 @@ function searchResults(q) {
   const nodes = [];
   const chats = sortChats([...S.chats.values()].filter((c) => A.chatTitle(c).toLowerCase().includes(q)));
   if (chats.length) nodes.push(h('div', { class: 'list-section' }, 'Chats'), chats.map(chatRow));
-  const direct = new Set(chats.filter((c) => c.type === 'direct').map((c) => A.otherMember(c)));
+  const direct = new Set(chats.filter((c) => c.type === 'direct' && !A.isDeviceChat(c)).map((c) => A.otherMember(c)));
   const people = [...S.users.values()].filter((u) => !direct.has(u.id) && (u.name.toLowerCase().includes(q) || u.id.toLowerCase().includes(q)));
   if (people.length) nodes.push(h('div', { class: 'list-section' }, 'Contacts'), people.map((u) => userRow(u, () => startDirect(u.id))));
   const hits = [];

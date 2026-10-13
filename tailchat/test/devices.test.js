@@ -51,6 +51,28 @@ test('a device chat is between two of your devices and nobody else', async () =>
   await new Promise((r) => setTimeout(r, 200));
   assert.ok(!tablet.events.some((e) => e.chat?.id === chat.id || e.message?.chatId === chat.id || e.chatId === chat.id), 'the third device hears nothing');
   await assert.rejects(tablet.call('GET', `/api/messages/${message.id}`), (e) => e.status === 404);
+  // Nor can it change the chat or its messages, even knowing their ids.
+  const refused = (e) => e.status === 404;
+  for (const [method, path, body] of [
+    ['PATCH', `/api/chats/${chat.id}`, { disappearing: 60 }],
+    ['PATCH', `/api/chats/${chat.id}/prefs`, { archived: true }],
+    ['POST', `/api/chats/${chat.id}/clear`],
+    ['DELETE', `/api/chats/${chat.id}`],
+    ['POST', `/api/chats/${chat.id}/pin`, { messageId: message.id }],
+    ['POST', `/api/chats/${chat.id}/receipts`, { read: 1 }],
+    ['POST', `/api/messages/${message.id}/react`, { emoji: '👍' }],
+    ['POST', `/api/messages/${message.id}/star`, { starred: true }],
+    ['POST', `/api/messages/${message.id}/vote`, { options: [0] }],
+    ['POST', `/api/messages/${message.id}/opened`],
+    ['PUT', `/api/messages/${message.id}`, { payload: message.payload }],
+    ['DELETE', `/api/messages/${message.id}?for=everyone`],
+  ]) await assert.rejects(tablet.call(method, path, body), refused, `${method} ${path}`);
+  assert.ok(!(await laptop.call('GET', `/api/chats/${chat.id}/messages`)).messages.find((m) => m.id === message.id).deletedAt);
+  // View once can't work here: the other device is you, and you can't open your own.
+  await assert.rejects(
+    phone.call('POST', `/api/chats/${chat.id}/messages`, { id: newMessageId(), payload: message.payload, viewOnce: true }),
+    (e) => e.status === 400,
+  );
 
   // History sharing never copies a device chat to another device.
   await tablet.call('POST', '/api/history/request');
@@ -80,4 +102,24 @@ test('you can rename your own devices', async () => {
   assert.equal((await laptop.call('GET', '/api/devices')).devices.find((d) => d.id === laptop.deviceId).name, 'Work laptop');
   await assert.rejects(other.call('PATCH', `/api/devices/${laptop.deviceId}`, { name: 'mine now' }), (e) => e.status === 404);
   await assert.rejects(phone.call('PATCH', `/api/devices/${laptop.deviceId}`, { name: '   ' }), (e) => e.status === 400);
+});
+
+test('device chats only take up pins on their own two devices', async () => {
+  const phone = await connectUser(server.base, 'pia');
+  const laptop = await connectUser(server.base, 'pia');
+  const tablet = await connectUser(server.base, 'pia');
+  const friends = await Promise.all(['qa', 'ra', 'sa'].map((n) => connectUser(server.base, n)));
+  const { chat: pair } = await phone.call('POST', '/api/chats/devices', { deviceId: tablet.deviceId });
+  await phone.call('PATCH', `/api/chats/${pair.id}/prefs`, { pinned: true });
+  const chats = [];
+  for (const f of friends) chats.push((await laptop.call('POST', '/api/chats/direct', { userId: f.id })).chat);
+  await laptop.call('PATCH', `/api/chats/${chats[0].id}/prefs`, { pinned: true });
+  await laptop.call('PATCH', `/api/chats/${chats[1].id}/prefs`, { pinned: true });
+  await laptop.call('PATCH', `/api/chats/${chats[2].id}/prefs`, { pinned: true });
+  // On the phone the device chat counts, so a fourth pin is one too many.
+  await assert.rejects(phone.call('PATCH', `/api/chats/${chats[2].id}/prefs`, { pinned: true }), (e) => e.status === 400);
+  // Once the tablet is logged out its chat is gone, and so is its pin.
+  await laptop.call('PATCH', `/api/chats/${chats[2].id}/prefs`, { pinned: false });
+  await phone.call('DELETE', `/api/devices/${tablet.deviceId}`);
+  await phone.call('PATCH', `/api/chats/${chats[2].id}/prefs`, { pinned: true });
 });

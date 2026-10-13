@@ -873,7 +873,7 @@ export function attachDialog(chat, files, { asDocument = false } = {}) {
   const kind = asDocument ? 'document' : kindFor(first);
   const url = URL.createObjectURL(first);
   const caption = h('input', { maxlength: 1024, placeholder: 'Add a caption' });
-  const single = files.length === 1 && (kind === 'image' || kind === 'video') && !A.isChannel(chat);
+  const single = files.length === 1 && (kind === 'image' || kind === 'video') && !A.isChannel(chat) && !A.isDeviceChat(chat);
   const once = h('input', { type: 'checkbox' });
   const preview = kind === 'image' || kind === 'gif'
     ? h('img', { src: url, alt: '' })

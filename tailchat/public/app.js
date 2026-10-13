@@ -585,8 +585,15 @@ export async function loadHistory() {
 }
 
 // Every other device of yours gets a chat, the first time this one sees it.
+// A chat with a device that has been logged out goes.
 const deviceChatTried = new Set();
 async function ensureDeviceChats() {
+  for (const [id, c] of S.chats) {
+    if (!isDeviceChat(c) || ownDevice(devicePeer(c))) continue;
+    S.chats.delete(id);
+    S.msgs.delete(id);
+    if (S.active === id) S.active = null;
+  }
   for (const d of S.ownDevices) {
     if (d.id === S.device.id || deviceChatTried.has(d.id)) continue;
     deviceChatTried.add(d.id);

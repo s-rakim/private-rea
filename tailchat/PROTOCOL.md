@@ -355,9 +355,12 @@ only member is that user, and its view carries `devices: [a, b]` (sorted).
 
 The server treats it as belonging to those two devices: only they get it in
 `GET /api/chats`, can fetch it, its messages or its device list, can post to
-it, and get its events. `GET /api/chats/:id/devices` lists just the two, so
-messages are sealed for them alone. It disappears once either device is
-logged out, and history sharing (§9) never copies it to a third device.
+it or change it or its messages, and get its events. Any other device gets
+`404`, and a pinned device chat doesn't count toward another device's three
+pins. `GET /api/chats/:id/devices` lists just the two, so messages are sealed
+for them alone. It disappears once either device is logged out, and history
+sharing (§9) never copies it to a third device. View once messages (`400`)
+and calls aren't available in it, since the device at the other end is you.
 
 `PATCH /api/devices/:id {name}` renames one of your devices; your devices get a
 `devices` event.
