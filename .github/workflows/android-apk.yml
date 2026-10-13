@@ -80,7 +80,7 @@ jobs:
           apk_url=$(jq -r '.[0].artifacts.buildUrl // .[0].artifacts.applicationArchiveUrl' build.json)
           owner=$(jq -r '.[0].project.ownerAccount.name // empty' build.json)
           slug=$(jq -r '.[0].project.slug // "tailchat"' build.json)
-          [ -n "$owner" ] || owner=$(npx --yes "$EAS_CLI" whoami | head -n1)
+          [ -n "$owner" ] || owner=$(npx --yes "$EAS_CLI" whoami | head -n1 | awk '{print $1}')
           echo "page=https://expo.dev/accounts/$owner/projects/$slug/builds/$id" >> "$GITHUB_OUTPUT"
           echo "apk=$apk_url" >> "$GITHUB_OUTPUT"
           curl -fsSL "$apk_url" -o "tailchat-$TAG.apk"
