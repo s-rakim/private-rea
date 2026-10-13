@@ -1,0 +1,13 @@
+node_modules/
+data/
+__pycache__/
+*.py[cod]
+.venv/
+# client build output
+clients/rust/target/
+clients/cpp/build/
+clients/java/build/
+clients/csharp/**/bin/
+clients/csharp/**/obj/
+clients/go/bin/
+*.class

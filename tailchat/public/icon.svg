@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <symbol id="mark" viewBox="0 0 64 64">
+    <circle cx="32" cy="32" r="30" fill="#25d366"/>
+    <path d="M32 13c-10.5 0-19 7.9-19 17.6 0 5.5 2.7 10.4 7 13.6L18.5 51l7.4-3.6c1.9.6 3.9.9 6.1.9 10.5 0 19-7.9 19-17.7S42.5 13 32 13z" fill="#fff"/>
+    <circle cx="24" cy="30.5" r="2.6" fill="#128c7e"/>
+    <circle cx="32" cy="30.5" r="2.6" fill="#128c7e"/>
+    <circle cx="40" cy="30.5" r="2.6" fill="#128c7e"/>
+    <circle cx="24" cy="38.5" r="2.6" fill="#128c7e" opacity=".45"/>
+    <circle cx="40" cy="22.5" r="2.6" fill="#128c7e" opacity=".45"/>
+  </symbol>
+  <use href="#mark"/>
+</svg>

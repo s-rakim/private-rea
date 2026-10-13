@@ -1,0 +1,18 @@
+{
+  "name": "tailchat-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tailchat's browser app and the end-to-end contract tests that drive the Python server with the browser's own crypto code",
+  "type": "module",
+  "license": "UNLICENSED",
+  "author": "Malcolm Opondo",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test --test-timeout=60000 test/*.test.js"
+  },
+  "devDependencies": {
+    "ws": "^8.18.0"
+  }
+}

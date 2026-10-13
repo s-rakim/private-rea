@@ -1,0 +1,38 @@
+[package]
+name = "tailchat-drop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "End-to-end encrypted file drop for Tailchat on your Tailscale tailnet"
+license = "UNLICENSED"
+publish = false
+
+[[bin]]
+name = "tailchat-drop"
+path = "src/main.rs"
+
+[lib]
+name = "tailchat_drop"
+path = "src/lib.rs"
+
+[dependencies]
+aes-gcm = "0.10"
+aes-kw = "0.2"
+base64 = "0.22"
+getrandom = "0.2"
+hkdf = "0.12"
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zeroize = "1"
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Crypto is painfully slow unoptimised; keep `cargo test` fast.
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tailchat-client"
+version = "0.1.0"
+description = "Command line client for Tailchat, the end-to-end encrypted messenger on your Tailscale tailnet"
+readme = "README.md"
+authors = [{ name = "Malcolm Opondo" }]
+requires-python = ">=3.10"
+# Crypto only; HTTP and WebSockets use the standard library.
+dependencies = ["cryptography>=41"]
+
+[project.scripts]
+tailchat = "tailchat.cli:main"
+
+[tool.setuptools]
+packages = ["tailchat"]
