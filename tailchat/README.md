@@ -19,7 +19,9 @@ published on the Docker host, and Funnel stays off.
 
 1. In the [Tailscale admin console](https://login.tailscale.com/admin/dns),
    turn on **MagicDNS** and **HTTPS certificates**.
-2. Create an auth key under **Settings > Keys**.
+2. Create an auth key under **Settings > Keys**. Make it one-off (not
+   reusable) and pre-approved, and give it a tag such as `tag:tailchat` if
+   your tailnet uses tags.
 3. Start it:
 
    ```sh
@@ -31,6 +33,8 @@ published on the Docker host, and Funnel stays off.
 4. Open `https://tailchat.<your-tailnet>.ts.net` on any device signed in to your
    tailnet. Each person's Tailscale login becomes their account the first time
    they visit.
+5. Delete the key from `.env`. The node keeps its identity in the
+   `tailscale-state` volume and doesn't need the key again.
 
 Messages and files live in the `tailchat-data` volume and the node's identity
 in `tailscale-state`. Set `TAILCHAT_HOSTNAME` in `.env` to use a machine name
@@ -38,9 +42,18 @@ other than `tailchat`, and `TAILCHAT_MAX_UPLOAD_MB` to change the 2 GB file
 limit. To update, pull the new code and run `docker compose up -d --build`
 again.
 
-The Tailchat container runs as an unprivileged user with a read-only root
-filesystem, no capabilities and `no-new-privileges`. Only the Tailscale
-container has `NET_ADMIN`, which it needs for the tailnet interface.
+Both containers run with a read-only root filesystem, no Linux capabilities
+and `no-new-privileges`, and the Tailchat one as an unprivileged user.
+Tailscale uses userspace networking, so it needs no tun device and nothing
+but `tailscale serve` is reachable on the node.
+
+To harden it further:
+
+* Limit who can reach the node with [Tailscale access
+  rules](https://tailscale.com/kb/1018/acls): for example, allow your users
+  only port 443 on `tag:tailchat`.
+* Pin the images to digests (`image: tailscale/tailscale@sha256:…`) so an
+  update only happens when you choose it.
 
 ### Without Docker
 
@@ -56,10 +69,16 @@ tailscale serve --bg --https=443 http://127.0.0.1:8443  # never use `tailscale f
 If you'd rather not install `tailscaled`, the Go gateway in `clients/go` joins
 the tailnet by itself (tsnet) and does the same job as `tailscale serve`.
 
+In `serve` mode the server trusts the identity headers on anything that
+connects to it on loopback, so only run it this way on a machine where you
+trust every local user and program. Docker keeps it in its own network
+namespace, which is one reason it's the recommended setup.
+
 | Setting | Default | Meaning |
 |---|---|---|
-| `TAILCHAT_AUTH` | `serve` | `serve` (behind `tailscale serve`), `direct` (listen on the Tailscale IP and ask tailscaled who connects; also set `TAILCHAT_TLS_CERT`/`_KEY` from `tailscale cert`), or `dev` (local testing, loopback only) |
+| `TAILCHAT_AUTH` | `serve` | `serve` (behind `tailscale serve`), `direct` (listen on the Tailscale IP and ask tailscaled who connects; needs `TAILCHAT_TLS_CERT`/`_KEY` from `tailscale cert`), or `dev` (local testing, loopback only) |
 | `TAILCHAT_HOST`, `TAILCHAT_PORT` | `127.0.0.1`, `8443` | where the server listens |
+| `TAILCHAT_ALLOWED_HOSTS` | | extra host names people may use to reach it; `*.ts.net`, tailnet addresses and `localhost` always work |
 | `TAILCHAT_DATA` | `./data` | database and encrypted files |
 | `TAILCHAT_MAX_UPLOAD_MB` | `2048` | largest file |
 | `TAILCHAT_STATUS_HOURS` | `24` | how long status updates last |
@@ -97,7 +116,14 @@ Not included: payments, business tools, live location and a sticker store.
 Each device (browser or client) makes its own P-256 key pair and keeps the
 private key to itself. A message is sealed with a fresh AES-256-GCM key, which
 is wrapped for every device of every member. Files are encrypted in 1 MiB
-chunks before upload. The full design is in [PROTOCOL.md](PROTOCOL.md).
+chunks before upload. Call setup is sealed the same way, so the server can't
+put itself in the middle of a call. The full design is in
+[PROTOCOL.md](PROTOCOL.md).
+
+Every device key the app sees is pinned to its owner. When someone you talk to
+links a new device, their chats with you say their security code changed, and
+a new device on your own account gets a warning banner, so a device added
+behind your back doesn't go unnoticed.
 
 What the server can see: who is in which chat, when messages are sent and
 how big they are, reactions, poll vote positions, receipts, profile names and
@@ -114,6 +140,15 @@ Things to know:
   could serve a modified app, as with any web-based messenger. Comparing
   security codes catches swapped keys, and the command-line clients don't
   depend on the server for their code.
+* Keys are long-lived device keys, so there is no forward secrecy: someone who
+  steals a device's private key and has kept copies of the server's data can
+  read what was sent to that device. Log out lost devices from **Linked
+  devices**.
+* In a group, a member working together with whoever runs the server could
+  make a message look like it came from another member. Messages aren't
+  signed, which is a trade-off for keeping one shared key per message.
+* Someone who runs the server could hold back messages, replay an old status
+  or roll back an edit. They can't read or change what's inside.
 * Status updates go to everyone on your tailnet who uses Tailchat, like
   WhatsApp's "My contacts" setting.
 * Broadcast lists are saved in the browser that made them.
