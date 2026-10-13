@@ -35,7 +35,8 @@ CREATE INDEX IF NOT EXISTS devices_user ON devices(user_id);
 
 CREATE TABLE IF NOT EXISTS chats (
   id TEXT PRIMARY KEY,
-  type TEXT NOT NULL CHECK (type IN ('direct', 'group', 'broadcast')),
+  -- community: a community's announcements group; channel: one-way posts to followers
+  type TEXT NOT NULL CHECK (type IN ('direct', 'group', 'community', 'channel')),
   name TEXT,
   description TEXT NOT NULL DEFAULT '',
   avatar TEXT,
@@ -47,7 +48,8 @@ CREATE TABLE IF NOT EXISTS chats (
   admins_only_send INTEGER NOT NULL DEFAULT 0,
   admins_only_edit INTEGER NOT NULL DEFAULT 0,
   pinned_message TEXT,
-  last_seq INTEGER NOT NULL DEFAULT 0
+  last_seq INTEGER NOT NULL DEFAULT 0,
+  community_id TEXT                  -- a group that belongs to a community
 );
 
 CREATE TABLE IF NOT EXISTS members (
@@ -155,9 +157,25 @@ class Database:
         # Autocommit mode: transactions are opened explicitly with tx().
         self.conn = sqlite3.connect(data_dir / "tailchat.db", isolation_level=None, check_same_thread=False)
         self.conn.row_factory = _dict_row
-        self.conn.executescript("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
+        self.conn.executescript("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")
+        self._migrate()
         self.conn.executescript(SCHEMA)
+        self.conn.execute("PRAGMA foreign_keys = ON")
         self._depth = 0
+
+    def _migrate(self) -> None:
+        """Databases from before communities and channels: widen the chat
+        types and add community_id (SQLite can't alter a CHECK in place)."""
+        cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(chats)").fetchall()]
+        if not cols or "community_id" in cols:
+            return
+        create = SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS chats") : SCHEMA.index(");", SCHEMA.index("CREATE TABLE IF NOT EXISTS chats")) + 2]
+        self.conn.executescript(
+            "BEGIN;"
+            + create.replace("IF NOT EXISTS chats", "chats_new")
+            + f"INSERT INTO chats_new ({', '.join(cols)}) SELECT {', '.join(cols)} FROM chats;"
+            + "DROP TABLE chats; ALTER TABLE chats_new RENAME TO chats; COMMIT;"
+        )
 
     def get(self, sql: str, *args) -> dict | None:
         return self.conn.execute(sql, args).fetchone()

@@ -23,6 +23,11 @@ from .httputil import Context, HttpError, Router, fail, json_response, new_id, r
 MAX_PAYLOAD = 512 * 1024  # an encrypted message envelope, thumbnails included
 MAX_GROUP = 1024
 BIG = 2**53 - 1
+# Chats with admins, a name and members: groups, community announcement
+# groups and channels.
+GROUPISH = ("group", "community", "channel")
+# In these only admins post, and everyone else reads.
+ADMIN_POSTS = ("community", "channel")
 
 
 def now() -> int:
@@ -162,7 +167,7 @@ class Api:
 
     def require_admin(self, chat_id: str, user_id: str):
         chat, member = self.require_member(chat_id, user_id)
-        if chat["type"] != "group":
+        if chat["type"] not in GROUPISH:
             fail(400, "Only groups have admins")
         if member["role"] != "admin":
             fail(403, "Only group admins can do that")
@@ -205,6 +210,13 @@ class Api:
         db = self.db
         me = db.get("SELECT * FROM members WHERE chat_id = ? AND user_id = ?", chat["id"], viewer)
         members = db.all("SELECT * FROM members WHERE chat_id = ? ORDER BY joined_at", chat["id"])
+        followers = None
+        if chat["type"] == "channel":
+            followers = sum(1 for m in members if m["left_at"] is None)
+            # Followers don't see each other, only the channel's admins.
+            if me["role"] != "admin":
+                members = [m for m in members if m["role"] == "admin" or m["user_id"] == viewer]
+        community = db.get("SELECT id, name FROM chats WHERE id = ?", chat["community_id"]) if chat["community_id"] else None
         floor = self.visible_floor(me)
         ceiling = me["left_seq"] if me["left_seq"] is not None else BIG
         last = db.get(
@@ -233,6 +245,10 @@ class Api:
             "inviteCode": chat["invite_code"] if me["role"] == "admin" and active else None,
             "pinnedMessage": chat["pinned_message"],
             "lastSeq": chat["last_seq"],
+            "communityId": community["id"] if community else None,
+            "communityName": community["name"] if community else None,
+            "followers": followers,
+            "groups": self.community_groups(chat["id"], viewer) if chat["type"] == "community" else None,
             "members": [self.member_view(m, chat, viewer) for m in members],
             "me": {
                 "role": me["role"],
@@ -250,6 +266,73 @@ class Api:
             "lastMessage": self.message_view(last, viewer) if last else None,
         }
 
+    def community_groups(self, community_id: str, viewer: str) -> list[dict]:
+        rows = self.db.all(
+            """SELECT c.*, (SELECT COUNT(*) FROM members m WHERE m.chat_id = c.id AND m.left_at IS NULL) AS n,
+                      (SELECT 1 FROM members m WHERE m.chat_id = c.id AND m.user_id = ? AND m.left_at IS NULL) AS joined
+               FROM chats c WHERE c.community_id = ? ORDER BY c.name COLLATE NOCASE""",
+            viewer, community_id,
+        )
+        return [
+            {
+                "id": g["id"],
+                "name": g["name"],
+                "description": g["description"],
+                "avatar": f"/api/avatars/{g['avatar']}" if g["avatar"] else None,
+                "members": g["n"],
+                "joined": bool(g["joined"]),
+            }
+            for g in rows
+        ]
+
+    def create_group(self, creator: str, name: str, description: str, avatar: str | None, others: list[str],
+                     *, type: str = "group", community_id: str | None = None) -> dict:
+        db = self.db
+        if len(others) + 1 > MAX_GROUP:
+            fail(400, f"Groups are limited to {MAX_GROUP} members")
+        chat_id = new_id()
+        admin_posts = int(type in ADMIN_POSTS)
+        # Everyone added at creation sees the "created" message, as on WhatsApp.
+        with db.tx():
+            db.run(
+                """INSERT INTO chats (id, type, name, description, avatar, created_by, created_at, admins_only_send, admins_only_edit, community_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                chat_id, type, name, description, avatar, creator, now(), admin_posts, admin_posts, community_id,
+            )
+            db.run("INSERT INTO members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'admin', ?)", chat_id, creator, now())
+            for uid in others:
+                db.run("INSERT INTO members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)", chat_id, uid, now())
+        chat = self.get_chat(chat_id)
+        self.system_message(chat, creator, {"event": "created", "name": name})
+        if others:
+            self.system_message(chat, creator, {"event": "added", "users": others})
+        if community_id:
+            community = self.get_chat(community_id)
+            self.add_members(community, creator, [creator, *others], quiet=True)
+            self.system_message(chat, creator, {"event": "community", "name": community["name"]})
+            self.system_message(community, creator, {"event": "community-group", "name": name})
+            self.broadcast_chat(community_id)
+        self.broadcast_chat(chat_id)
+        return self.get_chat(chat_id)
+
+    def read_new_chat(self, body: dict, ctx: Context) -> tuple[str, str, str | None, list[str]]:
+        """Name, description, photo and initial members for a new group, community or channel."""
+        db = self.db
+        name = v_str(body.get("name"), "name", min=1, max=100)
+        description = v_str(body.get("description"), "description", optional=True, max=2048) or ""
+        members = body.get("members", [])
+        if not isinstance(members, list):
+            fail(400, "members must be a list of user ids")
+        others = list(dict.fromkeys(m for m in members if m != ctx.user["id"]))
+        for uid in others:
+            if not isinstance(uid, str) or not db.get("SELECT 1 FROM users WHERE id = ?", uid):
+                fail(400, "Unknown member")
+        avatar = None
+        if body.get("avatar"):
+            row = db.get("SELECT id FROM files WHERE id = ? AND public = 1", body["avatar"])
+            avatar = row["id"] if row else None
+        return name, description, avatar, others
+
     def opened_by(self, message_id: str) -> list[dict]:
         return self.db.all("SELECT user_id AS userId, at FROM view_once_opened WHERE message_id = ?", message_id)
 
@@ -259,6 +342,16 @@ class Api:
             db.get("SELECT 1 FROM view_once_opened WHERE message_id = ? AND user_id = ?", m["id"], viewer)
         )
         mine = m["sender_id"] == viewer
+        # Channel followers see reaction and vote counts, not who.
+        anonymous = bool(db.get(
+            """SELECT 1 FROM chats c LEFT JOIN members me ON me.chat_id = c.id AND me.user_id = ?
+               WHERE c.id = ? AND c.type = 'channel' AND (me.role IS NULL OR me.role != 'admin')""",
+            viewer, m["chat_id"],
+        ))
+
+        def who(user_id: str):
+            return user_id if not anonymous or user_id == viewer else None
+
         view = {
             "id": m["id"],
             "chatId": m["chat_id"],
@@ -274,9 +367,12 @@ class Api:
             "editedAt": m["edited_at"],
             "deletedAt": m["deleted_at"],
             "expiresAt": m["expires_at"],
-            "reactions": db.all("SELECT user_id AS userId, emoji FROM reactions WHERE message_id = ? ORDER BY at", m["id"]),
+            "reactions": [
+                {"userId": who(r["userId"]), "emoji": r["emoji"]}
+                for r in db.all("SELECT user_id AS userId, emoji FROM reactions WHERE message_id = ? ORDER BY at", m["id"])
+            ],
             "votes": [
-                {"userId": v["userId"], "options": json.loads(v["options"])}
+                {"userId": who(v["userId"]), "options": json.loads(v["options"])}
                 for v in db.all("SELECT user_id AS userId, options FROM poll_votes WHERE message_id = ?", m["id"])
             ],
             "starred": bool(db.get("SELECT 1 FROM stars WHERE user_id = ? AND message_id = ?", viewer, m["id"])),
@@ -335,9 +431,12 @@ class Api:
         self.broadcast_message(m)
         return m
 
-    def add_members(self, chat: dict, actor: str, user_ids: list[str]) -> list[str]:
+    def add_members(self, chat: dict, actor: str, user_ids: list[str], *, quiet: bool = False, via: str | None = None) -> list[str]:
         db = self.db
         added: list[str] = []
+        # Channel followers read the whole history (posts aren't end-to-end
+        # encrypted, so there is nothing they couldn't decrypt).
+        history = chat["type"] == "channel"
         with db.tx():
             for uid in user_ids:
                 if not db.get("SELECT 1 FROM users WHERE id = ?", uid):
@@ -346,25 +445,35 @@ class Api:
                 if existing and existing["left_at"] is None:
                     continue
                 seq = db.get("SELECT last_seq FROM chats WHERE id = ?", chat["id"])["last_seq"]
+                floor = 0 if history else seq
                 if existing:
                     db.run(
                         """UPDATE members SET left_at = NULL, left_seq = NULL, role = 'member', joined_at = ?, joined_seq = ?,
                              cleared_seq = ?, read_seq = ?, delivered_seq = ?, removed = 0 WHERE chat_id = ? AND user_id = ?""",
-                        now(), seq, seq, seq, seq, chat["id"], uid,
+                        now(), floor, floor, seq, seq, chat["id"], uid,
                     )
                 else:
                     db.run(
                         """INSERT INTO members (chat_id, user_id, role, joined_at, joined_seq, read_seq, delivered_seq)
                            VALUES (?, ?, 'member', ?, ?, ?, ?)""",
-                        chat["id"], uid, now(), seq, seq, seq,
+                        chat["id"], uid, now(), floor, seq, seq,
                     )
                 added.append(uid)
             count = db.get("SELECT COUNT(*) AS n FROM members WHERE chat_id = ? AND left_at IS NULL", chat["id"])["n"]
             if count > MAX_GROUP:
                 fail(400, f"Groups are limited to {MAX_GROUP} members")
-        if added:
+        if added and chat["type"] != "channel" and not quiet:
             joined = len(added) == 1 and added[0] == actor
-            self.system_message(chat, actor, {"event": "joined" if joined else "added", "users": added})
+            event = {"event": "joined" if joined else "added", "users": added}
+            if via:
+                event["via"] = via
+            self.system_message(chat, actor, event)
+        # Everyone in a community's group is a member of the community.
+        if added and chat["community_id"]:
+            community = self.get_chat(chat["community_id"])
+            if community:
+                if self.add_members(community, actor, added, quiet=True):
+                    self.broadcast_chat(community["id"])
         return added
 
     def remove_member(self, chat: dict, actor: str, uid: str) -> None:
@@ -374,9 +483,18 @@ class Api:
             "UPDATE members SET left_at = ?, left_seq = ?, role = 'member' WHERE chat_id = ? AND user_id = ?",
             now(), seq, chat["id"], uid,
         )
-        self.system_message(chat, actor, {"event": "left" if actor == uid else "removed", "users": [uid]})
+        if chat["type"] != "channel":
+            self.system_message(chat, actor, {"event": "left" if actor == uid else "removed", "users": [uid]})
+        # Leaving a community means leaving its groups too.
+        if chat["type"] == "community":
+            for g in db.all(
+                """SELECT c.* FROM chats c JOIN members m ON m.chat_id = c.id
+                   WHERE c.community_id = ? AND m.user_id = ? AND m.left_at IS NULL""",
+                chat["id"], uid,
+            ):
+                self.remove_member(g, actor, uid)
         # Keep at least one admin, like WhatsApp: promote the longest-standing member.
-        if not db.get("SELECT 1 FROM members WHERE chat_id = ? AND left_at IS NULL AND role = 'admin'", chat["id"]):
+        if chat["type"] != "channel" and not db.get("SELECT 1 FROM members WHERE chat_id = ? AND left_at IS NULL AND role = 'admin'", chat["id"]):
             nxt = db.get("SELECT user_id FROM members WHERE chat_id = ? AND left_at IS NULL ORDER BY joined_at LIMIT 1", chat["id"])
             if nxt:
                 db.run("UPDATE members SET role = 'admin' WHERE chat_id = ? AND user_id = ?", chat["id"], nxt["user_id"])
@@ -388,7 +506,8 @@ class Api:
             r["user_id"]
             for r in self.db.all(
                 """SELECT DISTINCT m2.user_id FROM members m1 JOIN members m2 ON m1.chat_id = m2.chat_id
-                   WHERE m1.user_id = ? AND m2.left_at IS NULL""",
+                   JOIN chats c ON c.id = m1.chat_id
+                   WHERE m1.user_id = ? AND m2.left_at IS NULL AND c.type != 'channel'""",
                 user_id,
             )
         ]
@@ -475,6 +594,19 @@ class Api:
         self.db.run("DELETE FROM statuses WHERE id = ?", s["id"])
         self.delete_orphan_files(json.loads(s["files"]))
         self.hub.send_to_users(self.all_user_ids(), {"type": "status-gone", "id": s["id"]})
+
+    @staticmethod
+    def check_payload(chat: dict, payload) -> str:
+        if not isinstance(payload, str) or len(payload) > MAX_PAYLOAD:
+            fail(400, "payload must be an encrypted envelope string")
+        if chat["type"] == "channel":
+            try:
+                post = json.loads(payload)
+            except ValueError:
+                post = None
+            if not isinstance(post, dict) or not isinstance(post.get("type"), str) or "ct" in post:
+                fail(400, "A channel post must be a JSON object with a type")
+        return payload
 
     def require_message(self, message_id: str, user_id: str) -> dict:
         m = self.db.get("SELECT * FROM messages WHERE id = ?", message_id)
@@ -659,37 +791,30 @@ class Api:
         @r.add("POST", "/api/chats/group")
         async def group(ctx: Context):
             body = await read_json(ctx.request)
-            name = v_str(body.get("name"), "name", min=1, max=100)
-            description = v_str(body.get("description"), "description", optional=True, max=2048) or ""
-            members = body.get("members")
-            if not isinstance(members, list):
+            if not isinstance(body.get("members"), list):
                 fail(400, "members must be a list of user ids")
-            others = list(dict.fromkeys(m for m in members if m != ctx.user["id"]))
-            for uid in others:
-                if not isinstance(uid, str) or not db.get("SELECT 1 FROM users WHERE id = ?", uid):
-                    fail(400, "Unknown member")
-            avatar = None
-            if body.get("avatar"):
-                row = db.get("SELECT id FROM files WHERE id = ? AND public = 1", body["avatar"])
-                avatar = row["id"] if row else None
-            if len(others) + 1 > MAX_GROUP:
-                fail(400, f"Groups are limited to {MAX_GROUP} members")
-            chat_id = new_id()
-            # Everyone added at creation sees the "created" message, as on WhatsApp.
-            with db.tx():
-                db.run(
-                    "INSERT INTO chats (id, type, name, description, avatar, created_by, created_at) VALUES (?, 'group', ?, ?, ?, ?, ?)",
-                    chat_id, name, description, avatar, ctx.user["id"], now(),
-                )
-                db.run("INSERT INTO members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'admin', ?)", chat_id, ctx.user["id"], now())
-                for uid in others:
-                    db.run("INSERT INTO members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)", chat_id, uid, now())
-            chat = self.get_chat(chat_id)
-            self.system_message(chat, ctx.user["id"], {"event": "created", "name": name})
-            if others:
-                self.system_message(chat, ctx.user["id"], {"event": "added", "users": others})
-            self.broadcast_chat(chat_id)
-            return {"chat": self.chat_view(self.get_chat(chat_id), ctx.user["id"])}
+            name, description, avatar, others = self.read_new_chat(body, ctx)
+            chat = self.create_group(ctx.user["id"], name, description, avatar, others)
+            return {"chat": self.chat_view(chat, ctx.user["id"])}
+
+        # A community is its announcements group (admins post, everyone reads)
+        # plus the groups linked to it.
+        @r.add("POST", "/api/chats/community")
+        async def community(ctx: Context):
+            body = await read_json(ctx.request)
+            name, description, avatar, others = self.read_new_chat(body, ctx)
+            chat = self.create_group(ctx.user["id"], name, description, avatar, others, type="community")
+            return {"chat": self.chat_view(chat, ctx.user["id"])}
+
+        # Channels are one-way broadcasts that anyone on the tailnet can follow.
+        # Like WhatsApp channels, posts are not end-to-end encrypted: the client
+        # sends them as plain JSON and the server stores them as they are.
+        @r.add("POST", "/api/chats/channel")
+        async def channel(ctx: Context):
+            body = await read_json(ctx.request)
+            name, description, avatar, _ = self.read_new_chat({**body, "members": []}, ctx)
+            chat = self.create_group(ctx.user["id"], name, description, avatar, [], type="channel")
+            return {"chat": self.chat_view(chat, ctx.user["id"])}
 
         @r.add("PATCH", "/api/chats/:id")
         async def update_chat(ctx: Context):
@@ -698,12 +823,14 @@ class Api:
             is_admin = member["role"] == "admin"
             changes: list[dict] = []
             if any(k in body for k in ("name", "description", "avatar")):
-                if chat["type"] != "group":
+                if chat["type"] not in GROUPISH:
                     fail(400, "Only groups have a name, description and photo")
                 if chat["admins_only_edit"] and not is_admin:
                     fail(403, "Only admins can edit this group's info")
             if ("adminsOnlySend" in body or "adminsOnlyEdit" in body) and not is_admin:
                 fail(403, "Only admins can change group settings")
+            if ("adminsOnlySend" in body or "adminsOnlyEdit" in body) and chat["type"] in ADMIN_POSTS:
+                fail(400, "Only admins can post and edit info here")
             if "name" in body:
                 name = v_str(body["name"], "name", min=1, max=100)
                 db.run("UPDATE chats SET name = ? WHERE id = ?", name, chat["id"])
@@ -722,7 +849,7 @@ class Api:
                 changes.append({"event": "photo"})
             if "disappearing" in body:
                 secs = v_int(body["disappearing"], "disappearing", max=90 * 86400)
-                if chat["type"] == "group" and chat["admins_only_edit"] and not is_admin:
+                if chat["type"] in GROUPISH and chat["admins_only_edit"] and not is_admin:
                     fail(403, "Only admins can change disappearing messages")
                 db.run("UPDATE chats SET disappearing = ? WHERE id = ?", secs, chat["id"])
                 changes.append({"event": "disappearing", "seconds": secs})
@@ -735,6 +862,8 @@ class Api:
             for event in changes:
                 self.system_message(self.get_chat(chat["id"]), ctx.user["id"], event)
             self.broadcast_chat(chat["id"])
+            if chat["community_id"] and any(k in body for k in ("name", "description", "avatar")):
+                self.broadcast_chat(chat["community_id"])
             return {"chat": self.chat_view(self.get_chat(chat["id"]), ctx.user["id"])}
 
         @r.add("PATCH", "/api/chats/:id/prefs")
@@ -783,7 +912,7 @@ class Api:
         @r.add("DELETE", "/api/chats/:id")
         async def delete_chat(ctx: Context):
             chat, member = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True)
-            if chat["type"] == "group" and member["left_at"] is None:
+            if chat["type"] in GROUPISH and member["left_at"] is None:
                 fail(400, "Exit the group before deleting it")
             seq = chat["last_seq"]
             if member["left_at"] is not None:
@@ -817,10 +946,15 @@ class Api:
                 chat, _ = self.require_member(ctx.params["id"], ctx.user["id"])
             else:
                 chat, _ = self.require_admin(ctx.params["id"], ctx.user["id"])
-            if chat["type"] != "group":
+            if chat["type"] not in GROUPISH:
                 fail(400, "You can only leave groups")
-            if not self.active_member(chat["id"], target):
+            target_member = self.active_member(chat["id"], target)
+            if not target_member:
                 fail(404, "Not a member")
+            if chat["type"] == "channel" and target_member["role"] == "admin" and not db.get(
+                "SELECT 1 FROM members WHERE chat_id = ? AND left_at IS NULL AND role = 'admin' AND user_id != ?", chat["id"], target
+            ):
+                fail(400, "Make another follower an admin before leaving your channel")
             self.remove_member(chat, ctx.user["id"], target)
             return {"ok": True}
 
@@ -837,7 +971,8 @@ class Api:
             )["n"] <= 1:
                 fail(400, "A group needs at least one admin")
             db.run("UPDATE members SET role = ? WHERE chat_id = ? AND user_id = ?", "admin" if admin else "member", chat["id"], target)
-            self.system_message(chat, ctx.user["id"], {"event": "promoted" if admin else "demoted", "users": [target]})
+            if chat["type"] != "channel":
+                self.system_message(chat, ctx.user["id"], {"event": "promoted" if admin else "demoted", "users": [target]})
             self.broadcast_chat(chat["id"])
             return {"ok": True}
 
@@ -867,6 +1002,7 @@ class Api:
                     "name": chat["name"],
                     "description": chat["description"],
                     "avatar": f"/api/avatars/{chat['avatar']}" if chat["avatar"] else None,
+                    "type": chat["type"],
                     "memberCount": len(self.active_member_ids(chat["id"])),
                     "isMember": bool(self.active_member(chat["id"], ctx.user["id"])),
                 }
@@ -882,11 +1018,146 @@ class Api:
             self.broadcast_chat(chat["id"])
             return {"chat": self.chat_view(self.get_chat(chat["id"]), ctx.user["id"])}
 
+        # ---------- communities ----------
+
+        def require_community_admin(community_id: str, uid: str) -> dict:
+            chat, _ = self.require_admin(community_id, uid)
+            if chat["type"] != "community":
+                fail(404, "No such community")
+            return chat
+
+        def linked_group(community: dict, group_id: str) -> dict:
+            group = self.get_chat(group_id)
+            if not group or group["community_id"] != community["id"]:
+                fail(404, "That group isn't in this community")
+            return group
+
+        # Link an existing group you admin, or create a new group inside the community.
+        @r.add("POST", "/api/communities/:id/groups")
+        async def community_add_group(ctx: Context):
+            body = await read_json(ctx.request)
+            uid = ctx.user["id"]
+            community = require_community_admin(ctx.params["id"], uid)
+            if "groupId" not in body:
+                name, description, avatar, others = self.read_new_chat(body, ctx)
+                group = self.create_group(uid, name, description, avatar, others, community_id=community["id"])
+                return {"chat": self.chat_view(group, uid)}
+            group, _ = self.require_admin(v_str(body["groupId"], "groupId"), uid)
+            if group["type"] != "group":
+                fail(400, "Only groups can be added to a community")
+            if group["community_id"]:
+                fail(400, "That group is already in a community")
+            if db.get("SELECT COUNT(*) AS n FROM chats WHERE community_id = ?", community["id"])["n"] >= 100:
+                fail(400, "A community can have up to 100 groups")
+            db.run("UPDATE chats SET community_id = ? WHERE id = ?", community["id"], group["id"])
+            self.add_members(community, uid, self.active_member_ids(group["id"]), quiet=True)
+            self.system_message(self.get_chat(group["id"]), uid, {"event": "community", "name": community["name"]})
+            self.system_message(community, uid, {"event": "community-group", "name": group["name"]})
+            self.broadcast_chat(group["id"])
+            self.broadcast_chat(community["id"])
+            return {"chat": self.chat_view(self.get_chat(group["id"]), uid)}
+
+        @r.add("DELETE", "/api/communities/:id/groups/:groupId")
+        async def community_remove_group(ctx: Context):
+            uid = ctx.user["id"]
+            community = require_community_admin(ctx.params["id"], uid)
+            group = linked_group(community, ctx.params["groupId"])
+            db.run("UPDATE chats SET community_id = NULL WHERE id = ?", group["id"])
+            self.system_message(self.get_chat(group["id"]), uid, {"event": "community-left", "name": community["name"]})
+            self.system_message(community, uid, {"event": "community-group-removed", "name": group["name"]})
+            self.broadcast_chat(group["id"])
+            self.broadcast_chat(community["id"])
+            return {"ok": True}
+
+        # Community members can join any of its groups.
+        @r.add("POST", "/api/communities/:id/groups/:groupId/join")
+        async def community_join_group(ctx: Context):
+            uid = ctx.user["id"]
+            community, _ = self.require_member(ctx.params["id"], uid)
+            if community["type"] != "community":
+                fail(404, "No such community")
+            group = linked_group(community, ctx.params["groupId"])
+            self.add_members(group, uid, [uid], via="community")
+            self.notify_device_change(uid)
+            self.broadcast_chat(group["id"])
+            self.broadcast_chat(community["id"])
+            return {"chat": self.chat_view(self.get_chat(group["id"]), uid)}
+
+        # Deactivating unlinks every group (they carry on as normal groups) and
+        # closes the announcements group for everyone.
+        @r.add("DELETE", "/api/communities/:id")
+        async def deactivate_community(ctx: Context):
+            uid = ctx.user["id"]
+            community = require_community_admin(ctx.params["id"], uid)
+            for g in db.all("SELECT * FROM chats WHERE community_id = ?", community["id"]):
+                db.run("UPDATE chats SET community_id = NULL WHERE id = ?", g["id"])
+                self.system_message(self.get_chat(g["id"]), uid, {"event": "community-left", "name": community["name"]})
+                self.broadcast_chat(g["id"])
+            self.system_message(community, uid, {"event": "deactivated"})
+            seq = self.get_chat(community["id"])["last_seq"]
+            db.run(
+                "UPDATE members SET left_at = ?, left_seq = ?, role = 'member' WHERE chat_id = ? AND left_at IS NULL",
+                now(), seq, community["id"],
+            )
+            db.run("UPDATE chats SET invite_code = NULL WHERE id = ?", community["id"])
+            self.broadcast_chat(community["id"])
+            return {"ok": True}
+
+        # ---------- channels ----------
+
+        @r.add("GET", "/api/channels")
+        async def channel_directory(ctx: Context):
+            uid = ctx.user["id"]
+            rows = db.all(
+                """SELECT c.*, (SELECT COUNT(*) FROM members m WHERE m.chat_id = c.id AND m.left_at IS NULL) AS n,
+                          (SELECT 1 FROM members m WHERE m.chat_id = c.id AND m.user_id = ? AND m.left_at IS NULL) AS following
+                   FROM chats c WHERE c.type = 'channel'
+                     AND EXISTS (SELECT 1 FROM members m WHERE m.chat_id = c.id AND m.left_at IS NULL AND m.role = 'admin')
+                   ORDER BY n DESC, c.name COLLATE NOCASE LIMIT 500""",
+                uid,
+            )
+            return {
+                "channels": [
+                    {
+                        "id": c["id"],
+                        "name": c["name"],
+                        "description": c["description"],
+                        "avatar": f"/api/avatars/{c['avatar']}" if c["avatar"] else None,
+                        "followers": c["n"],
+                        "following": bool(c["following"]),
+                    }
+                    for c in rows
+                ]
+            }
+
+        @r.add("POST", "/api/channels/:id/follow")
+        async def follow(ctx: Context):
+            body = await read_json(ctx.request)
+            uid = ctx.user["id"]
+            chat = self.get_chat(ctx.params["id"])
+            if not chat or chat["type"] != "channel":
+                fail(404, "No such channel")
+            if v_bool(body.get("follow"), "follow", optional=False):
+                self.add_members(chat, uid, [uid])
+                self.broadcast_chat(chat["id"])
+            else:
+                member = self.active_member(chat["id"], uid)
+                if not member:
+                    return {"ok": True}
+                if member["role"] == "admin" and not db.get(
+                    "SELECT 1 FROM members WHERE chat_id = ? AND left_at IS NULL AND role = 'admin' AND user_id != ?", chat["id"], uid
+                ):
+                    fail(400, "Make another follower an admin before leaving your channel")
+                self.remove_member(chat, uid, uid)
+            return {"chat": self.chat_view(self.get_chat(chat["id"]), uid)}
+
         # Every logged-in device of every current member: the sender wraps the
         # message key once for each of them.
         @r.add("GET", "/api/chats/:id/devices")
         async def chat_devices(ctx: Context):
             chat, _ = self.require_member(ctx.params["id"], ctx.user["id"])
+            if chat["type"] == "channel":
+                fail(400, "Channel posts aren't encrypted to devices")
             rows = db.all(
                 """SELECT d.* FROM devices d JOIN members m ON m.user_id = d.user_id
                    WHERE m.chat_id = ? AND m.left_at IS NULL AND d.revoked_at IS NULL""",
@@ -925,17 +1196,15 @@ class Api:
             body = await read_json(ctx.request, MAX_PAYLOAD + 64 * 1024)
             uid = ctx.user["id"]
             chat, member = self.require_member(ctx.params["id"], uid)
-            if chat["type"] == "group" and chat["admins_only_send"] and member["role"] != "admin":
-                fail(403, "Only admins can send messages to this group")
+            if chat["type"] in GROUPISH and chat["admins_only_send"] and member["role"] != "admin":
+                fail(403, "Only admins can send messages here")
             if chat["type"] == "direct":
                 other = next((u for u in self.active_member_ids(chat["id"]) if u != uid), None)
                 if other and self.is_blocked(uid, other):
                     fail(403, "Unblock this contact to send a message")
                 if other and self.is_blocked(other, uid):
                     fail(403, "You can't message this contact")
-            payload = body.get("payload")
-            if not isinstance(payload, str) or len(payload) > MAX_PAYLOAD:
-                fail(400, "payload must be an encrypted envelope string")
+            payload = self.check_payload(chat, body.get("payload"))
             if "id" in body:
                 message_id = v_str(body["id"], "id", min=16, max=32)
                 if not all(c.isascii() and (c.isalnum() or c in "-_") for c in message_id):
@@ -977,9 +1246,7 @@ class Api:
                 fail(400, "Messages can only be edited for a short time after sending")
             if not self.active_member(m["chat_id"], uid):
                 fail(403, "You are not in this chat")
-            payload = body.get("payload")
-            if not isinstance(payload, str) or len(payload) > MAX_PAYLOAD:
-                fail(400, "payload must be an encrypted envelope string")
+            payload = self.check_payload(self.get_chat(m["chat_id"]), body.get("payload"))
             db.run("UPDATE messages SET payload = ?, sender_device = ?, edited_at = ? WHERE id = ?", payload, ctx.device["id"], now(), m["id"])
             updated = db.get("SELECT * FROM messages WHERE id = ?", m["id"])
             self.broadcast_message(updated, "message-update")
@@ -992,7 +1259,7 @@ class Api:
             if ctx.query.get("for") == "everyone":
                 chat = self.get_chat(m["chat_id"])
                 member = self.active_member(m["chat_id"], uid)
-                as_admin = chat["type"] == "group" and member and member["role"] == "admin"
+                as_admin = chat["type"] in GROUPISH and member and member["role"] == "admin"
                 if m["kind"] != "msg" or (m["sender_id"] != uid and not as_admin):
                     fail(403, "You can only delete your own messages for everyone")
                 if m["sender_id"] == uid and now() - m["created_at"] > cfg.delete_window_s * 1000:
@@ -1086,7 +1353,7 @@ class Api:
             body = await read_json(ctx.request)
             uid = ctx.user["id"]
             chat, member = self.require_member(ctx.params["id"], uid)
-            if chat["type"] == "group" and chat["admins_only_edit"] and member["role"] != "admin":
+            if chat["type"] in GROUPISH and chat["admins_only_edit"] and member["role"] != "admin":
                 fail(403, "Only admins can pin messages")
             message_id = None
             if body.get("messageId") is not None:
@@ -1118,7 +1385,10 @@ class Api:
                 next_delivered, next_read, read, chat["id"], uid,
             )
             fresh = db.get("SELECT * FROM members WHERE chat_id = ? AND user_id = ?", chat["id"], uid)
-            for other in self.ever_member_ids(chat["id"]):
+            watchers = self.ever_member_ids(chat["id"])
+            if chat["type"] == "channel":
+                watchers = [u for u in watchers if u == uid or (self.active_member(chat["id"], u) or {}).get("role") == "admin"]
+            for other in watchers:
                 hub.send_to_user(other, {"type": "receipt", "chatId": chat["id"], "member": self.member_view(fresh, chat, other)})
             hub.send_to_user(uid, {"type": "chat", "chat": self.chat_view(chat, uid)})
             return {"ok": True}
@@ -1302,7 +1572,11 @@ class Api:
     def _on_ws_message(self, sock: Socket, msg: dict) -> None:
         if msg.get("type") == "typing":
             chat_id = str(msg.get("chatId") or "")
-            if not self.active_member(chat_id, sock.user_id):
+            member = self.active_member(chat_id, sock.user_id)
+            if not member:
+                return
+            chat = self.get_chat(chat_id)
+            if chat["type"] == "channel" or (chat["type"] in GROUPISH and chat["admins_only_send"] and member["role"] != "admin"):
                 return
             kind = "recording" if msg.get("kind") == "recording" else "typing"
             for uid in self.active_member_ids(chat_id):
@@ -1327,6 +1601,9 @@ class Api:
             if not self.active_member(chat_id, user_id) or call_id in self.calls:
                 return
             chat = self.get_chat(chat_id)
+            if chat["type"] in ADMIN_POSTS:
+                sock.send(json.dumps({"type": "call", "action": "error", "callId": call_id, "message": "Calls aren't available in channels and community announcements"}))
+                return
             others = [u for u in self.active_member_ids(chat_id) if u != user_id and not self.either_blocked(u, user_id)]
             if chat["type"] == "group" and len(others) > 7:
                 sock.send(json.dumps({"type": "call", "action": "error", "callId": call_id, "message": "Group calls are limited to 8 people"}))
