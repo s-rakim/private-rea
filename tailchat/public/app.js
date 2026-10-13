@@ -2,7 +2,7 @@
 // views.js; this module owns the data and everything that talks to the server.
 import { Api, ApiError, Realtime, kvGet, kvSet } from './api.js';
 import { CallManager } from './calls.js';
-import { KeyRing, chatAad, decryptFile, encryptFile, generateDeviceKeys, newMessageId, statusAad } from './crypto.js';
+import { KeyRing, callAad, chatAad, decryptFile, encryptFile, generateDeviceKeys, newMessageId, statusAad } from './crypto.js';
 import { describeMedia, kindFor } from './media.js';
 import { toast } from './ui.js';
 
@@ -165,6 +165,17 @@ export async function boot(setStatus) {
     onChange: render,
     onIncoming: (ring) => notify(`Incoming ${ring.video ? 'video' : 'voice'} call`, nameOf(ring.from), ring.chatId),
     onEnded: () => loadCalls(),
+    onError: (err) => toast(err.message),
+    seal: async (callId, toDevice, toUser, data) => {
+      await S.ring.publicKey(toDevice);
+      if (!toUser || S.ring.owners.get(toDevice) !== toUser) throw new Error("This call's other device doesn't belong to who the server says it does");
+      return S.ring.seal(data, callAad(callId, S.device.id, toDevice), [{ id: toDevice }]);
+    },
+    open: async (callId, fromDevice, fromUser, sealed) => {
+      if (typeof sealed !== 'string') throw new Error('Unsealed call signalling refused');
+      if (JSON.parse(sealed).from !== fromDevice) throw new Error('Call signalling from the wrong device refused');
+      return S.ring.open(sealed, callAad(callId, fromDevice, S.device.id), fromUser);
+    },
   });
   realtime.connect();
   document.addEventListener('visibilitychange', () => {
@@ -631,6 +642,13 @@ export async function forwardMessage(m, chatIds) {
   for (const chatId of chatIds) await sendContent(chatId, content, { files: m.files });
 }
 
+// The sender picks an attachment's type. Only media types are kept, so a
+// blob URL can never be opened as a page (HTML or SVG) on Tailchat's origin.
+function safeMime(mime) {
+  const base = String(mime || '').split(';')[0].trim().toLowerCase();
+  return /^(image\/(png|jpeg|gif|webp|avif|heic|heif)|video\/[\w.+-]+|audio\/[\w.+-]+)$/.test(base) ? base : 'application/octet-stream';
+}
+
 // Downloads and decrypts an attachment; cached as an object URL.
 export async function ensureFile(file) {
   if (!file?.id) return null;
@@ -645,7 +663,7 @@ export async function ensureFile(file) {
         render();
       },
     });
-    const blob = await decryptFile(encrypted, file, file.mime || 'application/octet-stream');
+    const blob = await decryptFile(encrypted, file, safeMime(file.mime));
     const entry = { url: URL.createObjectURL(blob), blob };
     S.files.set(file.id, entry);
     render();

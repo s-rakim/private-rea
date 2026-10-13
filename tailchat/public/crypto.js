@@ -124,9 +124,13 @@ export class KeyRing {
     return key;
   }
 
-  // recipients: [{id, publicKey}] - every device that may read the message.
+  // recipients: [{id, publicKey, userId}] - every device that may read the
+  // message. A recipient given by id alone is looked up.
   async seal(content, aad, recipients) {
-    for (const d of recipients) await this.addPublicKey(d.id, d.publicKey, d.userId);
+    for (const d of recipients) {
+      if (d.publicKey) await this.addPublicKey(d.id, d.publicKey, d.userId);
+      else await this.publicKey(d.id);
+    }
     const contentKey = await subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt']);
     const iv = randomBytes(12);
     const ct = await subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc.encode(aad) }, contentKey, enc.encode(JSON.stringify(content)));
@@ -166,6 +170,7 @@ export class KeyRing {
 
 export const chatAad = (chatId, messageId) => `tailchat/v1|chat:${chatId}|msg:${messageId}`;
 export const statusAad = (userId) => `tailchat/v1|status:${userId}`;
+export const callAad = (callId, fromDevice, toDevice) => `tailchat/v1|call:${callId}|${fromDevice}|${toDevice}`;
 
 function chunkIv(prefix, i) {
   const iv = new Uint8Array(12);

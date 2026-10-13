@@ -14,6 +14,13 @@ The server is only reachable on your tailnet. There are no passwords:
 | `direct` | The server listens on its Tailscale IP and asks the local `tailscaled` (LocalAPI `whois`) which user owns the connecting address. Requests from outside `100.64.0.0/10` / `fd7a:115c:a1e0::/48` are refused. |
 | `dev` | Local testing only, loopback only. The user comes from the `tailchat_dev_user` cookie (set at `/dev/login`) or an `X-Dev-User` header. |
 
+In every mode the `Host` header must name this server: `localhost` or a
+loopback address, and in `serve` and `direct` mode also a `*.ts.net` name or a
+tailnet address (`TAILCHAT_ALLOWED_HOSTS` adds more). Anything else gets
+`421`, so a web page that points its own domain at the server (DNS rebinding)
+gets nowhere. `serve` mode also refuses requests that came in through Tailscale
+Funnel, and `direct` mode needs TLS (`TAILCHAT_TLS_CERT`/`_KEY`).
+
 Your Tailscale login name (`alice@example.com`) is your user id (in dev mode,
 `NAME@dev`). The first request from a new tailnet user creates their account. Tagged
 devices have no user identity and cannot use Tailchat.
@@ -29,7 +36,8 @@ POST /api/devices  {"name": "Alice's laptop", "publicKey": {"kty":"EC","crv":"P-
 Every other API call sends `Authorization: Bearer <token>`, and the token must
 belong to the tailnet user making the request. Bodies are `application/json`
 (uploads are `application/octet-stream`); the server answers no CORS
-preflights, so other websites can't call the API from your browser.
+preflights, and refuses any write or WebSocket whose `Origin` is another site,
+so other websites can't call the API from your browser.
 
 ## 2. Keys
 
@@ -69,6 +77,7 @@ channels, see §8):
   * chat message: `tailchat/v1|chat:<chatId>|msg:<messageId>` — the client
     picks `messageId` (16-32 base64url characters) and sends it as `id` when posting.
   * status update: `tailchat/v1|status:<userId>`
+  * call signalling: `tailchat/v1|call:<callId>|<from device id>|<to device id>` (§6)
 * `keys` holds one wrapped content key for every device that may read it:
   `GET /api/chats/:id/devices` (all logged-in devices of all current members,
   including the sender's own) or `GET /api/status/devices` for a status.
@@ -81,6 +90,13 @@ channels, see §8):
   message was sent has no entry and can't read it — the same as WhatsApp.
 * Your own sends also come back to you over the WebSocket (other devices of
   yours need them); match them by message id.
+* Clients should **pin** every device key they see together with its owner,
+  and refuse a key or owner that later changes. Once a client has seen a
+  person's whole device list (`/api/chats/:id/devices`, `/api/users/:id/devices`
+  or `/api/status/devices`), a device that turns up for them later is new and
+  the client should say so, the way WhatsApp says a security code changed. A
+  new device on your own account deserves a louder warning. Never wrap a key
+  for a device with `revokedAt` set.
 * Clients should show a contact's **security code** (computed over that
   contact's devices only) so people can compare it
   in person. For each device: `d = b64u(SHA-256(x || y))` over the raw 32-byte
@@ -149,13 +165,21 @@ plaintext chunks (a chunked digest, so clients can hash while streaming).
 status) that references it. The "last chunk" flag in the AAD means a server
 can't truncate a file without the decryption failing.
 
-`name` comes from the sender: receivers must strip path components and
-control characters before saving, and never overwrite an existing file.
+`name` and `mime` come from the sender: receivers must strip path components
+and control characters before saving, never overwrite an existing file, and
+only show a file inline when `mime` is an image, video or audio type (never
+HTML or SVG).
+
+Uploads wait on the server until a message or status uses them. Each person
+can have up to twice the file size limit waiting (`429` beyond that), and
+unused uploads are deleted after a day.
 `sha256` is required for new messages; receivers must reject a file whose
 digest doesn't match.
 
 Profile and group photos are the exception: they are uploaded unencrypted with
-`POST /api/files?public=1` and served from `/api/avatars/:id`.
+`POST /api/files?public=1` and served from `/api/avatars/:id`. Up to 20 can
+wait unused per person, and photos nobody uses any more are deleted after a
+day.
 
 ## 6. Realtime
 
@@ -187,8 +211,15 @@ Tailscale addresses are directly reachable). Frames are
 * `ring {callId, chatId, video}` → others get `ring {callId, chatId, from, video}`
 * `accept {callId}` → you get `joined {peers:[{deviceId,userId}]}` and send an
   SDP offer to each peer; existing peers get `peer-joined`
-* `signal {callId, toDevice, data:{sdp}|{candidate}}` → relayed as `signal {fromDevice, from, data}`
+* `signal {callId, toDevice, data:{sealed}}` → relayed as `signal {fromDevice, from, data}`
 * `decline`, `hangup` → `declined`, `peer-left`, `ended {reason}`
+
+`sealed` is an envelope (§3) holding `{sdp}` or `{candidate}`, wrapped for
+`toDevice` only, with the call AAD `tailchat/v1|call:<callId>|<fromDevice>|<toDevice>`.
+The receiver checks that the envelope's `from` is `fromDevice` and that the
+device belongs to `from`, and drops unsealed signals. The SDP carries the
+DTLS fingerprints that secure the media, so sealing it stops a server from
+putting itself in the middle of a call.
 
 Group calls are a mesh of up to 8 people.
 

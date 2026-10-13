@@ -1,19 +1,28 @@
 // Voice and video calls: WebRTC between devices, directly across the tailnet.
 // Tailscale addresses are reachable from every device, so no STUN or TURN
 // servers are configured and media never leaves the tailnet. WebRTC encrypts
-// media with DTLS-SRTP on top of WireGuard.
+// media with DTLS-SRTP on top of WireGuard. Signalling is sealed to the other
+// device's key like a message, so the server relaying it can't swap the DTLS
+// fingerprints and listen in.
 import { newMessageId } from './crypto.js';
 
 const RTC_CONFIG = { iceServers: [], bundlePolicy: 'max-bundle' };
 
 export class CallManager {
-  constructor({ realtime, onChange, onIncoming, onEnded }) {
+  // seal(callId, toDevice, toUser, data) -> envelope string, and
+  // open(callId, fromDevice, fromUser, envelope) -> data, which throws unless
+  // the envelope was sealed by fromDevice and fromDevice belongs to fromUser.
+  constructor({ realtime, onChange, onIncoming, onEnded, onError, seal, open }) {
     this.rt = realtime;
     this.onChange = onChange;
     this.onIncoming = onIncoming;
     this.onEnded = onEnded;
+    this.onError = onError;
+    this.seal = seal;
+    this.open = open;
     this.call = null; // the call this device is in
     this.incoming = new Map(); // callId -> ring event
+    this.queue = Promise.resolve(); // events are handled one at a time, in order
   }
 
   async media(video) {
@@ -113,8 +122,16 @@ export class CallManager {
     return p;
   }
 
+  // Sealing is async; the outbox keeps signals in the order they were made.
   signal(toDevice, data) {
-    this.rt.send({ type: 'call', action: 'signal', callId: this.call.callId, toDevice, data });
+    const call = this.call;
+    const userId = call.peers.get(toDevice)?.userId;
+    call.outbox = (call.outbox || Promise.resolve())
+      .then(async () => {
+        const sealed = await this.seal(call.callId, toDevice, userId, data);
+        if (this.call === call) this.rt.send({ type: 'call', action: 'signal', callId: call.callId, toDevice, data: { sealed } });
+      })
+      .catch((err) => this.onError?.(err));
   }
 
   async offer(deviceId, userId) {
@@ -124,7 +141,13 @@ export class CallManager {
     this.signal(deviceId, { sdp: p.pc.localDescription.toJSON() });
   }
 
-  async handle(event) {
+  handle(event) {
+    const run = this.queue.then(() => this.process(event));
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
+  async process(event) {
     const { action, callId } = event;
     if (action === 'ring') {
       this.incoming.set(callId, event);
@@ -150,8 +173,9 @@ export class CallManager {
         this.peer(event.deviceId, event.userId);
         break;
       case 'signal': {
+        const { sdp, candidate } = await this.open(callId, event.fromDevice, event.from, event.data?.sealed);
+        if (this.call !== call) return;
         const p = this.peer(event.fromDevice, event.from);
-        const { sdp, candidate } = event.data || {};
         if (sdp) {
           await p.pc.setRemoteDescription(sdp);
           for (const c of p.pending.splice(0)) await p.pc.addIceCandidate(c).catch(() => {});
