@@ -32,6 +32,7 @@ export const S = {
   details: null, // null | 'info' | 'starred' | 'media' | 'search'
   panel: null, // sidebar panel over the chat list: 'settings', 'new-chat', ...
   chatSearch: '',
+  community: null, // community id shown by the 'community' panel
   unreadFrom: null, // { chatId, seq, count } when a chat was opened
   reply: null,
   editing: null,
@@ -208,15 +209,23 @@ export function otherMember(chat) {
   return others[0]?.userId || S.me.id;
 }
 
+// Groups, community announcement groups and channels have a name, admins and
+// members. Only groups and communities show who sent each message: a channel
+// post speaks for the channel.
+export const isGroupish = (chat) => !!chat && chat.type !== 'direct';
+export const isChannel = (chat) => chat?.type === 'channel';
+export const showsSender = (chat) => chat?.type === 'group' || chat?.type === 'community';
+export const noun = (chat) => ({ group: 'group', community: 'community', channel: 'channel' })[chat?.type] || 'chat';
+
 export function chatTitle(chat) {
   if (!chat) return '';
-  if (chat.type === 'group') return chat.name;
+  if (isGroupish(chat)) return chat.name;
   const other = otherMember(chat);
   return isMe(other) ? `${S.me.name} (You)` : nameOf(other);
 }
 
 export function chatAvatar(chat) {
-  if (chat.type === 'group') return { id: chat.id, name: chat.name, src: chat.avatar, group: true };
+  if (isGroupish(chat)) return { id: chat.id, name: chat.name, src: chat.avatar, group: chat.type === 'group' || chat.type };
   const u = S.users.get(otherMember(chat)) || S.me;
   return { id: u.id, name: u.name, src: u.avatar };
 }
@@ -237,13 +246,46 @@ export function contentOf(m) {
   return S.content.get(contentKey(m)) || null;
 }
 
+const chatFetches = new Map();
+
+// The chat a message belongs to, fetched if this device hasn't seen it yet.
+export function chatOf(chatId) {
+  const known = S.chats.get(chatId);
+  if (known) return Promise.resolve(known);
+  let p = chatFetches.get(chatId);
+  if (!p) {
+    p = api.get(`/api/chats/${encodeURIComponent(chatId)}`).then(({ chat }) => {
+      if (!S.chats.has(chat.id)) S.chats.set(chat.id, chat);
+      render();
+      return S.chats.get(chat.id);
+    }).finally(() => chatFetches.delete(chatId));
+    chatFetches.set(chatId, p);
+  }
+  return p;
+}
+
+// Channel posts are plain JSON (channels aren't end-to-end encrypted, as on
+// WhatsApp). Whether a payload is read as plain JSON depends only on the
+// chat's type, never on what the payload looks like.
+function channelPost(payload) {
+  const post = JSON.parse(payload);
+  if (!post || typeof post !== 'object' || Array.isArray(post) || typeof post.type !== 'string') throw new Error('Unreadable channel post');
+  return post;
+}
+
+async function sealFor(chat, content, messageId) {
+  if (isChannel(chat)) return JSON.stringify(content);
+  return S.ring.seal(content, chatAad(chat.id, messageId), await devicesFor(chat.id));
+}
+
 export async function decryptMessage(m) {
   if (m.kind !== 'msg' || !m.payload || m.deletedAt) return;
   const key = contentKey(m);
   if (S.content.has(key)) return;
   S.content.set(key, { pending: true });
   try {
-    const content = await S.ring.open(m.payload, chatAad(m.chatId, m.id), m.senderId);
+    const chat = await chatOf(m.chatId);
+    const content = isChannel(chat) ? channelPost(m.payload) : await S.ring.open(m.payload, chatAad(m.chatId, m.id), m.senderId);
     S.content.set(key, { ok: content });
   } catch (err) {
     S.content.set(key, { error: err.message, code: err.code });
@@ -292,13 +334,14 @@ export function withNames(text, mentions) {
 export function systemText(m, c) {
   const who = nameOf(m.senderId);
   const names = (Array.isArray(c.users) ? c.users : []).map((u) => (isMe(u) ? 'you' : nameOf(u))).join(', ');
+  const kind = noun(S.chats.get(m.chatId));
   switch (c.event) {
     case 'created':
-      return `${who} created group "${c.name}"`;
+      return `${who} created ${kind} "${c.name}"`;
     case 'added':
       return `${who} added ${names}`;
     case 'joined':
-      return `${who} joined using this group's invite link`;
+      return c.via === 'community' ? `${who} joined from the community` : `${who} joined using this ${kind}'s invite link`;
     case 'left':
       return `${names} left`;
     case 'removed':
@@ -308,11 +351,11 @@ export function systemText(m, c) {
     case 'demoted':
       return `${who} dismissed ${names} as admin`;
     case 'renamed':
-      return `${who} changed the group name to "${c.name}"`;
+      return `${who} changed the ${kind} name to "${c.name}"`;
     case 'description':
-      return `${who} changed the group description`;
+      return `${who} changed the ${kind} description`;
     case 'photo':
-      return `${who} changed this group's icon`;
+      return `${who} changed this ${kind}'s icon`;
     case 'disappearing':
       return c.seconds ? `${who} turned on disappearing messages. New messages will disappear ${disappearAfter(c.seconds)} after they're sent.` : `${who} turned off disappearing messages.`;
     case 'settings':
@@ -322,6 +365,16 @@ export function systemText(m, c) {
       return `${who} pinned a message`;
     case 'unpinned':
       return `${who} unpinned a message`;
+    case 'community':
+      return `${who} added this group to the community "${c.name}"`;
+    case 'community-left':
+      return `${who} removed this group from the community "${c.name}"`;
+    case 'community-group':
+      return `${who} added the group "${c.name}"`;
+    case 'community-group-removed':
+      return `${who} removed the group "${c.name}"`;
+    case 'deactivated':
+      return `${who} deactivated this community`;
     default:
       return 'Group updated';
   }
@@ -337,6 +390,7 @@ function disappearAfter(s) {
 export function tickState(m, chat) {
   if (m.pending) return 'pending';
   if (m.failed) return 'failed';
+  if (isChannel(chat)) return 'sent';
   const others = chat.members.filter((x) => !x.left && x.userId !== S.me.id && x.joinedSeq < m.seq);
   if (!others.length) return 'read';
   if (others.every((x) => x.readSeq >= m.seq)) return 'read';
@@ -412,8 +466,7 @@ export async function sendContent(chatId, content, { files = [], viewOnce = fals
     render();
   }
   try {
-    const devices = await devicesFor(chatId);
-    const payload = await S.ring.seal(content, chatAad(chatId, id), devices);
+    const payload = await sealFor(await chatOf(chatId), content, id);
     const { message } = await api.post(`/api/chats/${encodeURIComponent(chatId)}/messages`, { id, payload, files, viewOnce });
     S.content.set(contentKey(message), { ok: content });
     const i = b.list.findIndex((m) => m.id === id);
@@ -495,8 +548,7 @@ export async function sendFile(chatId, file, { caption, kind = kindFor(file), vi
 }
 
 export async function editMessage(m, newContent) {
-  const devices = await devicesFor(m.chatId);
-  const payload = await S.ring.seal(newContent, chatAad(m.chatId, m.id), devices);
+  const payload = await sealFor(await chatOf(m.chatId), newContent, m.id);
   const { message } = await api.put(`/api/messages/${encodeURIComponent(m.id)}`, { payload });
   S.content.set(contentKey(message), { ok: newContent });
   upsertMessage(message);
@@ -609,7 +661,7 @@ export function typingText(chatId) {
   const entries = [...m.entries()];
   const recording = entries.some(([, t]) => t.kind === 'recording');
   const verb = recording ? 'recording audio…' : 'typing…';
-  if (chat?.type !== 'group') return verb;
+  if (!showsSender(chat)) return verb;
   if (entries.length === 1) return `${nameOf(entries[0][0])} is ${verb}`;
   return `${entries.length} people are ${verb}`;
 }
@@ -622,13 +674,13 @@ function handleEvent(e) {
       const m = e.message;
       upsertMessage(m);
       const chat = S.chats.get(m.chatId);
-      if (!chat) api.get(`/api/chats/${encodeURIComponent(m.chatId)}`).then(({ chat: c }) => S.chats.set(c.id, c) && render()).catch(() => {});
+      if (!chat) chatOf(m.chatId).catch(() => {});
       if (m.kind === 'msg' && !isMe(m.senderId)) {
         S.typing.get(m.chatId)?.delete(m.senderId);
         if (S.active === m.chatId && document.visibilityState === 'visible') markRead(m.chatId);
         else markDelivered(m.chatId, m.seq);
         if (chat && (S.active !== m.chatId || document.visibilityState !== 'visible') && !(chat.me.mutedUntil > Date.now())) {
-          waitForContent(m).then(() => notify(chatTitle(chat), (chat.type === 'group' ? `${nameOf(m.senderId)}: ` : '') + previewText(m), m.chatId));
+          waitForContent(m).then(() => notify(chatTitle(chat), (showsSender(chat) ? `${nameOf(m.senderId)}: ` : '') + previewText(m), m.chatId));
         }
       }
       break;
@@ -742,7 +794,11 @@ export function openChat(chatId, { highlight } = {}) {
     S.editing = null;
     if (S.details !== 'info' || !chatId) S.details = null;
   }
-  S.view = 'chats';
+  // Stay on the tab that lists the chat: channels under Updates, a
+  // community's chats under Communities.
+  const chat = S.chats.get(chatId);
+  if (isChannel(chat)) S.view = 'status';
+  else if (!(S.view === 'communities' && (chat?.type === 'community' || chat?.communityId))) S.view = 'chats';
   S.highlight = highlight || null;
   if (chatId && !box(chatId).loaded) loadMessages(chatId).then(() => markRead(chatId));
   else if (chatId) markRead(chatId);

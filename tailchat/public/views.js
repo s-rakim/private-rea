@@ -6,8 +6,8 @@ import { kvDelete } from './api.js';
 import { h, icon, iconButton, avatar, toast, menu, dialog, confirmDialog, promptDialog, listTime, duration, reconcile, Slots, toggle } from './ui.js';
 import { resizePhoto, kindFor } from './media.js';
 import * as O from './overlays.js';
-import { renderConversation, drafts, clearChat, deleteChat, exitGroup, attachDialog, canSend } from './conversation.js';
-import { renderDetails, starredRow } from './details.js';
+import { renderConversation, drafts, clearChat, deleteChat, exitGroup, exitLabel, attachDialog, canSend, followChannel, openCommunity } from './conversation.js';
+import { renderDetails, starredRow, inviteDialog, addMembers, deactivateCommunity } from './details.js';
 
 const slots = new Slots();
 let root;
@@ -61,25 +61,25 @@ function chatMenu(chat, anchor) {
         : prefs(chat, { markedUnread: true })),
     },
     { label: 'Clear chat', icon: 'delete', onClick: () => clearChat(chat) },
-    chat.type === 'group' && !chat.me.left
-      ? { label: 'Exit group', icon: 'exit', danger: true, onClick: () => exitGroup(chat) }
-      : { label: chat.type === 'group' ? 'Delete group' : 'Delete chat', icon: 'delete', danger: true, onClick: () => deleteChat(chat) },
+    A.isGroupish(chat) && !chat.me.left
+      ? { label: exitLabel(chat), icon: 'exit', danger: true, onClick: () => exitGroup(chat) }
+      : { label: A.isGroupish(chat) ? `Delete ${A.noun(chat)}` : 'Delete chat', icon: 'delete', danger: true, onClick: () => deleteChat(chat) },
   ]);
 }
 
-function chatRowData(chat) {
+function chatRowData(chat, title) {
   const last = chat.lastMessage;
   const draft = S.active !== chat.id ? (drafts.get(chat.id) || '').trim() : '';
   return {
     id: chat.id,
-    title: A.chatTitle(chat),
-    av: A.chatAvatar(chat),
+    title: title || A.chatTitle(chat),
+    av: title ? { id: chat.id, name: title, group: 'channel' } : A.chatAvatar(chat),
     time: listTime(last?.createdAt || chat.createdAt),
     typing: A.typingText(chat.id),
     draft: draft.slice(0, 100),
     tick: last && last.kind === 'msg' && A.isMe(last.senderId) && !last.deletedAt ? A.tickState(last, chat) : null,
-    prefix: last && chat.type === 'group' && last.kind === 'msg' && !last.deletedAt && !A.isMe(last.senderId) ? `${A.nameOf(last.senderId)}: ` : '',
-    preview: last ? A.previewText(last) : chat.type === 'group' ? 'No messages yet' : '',
+    prefix: last && A.showsSender(chat) && last.kind === 'msg' && !last.deletedAt && !A.isMe(last.senderId) ? `${A.nameOf(last.senderId)}: ` : '',
+    preview: last ? A.previewText(last) : A.isGroupish(chat) ? 'No messages yet' : '',
     unread: chat.unread,
     marked: chat.me.markedUnread,
     muted: chat.me.mutedUntil > Date.now(),
@@ -88,9 +88,11 @@ function chatRowData(chat) {
   };
 }
 
-function chatRow(chat) {
-  const d = chatRowData(chat);
-  return slots.get(`chat:${chat.id}`, JSON.stringify(d), () => {
+// title replaces the chat's own name (a community's "Announcements" row).
+function chatRow(chat, title) {
+  if (typeof title !== 'string') title = undefined; // also used as a map() callback
+  const d = chatRowData(chat, title);
+  return slots.get(`chat:${chat.id}${title ? ':alt' : ''}`, JSON.stringify(d), () => {
     let btn;
     let preview;
     if (d.typing) preview = h('span', { class: 'typing ellipsis' }, d.typing);
@@ -191,7 +193,7 @@ function chatsTab() {
       render();
     });
   }
-  const all = [...S.chats.values()];
+  const all = [...S.chats.values()].filter((c) => !A.isChannel(c));
   const archived = all.filter((c) => c.me.archived);
   const unreadArchived = archived.filter((c) => c.unread || c.me.markedUnread).length;
   const filters = slots.get('filters', S.filter, () => h(
@@ -219,7 +221,7 @@ function chatsTab() {
     const shown = sortChats(all.filter((c) => {
       if (c.me.archived) return false;
       if (S.filter === 'unread') return c.unread || c.me.markedUnread || S.active === c.id;
-      if (S.filter === 'groups') return c.type === 'group';
+      if (S.filter === 'groups') return c.type === 'group' || c.type === 'community';
       return true;
     }));
     list = [
@@ -269,7 +271,7 @@ function pickStatusMedia() {
   input.click();
 }
 
-function statusTab() {
+function statusSection() {
   const groups = O.statusGroups();
   const mine = groups.get(S.me.id) || [];
   const others = [...groups.entries()].filter(([u]) => !A.isMe(u));
@@ -285,23 +287,272 @@ function statusTab() {
     );
   };
   return [
+    h('div', { class: 'list-section' }, 'Status'),
+    h(
+      'div',
+      { class: 'row', onclick: () => (mine.length ? O.openStatus(S.me.id) : O.textStatusDialog()) },
+      mine.length ? ringAvatar(S.me, true) : avatar(S.me, 'md'),
+      h('div', { class: 'body' }, h('div', { class: 'name' }, 'My status'), h('div', { class: 'preview' }, mine.length ? `${mine.length} update${mine.length === 1 ? '' : 's'} · ${listTime(mine.at(-1).createdAt)}` : 'Click to add a status update')),
+      iconButton('camera', 'Photo or video status', (e) => { e.stopPropagation(); pickStatusMedia(); }),
+      iconButton('edit', 'Text status', (e) => { e.stopPropagation(); O.textStatusDialog(); }),
+    ),
+    recent.length ? [h('div', { class: 'list-section sub' }, 'Recent updates'), recent.map(personRow)] : null,
+    viewed.length ? [h('div', { class: 'list-section sub' }, 'Viewed updates'), viewed.map(personRow)] : null,
+    !others.length ? h('div', { class: 'empty small' }, 'No updates from others yet. Status updates disappear after 24 hours.') : null,
+    h('div', { class: 'empty small' }, icon('lock'), ' Your status updates are end-to-end encrypted'),
+  ];
+}
+
+function action(iconName, label, onClick, sub) {
+  return h('div', { class: 'row short', onclick: onClick }, h('div', { class: 'row-icon accent' }, icon(iconName)), h('div', { class: 'body' }, h('div', null, label), sub ? h('div', { class: 'preview' }, sub) : null));
+}
+
+function channelsSection() {
+  const followed = sortChats([...S.chats.values()].filter((c) => A.isChannel(c) && !c.me.left));
+  return [
+    h('div', { class: 'list-section' }, 'Channels'),
+    followed.map(chatRow),
+    !followed.length ? h('div', { class: 'empty small' }, 'Follow channels to get updates on topics that matter to you, from people on your tailnet.') : null,
+    action('search', 'Find channels', () => openPanel('channels')),
+    action('add', 'Create channel', newChannel),
+  ];
+}
+
+function updatesTab() {
+  return [h('div', { class: 'list' }, statusSection(), channelsSection())];
+}
+
+// ---------- channels ----------
+
+function newChannel() {
+  const name = h('input', { maxlength: 100, placeholder: 'Channel name' });
+  const description = h('textarea', { rows: 3, maxlength: 2048, placeholder: 'Describe your channel (optional)' });
+  dialog({
+    title: 'New channel',
+    content: [
+      h('label', { class: 'field' }, name),
+      h('label', { class: 'field' }, description),
+      h('p', { class: 'muted small' }, icon('info'), " Anyone on your tailnet can find and follow your channel. Like WhatsApp channels, posts aren't end-to-end encrypted, and followers can't see each other."),
+    ],
+    actions: [
+      { label: 'Cancel', onClick: (close) => close() },
+      {
+        label: 'Create channel',
+        kind: 'primary',
+        onClick: async (close) => {
+          if (!name.value.trim()) return toast('Give the channel a name');
+          try {
+            const { chat } = await api.post('/api/chats/channel', { name: name.value.trim(), description: description.value });
+            S.chats.set(chat.id, chat);
+            close();
+            S.panel = null;
+            A.openChat(chat.id);
+          } catch (err) {
+            toast(err.message);
+          }
+        },
+      },
+    ],
+  });
+}
+
+let directory = null; // { list } for the channel directory panel
+
+function channelsPanel() {
+  if (!directory) {
+    directory = { list: null };
+    api.get('/api/channels').then(({ channels }) => {
+      if (directory) directory.list = channels;
+      render();
+    }).catch((e) => toast(e.message));
+  }
+  const q = panelSearchEl?.value.trim().toLowerCase() || '';
+  const list = (directory.list || []).filter((c) => !q || c.name.toLowerCase().includes(q) || (c.description || '').toLowerCase().includes(q));
+  const open = async (c) => {
+    const chat = c.following ? S.chats.get(c.id) || (await A.chatOf(c.id)) : await followChannel(c.id, true);
+    if (!chat) return;
+    S.panel = null;
+    A.openChat(chat.id);
+  };
+  return panelShell('Find channels', [
+    panelSearch('Search channels'),
+    action('add', 'Create channel', newChannel),
+    directory.list === null ? h('div', { class: 'empty' }, 'Loading channels…') : null,
+    directory.list && !list.length ? h('div', { class: 'empty' }, q ? 'No channels found' : 'Nobody on your tailnet has made a channel yet.') : null,
+    list.map((c) => h(
+      'div',
+      { class: 'row', onclick: () => open(c) },
+      avatar({ id: c.id, name: c.name, src: c.avatar, group: 'channel' }, 'md'),
+      h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, c.name), h('div', { class: 'preview ellipsis' }, `${c.followers} follower${c.followers === 1 ? '' : 's'}${c.description ? ` · ${c.description}` : ''}`)),
+      c.following ? h('span', { class: 'tag' }, 'Following') : h('button', { type: 'button', class: 'btn primary small', onclick: (e) => { e.stopPropagation(); open(c); } }, 'Follow'),
+    )),
+  ]);
+}
+
+// ---------- communities ----------
+
+function newCommunity() {
+  const name = h('input', { maxlength: 100, placeholder: 'Community name' });
+  const description = h('textarea', { rows: 3, maxlength: 2048, placeholder: "What's this community about?" });
+  dialog({
+    title: 'New community',
+    content: [
+      h('p', { class: 'muted' }, 'Bring related groups together under one community, with an announcements group that only admins post in.'),
+      h('label', { class: 'field' }, name),
+      h('label', { class: 'field' }, description),
+    ],
+    actions: [
+      { label: 'Cancel', onClick: (close) => close() },
+      {
+        label: 'Create community',
+        kind: 'primary',
+        onClick: async (close) => {
+          if (!name.value.trim()) return toast('Give the community a name');
+          try {
+            const { chat } = await api.post('/api/chats/community', { name: name.value.trim(), description: description.value });
+            S.chats.set(chat.id, chat);
+            close();
+            openCommunity(chat.id);
+          } catch (err) {
+            toast(err.message);
+          }
+        },
+      },
+    ],
+  });
+}
+
+function communitiesTab() {
+  const communities = [...S.chats.values()].filter((c) => c.type === 'community' && !c.me.left).sort((a, b) => a.name.localeCompare(b.name));
+  return [
     h(
       'div',
       { class: 'list' },
-      h(
-        'div',
-        { class: 'row', onclick: () => (mine.length ? O.openStatus(S.me.id) : O.textStatusDialog()) },
-        mine.length ? ringAvatar(S.me, true) : avatar(S.me, 'md'),
-        h('div', { class: 'body' }, h('div', { class: 'name' }, 'My status'), h('div', { class: 'preview' }, mine.length ? `${mine.length} update${mine.length === 1 ? '' : 's'} · ${listTime(mine.at(-1).createdAt)}` : 'Click to add a status update')),
-        iconButton('camera', 'Photo or video status', (e) => { e.stopPropagation(); pickStatusMedia(); }),
-        iconButton('edit', 'Text status', (e) => { e.stopPropagation(); O.textStatusDialog(); }),
-      ),
-      recent.length ? [h('div', { class: 'list-section' }, 'Recent updates'), recent.map(personRow)] : null,
-      viewed.length ? [h('div', { class: 'list-section' }, 'Viewed updates'), viewed.map(personRow)] : null,
-      !others.length ? h('div', { class: 'empty' }, 'No updates from others yet. Status updates disappear after 24 hours.') : null,
-      h('div', { class: 'empty small' }, icon('lock'), ' Your status updates are end-to-end encrypted'),
+      action('community', 'New community', newCommunity),
+      communities.map((c) => {
+        const groups = sortChats([...S.chats.values()].filter((g) => g.communityId === c.id && !g.me.left));
+        return h(
+          'div',
+          { class: 'community-block' },
+          h('div', { class: 'row', onclick: () => openCommunity(c.id) }, avatar(A.chatAvatar(c), 'md'), h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, c.name), h('div', { class: 'preview' }, `${(c.groups || []).length} group${(c.groups || []).length === 1 ? '' : 's'}`))),
+          chatRow(c, 'Announcements'),
+          groups.slice(0, 3).map((g) => chatRow(g)),
+          h('div', { class: 'row short', onclick: () => openCommunity(c.id) }, h('div', { class: 'row-icon' }, icon('forward')), h('div', { class: 'body' }, 'View all')),
+        );
+      }),
+      !communities.length ? h('div', { class: 'empty' }, "Communities bring members together in topic-based groups, with announcements from admins. You're not in any community yet.") : null,
     ),
   ];
+}
+
+function communityPanel() {
+  const c = S.chats.get(S.community);
+  if (!c || c.type !== 'community') return panelShell('Community', h('div', { class: 'empty' }, "This community isn't available."));
+  const admin = c.me.role === 'admin' && !c.me.left;
+  const groups = c.groups || [];
+  const joined = groups.filter((g) => g.joined);
+  const others = groups.filter((g) => !g.joined);
+  const members = c.members.filter((m) => !m.left).length;
+  const join = async (g) => {
+    try {
+      const { chat } = await api.post(`/api/communities/${encodeURIComponent(c.id)}/groups/${encodeURIComponent(g.id)}/join`);
+      S.chats.set(chat.id, chat);
+      S.panel = null;
+      A.openChat(chat.id);
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+  const groupRow = (g, right) => {
+    let more;
+    return h(
+      'div',
+      { class: 'row', onclick: () => (g.joined ? (S.panel = null, A.openChat(g.id)) : join(g)) },
+      avatar({ id: g.id, name: g.name, src: g.avatar, group: true }, 'md'),
+      h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, g.name), h('div', { class: 'preview ellipsis' }, `${g.members} member${g.members === 1 ? '' : 's'}${g.description ? ` · ${g.description}` : ''}`)),
+      right,
+      admin ? (more = h('button', { type: 'button', class: 'row-menu', 'aria-label': 'Group options', onclick: (e) => {
+        e.stopPropagation();
+        menu(more, [{ label: 'Remove from community', icon: 'exit', danger: true, onClick: () => removeGroup(c, g) }]);
+      } }, icon('down'))) : null,
+    );
+  };
+  return panelShell(c.name, [
+    h(
+      'div',
+      { class: 'card center' },
+      avatar(A.chatAvatar(c), 'lg'),
+      h('h2', null, c.name),
+      h('h3', null, `Community · ${members} member${members === 1 ? '' : 's'}`),
+      c.description ? h('p', { class: 'about' }, c.description) : null,
+    ),
+    chatRow(c, 'Announcements'),
+    joined.length ? [h('div', { class: 'list-section' }, "Groups you're in"), joined.map((g) => groupRow(g, null))] : null,
+    others.length ? [h('div', { class: 'list-section' }, 'Groups you can join'), others.map((g) => groupRow(g, h('button', { type: 'button', class: 'btn plain small', onclick: (e) => { e.stopPropagation(); join(g); } }, 'Join')))] : null,
+    !groups.length ? h('div', { class: 'empty small' }, admin ? 'Add a group to get started.' : 'No groups yet.') : null,
+    admin ? [
+      h('div', { class: 'list-section' }, 'Manage'),
+      action('add', 'New group', () => newCommunityGroup(c)),
+      action('group', 'Add existing groups', () => linkGroups(c)),
+      action('person', 'Add members', () => addMembers(c)),
+      action('link', 'Invite to community via link', () => inviteDialog(c)),
+    ] : null,
+    action('info', 'Community info', () => { S.panel = null; A.openChat(c.id); S.details = 'info'; render(); }),
+    h(
+      'div',
+      { class: 'card flush' },
+      admin ? settingsRow('delete', 'Deactivate community', 'Groups carry on without it', () => deactivateCommunity(c), true) : null,
+      settingsRow('exit', 'Exit community', "You'll also leave its groups", () => exitGroup(c), true),
+    ),
+  ], null);
+}
+
+async function newCommunityGroup(c) {
+  const name = await promptDialog('New group in the community', { placeholder: 'Group name', okLabel: 'Create', max: 100 });
+  if (!name?.trim()) return;
+  try {
+    const { chat } = await api.post(`/api/communities/${encodeURIComponent(c.id)}/groups`, { name: name.trim() });
+    S.chats.set(chat.id, chat);
+    S.panel = null;
+    A.openChat(chat.id);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+// Groups you admin that aren't in a community yet.
+function linkGroups(c) {
+  const candidates = [...S.chats.values()].filter((g) => g.type === 'group' && !g.communityId && !g.me.left && g.me.role === 'admin');
+  if (!candidates.length) return toast("You don't admin any groups that could be added. Only group admins can add their group to a community.");
+  const boxes = new Map();
+  dialog({
+    title: 'Add existing groups',
+    flush: true,
+    content: h('div', { class: 'pick-list' }, candidates.map((g) => {
+      const box = h('input', { type: 'checkbox', class: 'row-check' });
+      boxes.set(g.id, box);
+      return h('label', { class: 'row' }, avatar(A.chatAvatar(g), 'md'), h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, g.name), h('div', { class: 'preview' }, `${g.members.filter((m) => !m.left).length} members`)), box);
+    })),
+    actions: [
+      { label: 'Cancel', onClick: (close) => close() },
+      {
+        label: 'Add',
+        kind: 'primary',
+        onClick: async (close) => {
+          close();
+          for (const [groupId, box] of boxes) {
+            if (!box.checked) continue;
+            await api.post(`/api/communities/${encodeURIComponent(c.id)}/groups`, { groupId }).catch((e) => toast(e.message));
+          }
+        },
+      },
+    ],
+  });
+}
+
+async function removeGroup(c, g) {
+  if (!(await confirmDialog(`Remove "${g.name}"?`, 'The group carries on as a normal group. Its members stay in the community.', 'Remove', 'danger'))) return;
+  api.del(`/api/communities/${encodeURIComponent(c.id)}/groups/${encodeURIComponent(g.id)}`).catch((e) => toast(e.message));
 }
 
 // ---------- calls tab ----------
@@ -380,6 +631,8 @@ function topbar() {
       iconButton('chat', 'New chat', () => openPanel('new-chat')),
       (more = iconButton('more', 'Menu', () => menu(more, [
         { label: 'New group', icon: 'group', onClick: () => startNewGroup() },
+        { label: 'New community', icon: 'community', onClick: newCommunity },
+        { label: 'New channel', icon: 'channel', onClick: newChannel },
         { label: 'Broadcast lists', icon: 'broadcast', onClick: () => openPanel('broadcasts') },
         { label: 'Archived', icon: 'archive', onClick: () => openPanel('archived') },
         { label: 'Starred messages', icon: 'star', onClick: () => openPanel('starred') },
@@ -393,8 +646,13 @@ function topbar() {
 
 function tabs() {
   let unread = 0;
-  for (const c of S.chats.values()) if (!c.me.archived && (c.unread || c.me.markedUnread)) unread++;
-  const unseen = [...S.statuses.values()].some((s) => !s.seen && !A.isMe(s.userId));
+  let channelUnread = false;
+  for (const c of S.chats.values()) {
+    const has = !c.me.archived && (c.unread || c.me.markedUnread);
+    if (has && A.isChannel(c)) channelUnread = true;
+    else if (has) unread++;
+  }
+  const unseen = channelUnread || [...S.statuses.values()].some((s) => !s.seen && !A.isMe(s.userId));
   const missed = S.calls.filter((c) => !c.answeredAt && !A.isMe(c.callerId) && c.startedAt > (S.prefs.callsSeenAt || 0)).length;
   return slots.get('tabs', JSON.stringify([S.view, unread, unseen, missed]), () => {
     const tab = (view, label, badge) => h('button', {
@@ -409,7 +667,8 @@ function tabs() {
       'nav',
       { class: 'tabs' },
       tab('chats', 'Chats', unread ? h('span', { class: 'badge' }, String(unread)) : null),
-      tab('status', 'Status', unseen ? h('span', { class: 'badge dot' }) : null),
+      tab('status', 'Updates', unseen ? h('span', { class: 'badge dot' }) : null),
+      tab('communities', 'Communities'),
       tab('calls', 'Calls', missed ? h('span', { class: 'badge' }, String(missed)) : null),
     );
   });
@@ -440,7 +699,6 @@ function matchUsers(q, exclude = new Set()) {
 function newChatPanel() {
   const q = panelSearchEl?.value.trim().toLowerCase() || '';
   const users = matchUsers(q);
-  const action = (iconName, label, onClick) => h('div', { class: 'row short', onclick: onClick }, h('div', { class: 'row-icon accent' }, icon(iconName)), h('div', { class: 'body' }, label));
   return panelShell('New chat', [
     panelSearch('Search name or tailnet login'),
     !q ? [
@@ -778,6 +1036,10 @@ function panelNodes() {
       return helpPanel();
     case 'broadcasts':
       return broadcastsPanel();
+    case 'channels':
+      return channelsPanel();
+    case 'community':
+      return communityPanel();
     default:
       S.panel = null;
       return null;
@@ -790,11 +1052,13 @@ function renderSidebar() {
     panelSearchEl = null;
     if (S.panel !== 'devices') devicesCache = null;
     if (S.panel !== 'new-group') ng = null;
+    if (S.panel !== 'channels') directory = null;
   }
   let nodes = S.panel ? panelNodes() : null;
   if (!nodes) {
     let body;
-    if (S.view === 'status') body = statusTab();
+    if (S.view === 'status') body = updatesTab();
+    else if (S.view === 'communities') body = communitiesTab();
     else if (S.view === 'calls') body = callsTab();
     else body = chatsTab();
     nodes = [topbar(), tabs(), body];

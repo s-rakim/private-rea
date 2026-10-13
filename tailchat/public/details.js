@@ -5,7 +5,7 @@ import { S, api, render } from './app.js';
 import { h, icon, iconButton, avatar, toast, menu, dialog, promptDialog, confirmDialog, listTime, dayLabel, timeOf, fileSize, disappearingLabel, lastSeenText, richText, reconcile, Slots, toggle } from './ui.js';
 import { extensionOf, resizePhoto } from './media.js';
 import * as O from './overlays.js';
-import { jumpTo, clearChat, deleteChat, exitGroup, blockUser } from './conversation.js';
+import { jumpTo, clearChat, deleteChat, exitGroup, exitLabel, blockUser, openCommunity } from './conversation.js';
 
 const slots = new Slots();
 let mediaTab = 'media';
@@ -19,8 +19,10 @@ function menuRow(iconName, label, sub, onClick, { danger = false, right = null }
   return h('button', { type: 'button', class: `menu-row${danger ? ' danger' : ''}`, onclick: onClick }, icon(iconName), h('div', { class: 'grow' }, h('div', { class: danger ? 'danger' : '' }, label), sub ? h('div', { class: 'sub' }, sub) : null), right);
 }
 
+const title = (chat) => `${A.noun(chat)[0].toUpperCase()}${A.noun(chat).slice(1)}`;
+
 function canEditInfo(chat) {
-  return chat.type === 'group' && !chat.me.left && (!chat.adminsOnlyEdit || chat.me.role === 'admin');
+  return A.isGroupish(chat) && !chat.me.left && (!chat.adminsOnlyEdit || chat.me.role === 'admin');
 }
 
 function mediaMessages(chat) {
@@ -74,14 +76,14 @@ function groupPhotoMenu(chat, anchor) {
 
 async function editGroupField(chat, field) {
   const isName = field === 'name';
-  const value = await promptDialog(isName ? 'Group name' : 'Group description', {
+  const value = await promptDialog(`${title(chat)} ${isName ? 'name' : 'description'}`, {
     value: (isName ? chat.name : chat.description) || '',
     max: isName ? 100 : 2048,
     multiline: !isName,
     okLabel: 'Save',
   });
   if (value === null) return;
-  if (isName && !value.trim()) return toast("Group name can't be empty");
+  if (isName && !value.trim()) return toast("The name can't be empty");
   try {
     await api.patch(`/api/chats/${encodeURIComponent(chat.id)}`, { [field]: isName ? value.trim() : value });
   } catch (err) {
@@ -101,7 +103,7 @@ function groupSettingsDialog(chat) {
   });
 }
 
-async function inviteDialog(chat) {
+export async function inviteDialog(chat) {
   let code = chat.inviteCode;
   try {
     if (!code) ({ code } = await api.post(`/api/chats/${encodeURIComponent(chat.id)}/invite`));
@@ -111,10 +113,11 @@ async function inviteDialog(chat) {
   }
   const link = () => `${location.origin}/invite/${code}`;
   const text = h('div', { class: 'invite-link' }, link());
+  const what = A.isChannel(chat) ? 'follow the channel' : `join the ${A.noun(chat)}`;
   dialog({
-    title: 'Invite to group via link',
+    title: A.isChannel(chat) ? 'Channel link' : `Invite to ${A.noun(chat)} via link`,
     content: [
-      h('p', { class: 'muted' }, 'Anyone on your tailnet who opens this link can join the group. People outside your tailnet cannot reach it. Only share it with people you trust.'),
+      h('p', { class: 'muted' }, `Anyone on your tailnet who opens this link can ${what}. People outside your tailnet cannot reach it. Only share it with people you trust.`),
       text,
     ],
     actions: [
@@ -143,7 +146,7 @@ function memberMenu(chat, member, anchor) {
   const post = (path, body) => api.post(path, body).catch((e) => toast(e.message));
   menu(anchor, [
     { label: `Message ${u.name}`, icon: 'chat', onClick: () => A.openDirect(u.id).catch((e) => toast(e.message)) },
-    admin ? { label: member.role === 'admin' ? 'Dismiss as admin' : 'Make group admin', icon: 'shield', onClick: () => post(`/api/chats/${encodeURIComponent(chat.id)}/admins`, { userId: u.id, admin: member.role !== 'admin' }) } : null,
+    admin ? { label: member.role === 'admin' ? 'Dismiss as admin' : `Make ${A.noun(chat)} admin`, icon: 'shield', onClick: () => post(`/api/chats/${encodeURIComponent(chat.id)}/admins`, { userId: u.id, admin: member.role !== 'admin' }) } : null,
     admin ? {
       label: `Remove ${u.name}`,
       icon: 'exit',
@@ -156,7 +159,7 @@ function memberMenu(chat, member, anchor) {
   ]);
 }
 
-async function addMembers(chat) {
+export async function addMembers(chat) {
   const ids = await O.pickUsers({ title: 'Add members', exclude: chat.members.filter((m) => !m.left).map((m) => m.userId), okLabel: 'Add' });
   if (!ids?.length) return;
   try {
@@ -187,11 +190,13 @@ function settingsSection(chat) {
       right: toggle(muted, (on) => (on ? O.muteDialog(chat) : api.patch(`/api/chats/${encodeURIComponent(chat.id)}/prefs`, { mutedUntil: 0 }).catch((e) => toast(e.message))), 'Mute'),
     }),
     !chat.me.left ? menuRow('timer', 'Disappearing messages', disappearingLabel(chat.disappearing), () => {
-      if (chat.type === 'group' && chat.adminsOnlyEdit && chat.me.role !== 'admin') toast('Only admins can change this');
+      if (A.isGroupish(chat) && chat.adminsOnlyEdit && chat.me.role !== 'admin') toast('Only admins can change this');
       else O.disappearingDialog(chat);
     }) : null,
     chat.type === 'group' && chat.me.role === 'admin' && !chat.me.left ? menuRow('settings', 'Group settings', null, () => groupSettingsDialog(chat)) : null,
-    menuRow('lock', 'Encryption', 'Messages and calls are end-to-end encrypted. Click to verify.', () => O.securityCodeDialog(chat)),
+    A.isChannel(chat)
+      ? menuRow('info', 'Not end-to-end encrypted', "Like WhatsApp channels, posts are stored as they are so anyone can follow. Don't post secrets here.", () => {})
+      : menuRow('lock', 'Encryption', 'Messages and calls are end-to-end encrypted. Click to verify.', () => O.securityCodeDialog(chat)),
   );
 }
 
@@ -244,42 +249,54 @@ function groupInfo(chat) {
   const members = chat.members.filter((m) => !m.left);
   const editable = canEditInfo(chat);
   const admin = chat.me.role === 'admin' && !chat.me.left;
+  const channel = A.isChannel(chat);
+  const callable = chat.type === 'group';
   members.sort((a, b) => (A.isMe(b.userId) - A.isMe(a.userId)) || ((b.role === 'admin') - (a.role === 'admin')) || A.nameOf(a.userId).localeCompare(A.nameOf(b.userId)));
+  const count = channel ? `${chat.followers} follower${chat.followers === 1 ? '' : 's'}` : `${members.length} member${members.length === 1 ? '' : 's'}`;
+  // Channel followers only see the admins.
+  const listTitle = channel && !admin ? 'Admins' : count;
   let photoBtn;
   return [
-    panelHeader('Group info'),
+    panelHeader(`${title(chat)} info`),
     h(
       'div',
       { class: 'scroll' },
       h(
         'div',
         { class: 'card center' },
-        (photoBtn = h('button', { type: 'button', class: 'avatar-btn', disabled: !editable, title: editable ? 'Change group photo' : '', onclick: () => groupPhotoMenu(chat, photoBtn) }, avatar(A.chatAvatar(chat), 'lg'))),
+        (photoBtn = h('button', { type: 'button', class: 'avatar-btn', disabled: !editable, title: editable ? 'Change photo' : '', onclick: () => groupPhotoMenu(chat, photoBtn) }, avatar(A.chatAvatar(chat), 'lg'))),
         h('h2', { class: editable ? 'editable' : '', onclick: editable ? () => editGroupField(chat, 'name') : null }, chat.name, editable ? icon('edit') : null),
-        h('h3', null, `Group · ${members.length} member${members.length === 1 ? '' : 's'}`),
+        h('h3', null, `${title(chat)} · ${count}`),
         !chat.me.left ? h(
           'div',
           { class: 'card-actions' },
-          h('button', { type: 'button', onclick: () => O.startCall(chat, false) }, icon('phone'), 'Audio'),
-          h('button', { type: 'button', onclick: () => O.startCall(chat, true) }, icon('video'), 'Video'),
-          admin ? h('button', { type: 'button', onclick: () => addMembers(chat) }, icon('add'), 'Add') : null,
+          callable ? h('button', { type: 'button', onclick: () => O.startCall(chat, false) }, icon('phone'), 'Audio') : null,
+          callable ? h('button', { type: 'button', onclick: () => O.startCall(chat, true) }, icon('video'), 'Video') : null,
+          chat.type === 'community' ? h('button', { type: 'button', onclick: () => openCommunity(chat.id) }, icon('group'), 'Groups') : null,
+          admin && !channel ? h('button', { type: 'button', onclick: () => addMembers(chat) }, icon('add'), 'Add') : null,
+          admin && channel ? h('button', { type: 'button', onclick: () => inviteDialog(chat) }, icon('link'), 'Share') : null,
           h('button', { type: 'button', onclick: () => { S.details = 'search'; render(); } }, icon('search'), 'Search'),
         ) : null,
       ),
       h(
         'div',
         { class: `card${editable ? ' editable' : ''}`, onclick: editable ? () => editGroupField(chat, 'description') : null },
-        chat.description ? h('div', { class: 'about' }, richText(chat.description)) : h('div', { class: editable ? 'link' : 'muted' }, editable ? 'Add group description' : 'No description'),
+        chat.description ? h('div', { class: 'about' }, richText(chat.description)) : h('div', { class: editable ? 'link' : 'muted' }, editable ? `Add ${A.noun(chat)} description` : 'No description'),
         h('div', { class: 'muted small' }, `Created by ${A.nameOf(chat.createdBy)}, ${dayLabel(chat.createdAt).toLowerCase()} at ${timeOf(chat.createdAt)}`),
       ),
+      chat.communityId ? h(
+        'div',
+        { class: 'card flush' },
+        menuRow('group', `Part of ${chat.communityName}`, 'Community', () => openCommunity(chat.communityId)),
+      ) : null,
       sharedSection(chat),
       settingsSection(chat),
       h(
         'div',
         { class: 'card flush' },
-        h('div', { class: 'list-section' }, `${members.length} member${members.length === 1 ? '' : 's'}`),
-        admin ? menuRow('add', 'Add members', null, () => addMembers(chat)) : null,
-        admin ? menuRow('link', 'Invite to group via link', null, () => inviteDialog(chat)) : null,
+        h('div', { class: 'list-section' }, listTitle),
+        admin && !channel ? menuRow('add', 'Add members', null, () => addMembers(chat)) : null,
+        admin ? menuRow('link', channel ? 'Channel link' : `Invite to ${A.noun(chat)} via link`, null, () => inviteDialog(chat)) : null,
         members.map((m) => {
           const u = S.users.get(m.userId) || { id: m.userId, name: A.nameOf(m.userId) };
           const me = A.isMe(m.userId);
@@ -288,7 +305,7 @@ function groupInfo(chat) {
             'div',
             { class: 'row', onclick: me ? null : () => memberMenu(chat, m, row) },
             avatar(u),
-            h('div', { class: 'body' }, h('div', { class: 'line' }, h('div', { class: 'name ellipsis grow' }, me ? 'You' : u.name), m.role === 'admin' ? h('span', { class: 'tag' }, 'Group admin') : null), h('div', { class: 'preview ellipsis' }, u.about || u.id)),
+            h('div', { class: 'body' }, h('div', { class: 'line' }, h('div', { class: 'name ellipsis grow' }, me ? 'You' : u.name), m.role === 'admin' ? h('span', { class: 'tag' }, 'Admin') : null), h('div', { class: 'preview ellipsis' }, u.about || u.id)),
           ));
         }),
       ),
@@ -296,10 +313,22 @@ function groupInfo(chat) {
         'div',
         { class: 'card flush' },
         menuRow('delete', 'Clear chat', null, () => clearChat(chat)),
-        !chat.me.left ? menuRow('exit', 'Exit group', null, () => exitGroup(chat), { danger: true }) : menuRow('delete', 'Delete group', null, () => deleteChat(chat), { danger: true }),
+        admin && chat.type === 'community' ? menuRow('delete', 'Deactivate community', 'Groups carry on without it', () => deactivateCommunity(chat), { danger: true }) : null,
+        !chat.me.left ? menuRow('exit', exitLabel(chat), null, () => exitGroup(chat), { danger: true }) : menuRow('delete', `Delete ${A.noun(chat)}`, null, () => deleteChat(chat), { danger: true }),
       ),
     ),
   ];
+}
+
+export async function deactivateCommunity(chat) {
+  if (!(await confirmDialog(`Deactivate "${chat.name}"?`, 'Its groups are unlinked and carry on as normal groups. The announcements group closes for everyone.', 'Deactivate', 'danger'))) return;
+  try {
+    await api.del(`/api/communities/${encodeURIComponent(chat.id)}`);
+    S.panel = null;
+    render();
+  } catch (err) {
+    toast(err.message);
+  }
 }
 
 function mediaPanel(chat) {
@@ -360,7 +389,7 @@ export function starredRow(m) {
     h(
       'div',
       { class: 'body' },
-      h('div', { class: 'line' }, h('div', { class: 'grow ellipsis small' }, `${A.nameOf(m.senderId)}${chat?.type === 'group' ? ` ▸ ${chat.name}` : ''}`), h('span', { class: 'time' }, listTime(m.createdAt))),
+      h('div', { class: 'line' }, h('div', { class: 'grow ellipsis small' }, `${A.nameOf(m.senderId)}${A.isGroupish(chat) ? ` ▸ ${chat.name}` : ''}`), h('span', { class: 'time' }, listTime(m.createdAt))),
       h('div', { class: 'preview ellipsis' }, A.previewText(m)),
     ),
   );
@@ -428,7 +457,7 @@ export function renderDetails(el, chat) {
       nodes = slots.get(
         'info',
         JSON.stringify([chat, chat.type === 'direct' ? S.users.get(A.otherMember(chat)) : chat.members.map((m) => S.users.get(m.userId)), A.box(chat.id).list.length, [...S.files.keys()].length]),
-        () => (chat.type === 'group' ? groupInfo(chat) : directInfo(chat)),
+        () => (A.isGroupish(chat) ? groupInfo(chat) : directInfo(chat)),
       );
   }
   reconcile(el, nodes);

@@ -1,6 +1,6 @@
 // Dialogs and full-screen layers shared by the screens: pickers, message
 // info, media viewer, status viewer and composer, calls, group invites.
-import { S, api, calls, render, nameOf, isMe, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText } from './app.js';
+import { S, api, calls, render, nameOf, isMe, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel } from './app.js';
 import { h, icon, iconButton, avatar, dialog, toast, viewer, timeOf, listTime, dayLabel, fileSize, duration, reconcile } from './ui.js';
 import { securityCode } from './crypto.js';
 import { kindFor, safeName } from './media.js';
@@ -96,7 +96,7 @@ export function pickUsers({ title, exclude = [], multiple = true, okLabel = 'Don
 // Chats you can currently send to, most recent first.
 export function sendableChats() {
   return [...S.chats.values()]
-    .filter((c) => !c.me.left && !(c.type === 'group' && c.adminsOnlySend && c.me.role !== 'admin'))
+    .filter((c) => !c.me.left && !(isGroupish(c) && c.adminsOnlySend && c.me.role !== 'admin'))
     .sort((a, b) => (b.lastMessage?.createdAt || b.createdAt) - (a.lastMessage?.createdAt || a.createdAt));
 }
 
@@ -114,7 +114,7 @@ export function pickChats({ title, okLabel = 'Send', max = 5 }) {
       ...chats.map((c) => ({
         key: c.id,
         title: chatTitle(c),
-        sub: c.type === 'group' ? `${c.members.filter((m) => !m.left).length} members` : c.members.find((m) => !isMe(m.userId))?.userId || 'Message yourself',
+        sub: isChannel(c) ? `Channel · ${c.followers} followers` : isGroupish(c) ? `${c.members.filter((m) => !m.left).length} members` : c.members.find((m) => !isMe(m.userId))?.userId || 'Message yourself',
         av: chatAvatar(c),
         chatId: async () => c.id,
       })),
@@ -283,12 +283,14 @@ export function messageInfo(m, chat) {
   });
 }
 
+const FOLLOWER = { id: 'follower', name: 'A follower', about: 'Followers stay anonymous' };
+
 export function reactionsDialog(m) {
   const d = dialog({
     title: `${m.reactions.length} reaction${m.reactions.length === 1 ? '' : 's'}`,
     flush: true,
     content: h('div', { class: 'pick-list' }, m.reactions.map((r) => {
-      const u = S.users.get(r.userId) || { id: r.userId, name: nameOf(r.userId) };
+      const u = r.userId ? S.users.get(r.userId) || { id: r.userId, name: nameOf(r.userId) } : FOLLOWER;
       return userRow(u, h('span', { class: 'jumbo-react' }, r.emoji), isMe(r.userId)
         ? () => {
           api.post(`/api/messages/${encodeURIComponent(m.id)}/react`, { emoji: null }).catch((e) => toast(e.message));
@@ -308,7 +310,7 @@ export function pollVotesDialog(m, c) {
       const voters = (m.votes || []).filter((v) => v.options.includes(i));
       return [
         h('div', { class: 'list-section' }, `${label} · ${voters.length} vote${voters.length === 1 ? '' : 's'}`),
-        voters.map((v) => userRow(S.users.get(v.userId) || { id: v.userId, name: nameOf(v.userId) }, null)),
+        voters.map((v) => userRow(v.userId ? S.users.get(v.userId) || { id: v.userId, name: nameOf(v.userId) } : FOLLOWER, null)),
       ];
     }),
   });
@@ -771,20 +773,23 @@ export async function handleInvite(code) {
     openChat(chat.id);
     return;
   }
+  const kind = { community: 'Community', channel: 'Channel' }[chat.type] || 'Group';
+  const people = chat.type === 'channel' ? 'follower' : 'member';
   dialog({
-    title: 'Group invite',
+    title: `${kind} invite`,
     content: h(
       'div',
       { class: 'card center' },
       avatar({ id: chat.id, name: chat.name, src: chat.avatar, group: true }, 'lg'),
       h('h2', null, chat.name),
-      h('h3', null, `Group · ${chat.memberCount} member${chat.memberCount === 1 ? '' : 's'}`),
+      h('h3', null, `${kind} · ${chat.memberCount} ${people}${chat.memberCount === 1 ? '' : 's'}`),
       chat.description ? h('p', { class: 'about' }, chat.description) : null,
+      chat.type === 'channel' ? h('p', { class: 'muted small' }, "Channel posts aren't end-to-end encrypted. Other followers won't see that you follow it.") : null,
     ),
     actions: [
       { label: 'Cancel', onClick: (close) => close() },
       {
-        label: 'Join group',
+        label: chat.type === 'channel' ? 'Follow' : `Join ${kind.toLowerCase()}`,
         kind: 'primary',
         onClick: async (close) => {
           try {

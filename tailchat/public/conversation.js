@@ -23,8 +23,14 @@ export function replyRef(m) {
 }
 
 export function canSend(chat) {
-  if (chat.me.left) return { text: "You can't send messages to this group because you're no longer a member." };
-  if (chat.type === 'group' && chat.adminsOnlySend && chat.me.role !== 'admin') return { text: 'Only admins can send messages.' };
+  if (chat.me.left) {
+    if (A.isChannel(chat)) return { text: "You're not following this channel. Click to follow.", action: () => followChannel(chat.id, true) };
+    return { text: `You can't send messages to this ${A.noun(chat)} because you're no longer a member.` };
+  }
+  if (A.isGroupish(chat) && chat.adminsOnlySend && chat.me.role !== 'admin') {
+    if (A.isChannel(chat)) return { text: 'Only channel admins can post. You can react to posts and vote in polls.' };
+    return { text: chat.type === 'community' ? 'Only community admins can send announcements.' : 'Only admins can send messages.' };
+  }
   if (chat.type === 'direct') {
     const other = S.users.get(A.otherMember(chat));
     if (other && !A.isMe(other.id) && other.blocked) {
@@ -32,6 +38,18 @@ export function canSend(chat) {
     }
   }
   return null;
+}
+
+export async function followChannel(chatId, follow) {
+  try {
+    const { chat } = await api.post(`/api/channels/${encodeURIComponent(chatId)}/follow`, { follow });
+    S.chats.set(chat.id, chat);
+    render();
+    return chat;
+  } catch (err) {
+    toast(err.message);
+    return null;
+  }
 }
 
 async function react(m, emoji) {
@@ -98,7 +116,7 @@ function deleteDialog(m, chat) {
     return;
   }
   const mine = A.isMe(m.senderId);
-  const asAdmin = chat.type === 'group' && chat.me.role === 'admin' && !chat.me.left;
+  const asAdmin = A.isGroupish(chat) && chat.me.role === 'admin' && !chat.me.left;
   const forEveryone = m.kind === 'msg' && !m.deletedAt && !chat.me.left
     && ((mine && Date.now() - m.createdAt < (S.limits.deleteWindowSeconds || 0) * 1000) || (!mine && asAdmin));
   const del = (everyone) => async (close) => {
@@ -111,7 +129,7 @@ function deleteDialog(m, chat) {
   };
   dialog({
     title: 'Delete message?',
-    content: h('p', { class: 'muted' }, forEveryone && !mine ? `As a group admin you can delete ${A.nameOf(m.senderId)}'s message for everyone.` : 'Deleting for everyone removes the message and its files from the server.'),
+    content: h('p', { class: 'muted' }, forEveryone && !mine ? `As an admin you can delete ${A.nameOf(m.senderId)}'s message for everyone.` : 'Deleting for everyone removes the message and its files from the server.'),
     actions: [
       { label: 'Cancel', onClick: (close) => close() },
       { label: 'Delete for me', onClick: del(false) },
@@ -127,19 +145,19 @@ export function messageMenu(m, chat, anchor) {
   const mine = A.isMe(m.senderId);
   const live = m.kind === 'msg' && !m.pending && !m.failed && !m.deletedAt && c && !['deleted', 'opened'].includes(c.type);
   const active = !chat.me.left;
-  const mayPin = active && (chat.type !== 'group' || !chat.adminsOnlyEdit || chat.me.role === 'admin');
+  const mayPin = active && (!A.isGroupish(chat) || !chat.adminsOnlyEdit || chat.me.role === 'admin');
   const editable = mine && live && c.type === 'text' && !m.viewOnce && Date.now() - m.createdAt < (S.limits.editWindowSeconds || 0) * 1000;
   menu(
     anchor,
     [
-      live && active && !canSend(chat) ? { label: 'Reply', icon: 'reply', onClick: () => startReply(m) } : null,
+      live && active && !canSend(chat) && !A.isChannel(chat) ? { label: 'Reply', icon: 'reply', onClick: () => startReply(m) } : null,
       live && c.type === 'text' ? { label: 'Copy', icon: 'copy', onClick: () => navigator.clipboard.writeText(c.text).then(() => toast('Message copied')) } : null,
       live && !m.viewOnce ? { label: 'Forward', icon: 'forward', onClick: () => O.forwardDialog(m) } : null,
       live && c.type === 'media' && !m.viewOnce ? { label: 'Download', icon: 'download', onClick: () => O.downloadFile(c.file) } : null,
       m.kind === 'msg' && !m.pending && !m.failed ? { label: m.starred ? 'Unstar' : 'Star', icon: 'star', onClick: () => star(m) } : null,
       live && mayPin ? { label: chat.pinnedMessage === m.id ? 'Unpin' : 'Pin', icon: 'pin', onClick: () => pin(chat, m) } : null,
       editable ? { label: 'Edit', icon: 'edit', onClick: () => startEdit(m) } : null,
-      mine && live ? { label: 'Message info', icon: 'info', onClick: () => O.messageInfo(m, chat) } : null,
+      mine && live && !A.isChannel(chat) ? { label: 'Message info', icon: 'info', onClick: () => O.messageInfo(m, chat) } : null,
       m.failed && m.retry ? { label: 'Try again', icon: 'send', onClick: () => m.retry().catch(() => {}) } : null,
       m.kind === 'msg' ? { label: 'Delete', icon: 'delete', danger: true, onClick: () => deleteDialog(m, chat) } : null,
     ],
@@ -479,7 +497,7 @@ function messageRow(m, chat, flags) {
         messageMenu(m, chat, { x: e.clientX, y: e.clientY });
       },
       ondblclick: (e) => {
-        if (live && !canSend(chat) && !e.target.closest('a, button, .media')) startReply(m);
+        if (live && !canSend(chat) && !A.isChannel(chat) && !e.target.closest('a, button, .media')) startReply(m);
       },
     },
     h('button', { type: 'button', class: 'actions-btn', 'aria-label': 'Message options', onclick: (e) => { e.stopPropagation(); messageMenu(m, chat, e.currentTarget); } }, icon('down')),
@@ -558,12 +576,19 @@ function renderMessages(chat) {
   if (b.loading && b.hasMore) nodes.push(v.rows.get('loading', '1', () => h('div', { class: 'day' }, 'Loading…')));
   if (!b.hasMore) {
     used.add('e2e');
-    nodes.push(v.rows.get('e2e', chat.type, () => h(
-      'button',
-      { type: 'button', class: 'e2e-note', onclick: () => O.securityCodeDialog(chat) },
-      icon('lock'),
-      " Messages and calls are end-to-end encrypted. Nobody outside of this chat, not even Tailchat's server, can read or listen to them. Click to verify.",
-    )));
+    nodes.push(v.rows.get('e2e', chat.type, () => (A.isChannel(chat)
+      ? h(
+        'div',
+        { class: 'e2e-note warn' },
+        icon('info'),
+        " Channel posts aren't end-to-end encrypted. Tailchat's server can read them, and anyone on your tailnet can follow this channel. Followers can't see each other.",
+      )
+      : h(
+        'button',
+        { type: 'button', class: 'e2e-note', onclick: () => O.securityCodeDialog(chat) },
+        icon('lock'),
+        " Messages and calls are end-to-end encrypted. Nobody outside of this chat, not even Tailchat's server, can read or listen to them. Click to verify.",
+      ))));
   }
   const unread = S.unreadFrom?.chatId === chat.id && S.unreadFrom.count > 0 ? S.unreadFrom : null;
   let unreadShown = false;
@@ -583,7 +608,7 @@ function renderMessages(chat) {
       nodes.push(v.rows.get('unread', label, () => h('div', { class: 'day unread-marker' }, label)));
     }
     const first = !prev || prev.kind === 'system' || prev.senderId !== m.senderId || new Date(prev.createdAt).toDateString() !== day;
-    const flags = { first, showName: first && chat.type === 'group' && !A.isMe(m.senderId) && m.kind === 'msg', search: term };
+    const flags = { first, showName: first && A.showsSender(chat) && !A.isMe(m.senderId) && m.kind === 'msg', search: term };
     used.add(m.id);
     nodes.push(v.rows.get(m.id, rowSig(m, chat, flags), () => messageRow(m, chat, flags)));
     prev = m;
@@ -626,6 +651,11 @@ function renderMessages(chat) {
 function subtitle(chat) {
   const t = A.typingText(chat.id);
   if (t) return { text: t, typing: true };
+  if (A.isChannel(chat)) return { text: `Channel · ${chat.followers} follower${chat.followers === 1 ? '' : 's'}` };
+  if (chat.type === 'community') {
+    const n = chat.members.filter((m) => !m.left).length;
+    return { text: chat.me.left ? "You're no longer a member" : `Announcements · ${n} member${n === 1 ? '' : 's'}` };
+  }
   if (chat.type === 'group') {
     const names = chat.members.filter((m) => !m.left).map((m) => (A.isMe(m.userId) ? 'You' : A.nameOf(m.userId)));
     names.sort((a, b) => (a === 'You') - (b === 'You'));
@@ -646,7 +676,8 @@ function chatMenuItems(chat) {
   const other = chat.type === 'direct' ? S.users.get(A.otherMember(chat)) : null;
   const self = chat.type === 'direct' && A.isMe(A.otherMember(chat));
   return [
-    { label: chat.type === 'group' ? 'Group info' : 'Contact info', icon: 'info', onClick: () => { S.details = 'info'; render(); } },
+    { label: A.isGroupish(chat) ? `${A.noun(chat)[0].toUpperCase()}${A.noun(chat).slice(1)} info` : 'Contact info', icon: 'info', onClick: () => { S.details = 'info'; render(); } },
+    chat.type === 'community' ? { label: 'Community home', icon: 'group', onClick: () => openCommunity(chat.id) } : null,
     { label: 'Search', icon: 'search', onClick: () => { S.details = 'search'; render(); } },
     { label: 'Media, links and docs', icon: 'image', onClick: () => { S.details = 'media'; render(); } },
     { label: 'Starred messages', icon: 'star', onClick: () => { S.details = 'starred'; render(); } },
@@ -655,11 +686,11 @@ function chatMenuItems(chat) {
       icon: 'mute',
       onClick: () => (muted ? api.patch(`/api/chats/${encodeURIComponent(chat.id)}/prefs`, { mutedUntil: 0 }).catch((e) => toast(e.message)) : O.muteDialog(chat)),
     },
-    !chat.me.left ? { label: 'Disappearing messages', icon: 'timer', onClick: () => O.disappearingDialog(chat) } : null,
+    !chat.me.left && (!A.isGroupish(chat) || !chat.adminsOnlyEdit || chat.me.role === 'admin') ? { label: 'Disappearing messages', icon: 'timer', onClick: () => O.disappearingDialog(chat) } : null,
     { label: 'Clear chat', icon: 'delete', onClick: () => clearChat(chat) },
     other && !self ? { label: other.blocked ? `Unblock ${other.name}` : `Block ${other.name}`, icon: 'block', danger: !other.blocked, onClick: () => blockUser(other) } : null,
-    chat.type === 'group' && !chat.me.left ? { label: 'Exit group', icon: 'exit', danger: true, onClick: () => exitGroup(chat) } : null,
-    chat.type === 'direct' || chat.me.left ? { label: chat.type === 'group' ? 'Delete group' : 'Delete chat', icon: 'delete', danger: true, onClick: () => deleteChat(chat) } : null,
+    A.isGroupish(chat) && !chat.me.left ? { label: exitLabel(chat), icon: 'exit', danger: true, onClick: () => exitGroup(chat) } : null,
+    chat.type === 'direct' || chat.me.left ? { label: A.isGroupish(chat) ? `Delete ${A.noun(chat)}` : 'Delete chat', icon: 'delete', danger: true, onClick: () => deleteChat(chat) } : null,
     { label: 'Close chat', icon: 'close', onClick: () => { S.active = null; S.details = null; render(); } },
   ];
 }
@@ -676,8 +707,18 @@ export async function clearChat(chat) {
   }
 }
 
+export function openCommunity(id) {
+  S.community = id;
+  S.panel = 'community';
+  render();
+}
+
+export function exitLabel(chat) {
+  return { channel: 'Unfollow channel', community: 'Exit community' }[chat.type] || 'Exit group';
+}
+
 export async function deleteChat(chat) {
-  const title = chat.type === 'group' ? `Delete "${chat.name}"?` : `Delete chat with ${A.chatTitle(chat)}?`;
+  const title = A.isGroupish(chat) ? `Delete "${chat.name}"?` : `Delete chat with ${A.chatTitle(chat)}?`;
   if (!(await confirmDialog(title, 'Messages will be removed from all your devices. The chat comes back if someone writes to you again.', 'Delete', 'danger'))) return;
   try {
     await api.del(`/api/chats/${encodeURIComponent(chat.id)}`);
@@ -687,7 +728,14 @@ export async function deleteChat(chat) {
 }
 
 export async function exitGroup(chat) {
-  if (!(await confirmDialog(`Exit "${chat.name}"?`, "Only group admins will be notified that you left the group. You'll keep the messages you already have.", 'Exit group', 'danger'))) return;
+  if (A.isChannel(chat)) {
+    if (await confirmDialog(`Unfollow "${chat.name}"?`, "You'll stop getting its updates. You can follow it again from Find channels.", 'Unfollow', 'danger')) await followChannel(chat.id, false);
+    return;
+  }
+  const detail = chat.type === 'community'
+    ? "You'll also leave the community's groups. You'll keep the messages you already have."
+    : "Only group admins will be notified that you left the group. You'll keep the messages you already have.";
+  if (!(await confirmDialog(`Exit "${chat.name}"?`, detail, exitLabel(chat), 'danger'))) return;
   try {
     await api.del(`/api/chats/${encodeURIComponent(chat.id)}/members/${encodeURIComponent(S.me.id)}`);
   } catch (err) {
@@ -709,7 +757,7 @@ function header(chat) {
   const sub = subtitle(chat);
   const av = A.chatAvatar(chat);
   const self = chat.type === 'direct' && A.isMe(A.otherMember(chat));
-  const callable = !chat.me.left && !self && !canSend(chat);
+  const callable = !chat.me.left && !self && !canSend(chat) && (chat.type === 'direct' || chat.type === 'group');
   const sig = JSON.stringify([chat.id, A.chatTitle(chat), av, sub, S.details, callable, chat.me.mutedUntil, chat.me.left, chat.me.role, chat.adminsOnlyEdit, !!A.calls?.call]);
   return slots.get('header', sig, () => {
     let moreBtn;
@@ -743,7 +791,7 @@ function pinnedBar(chat) {
   }
   if (!m) m = null;
   const text = m ? A.previewText(m) : 'Pinned message';
-  const mayPin = !chat.me.left && (chat.type !== 'group' || !chat.adminsOnlyEdit || chat.me.role === 'admin');
+  const mayPin = !chat.me.left && (!A.isGroupish(chat) || !chat.adminsOnlyEdit || chat.me.role === 'admin');
   return slots.get('pinned', JSON.stringify([id, text, mayPin]), () => h(
     'div',
     { class: 'pinned-bar', onclick: () => jumpTo(chat.id, id) },
@@ -781,7 +829,7 @@ export function attachDialog(chat, files, { asDocument = false } = {}) {
   const kind = asDocument ? 'document' : kindFor(first);
   const url = URL.createObjectURL(first);
   const caption = h('input', { maxlength: 1024, placeholder: 'Add a caption' });
-  const single = files.length === 1 && (kind === 'image' || kind === 'video');
+  const single = files.length === 1 && (kind === 'image' || kind === 'video') && !A.isChannel(chat);
   const once = h('input', { type: 'checkbox' });
   const preview = kind === 'image' || kind === 'gif'
     ? h('img', { src: url, alt: '' })
@@ -796,7 +844,9 @@ export function attachDialog(chat, files, { asDocument = false } = {}) {
       files.length > 1 ? h('div', { class: 'muted' }, files.map((f) => `${f.name} (${fileSize(f.size)})`).join(' · ')) : null,
       h('label', { class: 'field' }, caption),
       single ? h('label', { class: 'check-row' }, once, icon('once'), 'View once: the recipient can open it one time, then it disappears') : null,
-      h('p', { class: 'muted' }, icon('lock'), ' Files are encrypted on this device before upload. The server only stores ciphertext.'),
+      A.isChannel(chat)
+        ? h('p', { class: 'muted' }, icon('info'), " Channel posts aren't end-to-end encrypted: the server can open files posted here.")
+        : h('p', { class: 'muted' }, icon('lock'), ' Files are encrypted on this device before upload. The server only stores ciphertext.'),
     ],
     onClose: () => URL.revokeObjectURL(url),
     actions: [
@@ -927,7 +977,7 @@ function attachMenu(chat, anchor) {
 }
 
 function mentionCandidates(chat, query) {
-  if (chat.type !== 'group') return [];
+  if (!A.showsSender(chat)) return [];
   const q = query.toLowerCase();
   return chat.members
     .filter((m) => !m.left && !A.isMe(m.userId))
@@ -1067,7 +1117,7 @@ function send(c) {
   const chat = S.chats.get(c.chatId);
   const text = c.ta.value.trim();
   if (!chat || !text) return;
-  const mentions = chat.type === 'group' ? chat.members.map((m) => m.userId).filter((id) => text.includes(`@${id}`)) : [];
+  const mentions = A.showsSender(chat) ? chat.members.map((m) => m.userId).filter((id) => text.includes(`@${id}`)) : [];
   if (S.editing) {
     const m = S.editing;
     const old = A.contentOf(m)?.ok || {};
