@@ -100,6 +100,11 @@ Tailscale. People show up under **New chat** once they have opened Tailchat;
   machine. If your tailnet has its own access rules, let `autogroup:shared`
   reach port 443 on the Tailchat machine. To add someone to your whole tailnet
   instead, use **Users > Invite users**.
+* **Your own devices** are one account, since they are all signed in as you.
+  Each other device you have opened Tailchat on gets its own chat, for sending
+  a message or file to just that device; **Message yourself** reaches all of
+  them. Rename devices under **Linked devices** so the chats are easy to tell
+  apart.
 * **Another device of yours, anywhere in the world**: install Tailscale on it,
   sign in with the same account and open the Tailchat address. Tailscale
   connects it over the internet from any country, with nothing to set up on
@@ -129,8 +134,9 @@ Tailscale. People show up under **New chat** once they have opened Tailchat;
   with a viewer list and replies.
 * **Calls**: voice and video, one-to-one and groups of up to 8, with a call log.
 * **Privacy and devices**: last seen, read receipts, blocking, security codes
-  to compare in person, linked devices you can log out remotely, and chat
-  history sent end-to-end encrypted to a device you link later.
+  to compare in person, linked devices you can rename or log out remotely, a
+  chat with each of your other devices, and chat history sent end-to-end
+  encrypted to a device you link later.
 * **Settings**: profile name, about and photo, light and dark themes, enter is
   send, desktop notifications.
 

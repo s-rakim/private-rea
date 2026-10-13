@@ -177,13 +177,41 @@ class Api:
 
     # ---------- chats ----------
 
+    @staticmethod
+    def device_pair(chat: dict) -> list[str] | None:
+        """The two devices of a device chat (one person's chat between two of
+        their devices), or None for every other chat."""
+        return chat["device_pair"].split("|") if chat.get("device_pair") else None
+
+    def send_chat(self, chat: dict, uid: str, event: dict, **options) -> None:
+        """An event about a chat, for one member: in a device chat only its
+        two devices hear about it."""
+        pair = self.device_pair(chat)
+        if not pair:
+            self.hub.send_to_user(uid, event, **options)
+            return
+        for d in pair:
+            if d != options.get("except_device"):
+                self.hub.send_to_user(uid, event, only_device=d)
+
+    def visible_to_device(self, chat: dict, device_id: str | None) -> bool:
+        pair = self.device_pair(chat)
+        if not pair:
+            return True
+        if device_id not in pair:
+            return False
+        return len(pair) == 2 and self.db.get(
+            "SELECT COUNT(*) AS n FROM devices WHERE id IN (?, ?) AND revoked_at IS NULL", pair[0], pair[1]
+        )["n"] == 2
+
     def active_member(self, chat_id: str, user_id: str) -> dict | None:
         m = self.db.get("SELECT * FROM members WHERE chat_id = ? AND user_id = ?", chat_id, user_id)
         return m if m and m["left_at"] is None else None
 
-    def require_member(self, chat_id: str, user_id: str, *, allow_former: bool = False):
+    def require_member(self, chat_id: str, user_id: str, *, allow_former: bool = False, device: str | None = None):
+        """device: the asking device, which must be one of a device chat's two."""
         chat = self.db.get("SELECT * FROM chats WHERE id = ?", chat_id)
-        if not chat:
+        if not chat or (device and not self.visible_to_device(chat, device)):
             fail(404, "No such chat")
         member = self.db.get("SELECT * FROM members WHERE chat_id = ? AND user_id = ?", chat_id, user_id)
         if not member or (member["left_at"] is not None and not allow_former):
@@ -289,6 +317,7 @@ class Api:
             },
             "unread": unread,
             "lastMessage": self.message_view(last, viewer, device) if last else None,
+            "devices": self.device_pair(chat),
         }
 
     def community_groups(self, community_id: str, viewer: str) -> list[dict]:
@@ -419,7 +448,7 @@ class Api:
         for uid in dict.fromkeys([*self.ever_member_ids(chat_id), *extra_user_ids]):
             if not self.db.get("SELECT 1 FROM members WHERE chat_id = ? AND user_id = ?", chat_id, uid):
                 continue
-            self.hub.send_to_user(uid, {"type": "chat", "chat": self.chat_view(chat, uid)})
+            self.send_chat(chat, uid, {"type": "chat", "chat": self.chat_view(chat, uid)})
 
     def can_see_message(self, m: dict, user_id: str) -> bool:
         member = self.db.get("SELECT * FROM members WHERE chat_id = ? AND user_id = ?", m["chat_id"], user_id)
@@ -428,9 +457,10 @@ class Api:
         return m["seq"] > self.visible_floor(member) and (member["left_seq"] is None or m["seq"] <= member["left_seq"])
 
     def broadcast_message(self, m: dict, kind: str = "message", **options) -> None:
+        chat = self.get_chat(m["chat_id"])
         for uid in self.ever_member_ids(m["chat_id"]):
             if self.can_see_message(m, uid):
-                self.hub.send_to_user(uid, {"type": kind, "message": self.message_view(m, uid)}, **options)
+                self.send_chat(chat, uid, {"type": kind, "message": self.message_view(m, uid)}, **options)
 
     def insert_message(self, chat: dict, *, id: str, sender_id: str, sender_device: str | None, kind: str,
                        payload: str | None, files=(), view_once: bool = False) -> dict:
@@ -622,7 +652,9 @@ class Api:
             for table in ("stars", "hidden", "view_once_opened"):
                 db.run(f"DELETE FROM {table} WHERE message_id = ?", m["id"])
             db.run("DELETE FROM messages WHERE id = ?", m["id"])
-            self.hub.send_to_users(self.ever_member_ids(m["chat_id"]), {"type": "message-gone", "chatId": m["chat_id"], "id": m["id"]})
+            chat = self.get_chat(m["chat_id"])
+            for uid in self.ever_member_ids(m["chat_id"]):
+                self.send_chat(chat, uid, {"type": "message-gone", "chatId": m["chat_id"], "id": m["id"]})
         for s in db.all("SELECT * FROM statuses WHERE expires_at <= ?", t):
             self._delete_status(s)
         # Uploads that never made it into a message or status, and photos
@@ -762,6 +794,19 @@ class Api:
             self.notify_device_change(ctx.user["id"])
             return {"ok": True}
 
+        @r.add("PATCH", "/api/devices/:id")
+        async def rename_device(ctx: Context):
+            body = await read_json(ctx.request)
+            d = db.get("SELECT * FROM devices WHERE id = ? AND user_id = ? AND revoked_at IS NULL", ctx.params["id"], ctx.user["id"])
+            if not d:
+                fail(404, "No such device")
+            name = v_str(body.get("name"), "name", min=1, max=80).strip()
+            if not name:
+                fail(400, "name can't be blank")
+            db.run("UPDATE devices SET name = ? WHERE id = ?", name, d["id"])
+            hub.send_to_user(ctx.user["id"], {"type": "devices", "userId": ctx.user["id"]})
+            return {"device": self.device_view(db.get("SELECT * FROM devices WHERE id = ?", d["id"]))}
+
         # Public keys of any devices, including logged-out ones, so old
         # messages from them still decrypt.
         @r.add("GET", "/api/keys")
@@ -869,6 +914,7 @@ class Api:
                     if (
                         not m or m["kind"] != "msg" or m["payload"] is None or m["deleted_at"] or m["view_once"]
                         or not self.can_see_message(m, uid) or self.get_chat(m["chat_id"])["type"] == "channel"
+                        or self.get_chat(m["chat_id"])["device_pair"]
                     ):
                         continue
                     db.run(
@@ -914,11 +960,13 @@ class Api:
                 "SELECT c.* FROM chats c JOIN members m ON m.chat_id = c.id WHERE m.user_id = ? AND m.removed = 0",
                 ctx.user["id"],
             )
-            return {"chats": [self.chat_view(c, ctx.user["id"], ctx.device["id"]) for c in rows]}
+            return {
+                "chats": [self.chat_view(c, ctx.user["id"], ctx.device["id"]) for c in rows if self.visible_to_device(c, ctx.device["id"])]
+            }
 
         @r.add("GET", "/api/chats/:id")
         async def chat(ctx: Context):
-            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True)
+            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True, device=ctx.device["id"])
             return {"chat": self.chat_view(chat, ctx.user["id"], ctx.device["id"])}
 
         @r.add("POST", "/api/chats/direct")
@@ -941,6 +989,37 @@ class Api:
                 chat = self.get_chat(chat_id)
             db.run("UPDATE members SET removed = 0 WHERE chat_id = ? AND user_id = ?", chat["id"], ctx.user["id"])
             return {"chat": self.chat_view(chat, ctx.user["id"])}
+
+        # A chat between two of your own devices: messages in it are sealed for
+        # those two only. open=false finds or creates it without bringing back
+        # a chat you deleted.
+        @r.add("POST", "/api/chats/devices")
+        async def device_chat(ctx: Context):
+            body = await read_json(ctx.request)
+            uid, me = ctx.user["id"], ctx.device["id"]
+            other = v_str(body.get("deviceId"), "deviceId", min=1, max=40)
+            if other == me or not db.get("SELECT 1 FROM devices WHERE id = ? AND user_id = ? AND revoked_at IS NULL", other, uid):
+                fail(404, "No such device")
+            pair = "|".join(sorted([me, other]))
+            key = f"devices:{pair}"
+            chat = db.get("SELECT * FROM chats WHERE direct_key = ?", key)
+            if not chat:
+                chat_id = new_id()
+                with db.tx():
+                    db.run(
+                        """INSERT OR IGNORE INTO chats (id, type, created_by, created_at, direct_key, device_pair)
+                           VALUES (?, 'direct', ?, ?, ?, ?)""",
+                        chat_id, uid, now(), key, pair,
+                    )
+                    chat = db.get("SELECT * FROM chats WHERE direct_key = ?", key)
+                    db.run("INSERT OR IGNORE INTO members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)", chat["id"], uid, now())
+            elif body.get("open") is not False:
+                db.run("UPDATE members SET removed = 0 WHERE chat_id = ? AND user_id = ?", chat["id"], uid)
+            view = self.chat_view(chat, uid, me)
+            if db.get("SELECT removed FROM members WHERE chat_id = ? AND user_id = ?", chat["id"], uid)["removed"]:
+                return {"chat": None}
+            self.send_chat(chat, uid, {"type": "chat", "chat": view}, except_device=me)
+            return {"chat": view}
 
         @r.add("POST", "/api/chats/group")
         async def group(ctx: Context):
@@ -1046,7 +1125,7 @@ class Api:
             if "markedUnread" in body:
                 set_("marked_unread", int(v_bool(body["markedUnread"], "markedUnread", optional=False)))
             view = self.chat_view(chat, uid)
-            hub.send_to_user(uid, {"type": "chat", "chat": view})
+            self.send_chat(chat, uid, {"type": "chat", "chat": view})
             return {"chat": view}
 
         @r.add("POST", "/api/chats/:id/clear")
@@ -1058,7 +1137,7 @@ class Api:
                 seq, seq, chat["id"], ctx.user["id"],
             )
             view = self.chat_view(chat, ctx.user["id"])
-            hub.send_to_user(ctx.user["id"], {"type": "chat", "chat": view})
+            self.send_chat(chat, ctx.user["id"], {"type": "chat", "chat": view})
             return {"chat": view}
 
         # "Delete chat": clears it and hides it until someone writes again. A
@@ -1077,7 +1156,7 @@ class Api:
                        WHERE chat_id = ? AND user_id = ?""",
                     seq, seq, chat["id"], ctx.user["id"],
                 )
-            hub.send_to_user(ctx.user["id"], {"type": "chat-removed", "chatId": chat["id"]})
+            self.send_chat(chat, ctx.user["id"], {"type": "chat-removed", "chatId": chat["id"]})
             return {"ok": True}
 
         @r.add("POST", "/api/chats/:id/members")
@@ -1309,9 +1388,13 @@ class Api:
         # message key once for each of them.
         @r.add("GET", "/api/chats/:id/devices")
         async def chat_devices(ctx: Context):
-            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"])
+            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], device=ctx.device["id"])
             if chat["type"] == "channel":
                 fail(400, "Channel posts aren't encrypted to devices")
+            pair = self.device_pair(chat)
+            if pair:
+                rows = db.all("SELECT * FROM devices WHERE id IN (?, ?) AND revoked_at IS NULL", pair[0], pair[1])
+                return {"devices": [self.device_view(d) for d in rows]}
             rows = db.all(
                 """SELECT d.* FROM devices d JOIN members m ON m.user_id = d.user_id
                    WHERE m.chat_id = ? AND m.left_at IS NULL AND d.revoked_at IS NULL""",
@@ -1321,7 +1404,7 @@ class Api:
 
         @r.add("GET", "/api/chats/:id/messages")
         async def messages(ctx: Context):
-            chat, member = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True)
+            chat, member = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True, device=ctx.device["id"])
 
             def qint(name: str, default: int) -> int:
                 try:
@@ -1349,7 +1432,7 @@ class Api:
         async def send(ctx: Context):
             body = await read_json(ctx.request, MAX_PAYLOAD + 64 * 1024)
             uid = ctx.user["id"]
-            chat, member = self.require_member(ctx.params["id"], uid)
+            chat, member = self.require_member(ctx.params["id"], uid, device=ctx.device["id"])
             if chat["type"] in GROUPISH and chat["admins_only_send"] and member["role"] != "admin":
                 fail(403, "Only admins can send messages here")
             if chat["type"] == "direct":
@@ -1383,7 +1466,9 @@ class Api:
         @r.add("GET", "/api/messages/:id")
         async def get_message(ctx: Context):
             m = self.require_message(ctx.params["id"], ctx.user["id"])
-            if self.db.get("SELECT 1 FROM hidden WHERE user_id = ? AND message_id = ?", ctx.user["id"], m["id"]):
+            if self.db.get("SELECT 1 FROM hidden WHERE user_id = ? AND message_id = ?", ctx.user["id"], m["id"]) or not self.visible_to_device(
+                self.get_chat(m["chat_id"]), ctx.device["id"]
+            ):
                 fail(404, "No such message")
             return {"message": self.message_view(m, ctx.user["id"], ctx.device["id"])}
 
@@ -1392,7 +1477,7 @@ class Api:
             body = await read_json(ctx.request, MAX_PAYLOAD + 64 * 1024)
             uid = ctx.user["id"]
             m = self.require_message(ctx.params["id"], uid)
-            if m["sender_id"] != uid or m["kind"] != "msg":
+            if m["sender_id"] != uid or m["kind"] != "msg" or not self.visible_to_device(self.get_chat(m["chat_id"]), ctx.device["id"]):
                 fail(403, "You can only edit your own messages")
             if m["deleted_at"]:
                 fail(400, "This message was deleted")
@@ -1428,7 +1513,7 @@ class Api:
                 self.broadcast_chat(m["chat_id"])
             else:
                 db.run("INSERT OR IGNORE INTO hidden (user_id, message_id) VALUES (?, ?)", uid, m["id"])
-                hub.send_to_user(uid, {"type": "message-gone", "chatId": m["chat_id"], "id": m["id"]})
+                self.send_chat(self.get_chat(m["chat_id"]), uid, {"type": "message-gone", "chatId": m["chat_id"], "id": m["id"]})
             return {"ok": True}
 
         @r.add("POST", "/api/messages/:id/react")
@@ -1463,7 +1548,7 @@ class Api:
                 db.run("INSERT OR IGNORE INTO stars (user_id, message_id, at) VALUES (?, ?, ?)", uid, m["id"], now())
             else:
                 db.run("DELETE FROM stars WHERE user_id = ? AND message_id = ?", uid, m["id"])
-            hub.send_to_user(uid, {"type": "message-update", "message": self.message_view(m, uid)})
+            self.send_chat(self.get_chat(m["chat_id"]), uid, {"type": "message-update", "message": self.message_view(m, uid)})
             return {"ok": True}
 
         # Poll options are encrypted; the server only stores the chosen indices.
@@ -1545,8 +1630,8 @@ class Api:
             if chat["type"] == "channel":
                 watchers = [u for u in watchers if u == uid or (self.active_member(chat["id"], u) or {}).get("role") == "admin"]
             for other in watchers:
-                hub.send_to_user(other, {"type": "receipt", "chatId": chat["id"], "member": self.member_view(fresh, chat, other)})
-            hub.send_to_user(uid, {"type": "chat", "chat": self.chat_view(chat, uid)})
+                self.send_chat(chat, other, {"type": "receipt", "chatId": chat["id"], "member": self.member_view(fresh, chat, other)})
+            self.send_chat(chat, uid, {"type": "chat", "chat": self.chat_view(chat, uid)})
             return {"ok": True}
 
         @r.add("GET", "/api/starred")
@@ -1556,7 +1641,12 @@ class Api:
                 "SELECT m.* FROM stars s JOIN messages m ON m.id = s.message_id WHERE s.user_id = ? ORDER BY s.at DESC LIMIT 500",
                 uid,
             )
-            return {"messages": [self.message_view(m, uid, ctx.device["id"]) for m in rows if self.can_see_message(m, uid)]}
+            return {
+                "messages": [
+                    self.message_view(m, uid, ctx.device["id"]) for m in rows
+                    if self.can_see_message(m, uid) and self.visible_to_device(self.get_chat(m["chat_id"]), ctx.device["id"])
+                ]
+            }
 
         # Files are uploaded as raw bytes. Message attachments are encrypted on
         # the device first, so the server stores ciphertext; ?public=1 is for

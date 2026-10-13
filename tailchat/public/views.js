@@ -79,7 +79,7 @@ function chatRowData(chat, title) {
     draft: draft.slice(0, 100),
     tick: last && last.kind === 'msg' && A.isMe(last.senderId) && !last.deletedAt ? A.tickState(last, chat) : null,
     prefix: last && A.showsSender(chat) && last.kind === 'msg' && !last.deletedAt && !A.isMe(last.senderId) ? `${A.nameOf(last.senderId)}: ` : '',
-    preview: last ? A.previewText(last) : A.isGroupish(chat) ? 'No messages yet' : '',
+    preview: last ? A.previewText(last) : A.isGroupish(chat) ? 'No messages yet' : A.isDeviceChat(chat) ? 'Send messages and files to this device' : '',
     unread: chat.unread,
     marked: chat.me.markedUnread,
     muted: chat.me.mutedUntil > Date.now(),
@@ -758,6 +758,15 @@ function newChatPanel() {
       action('link', 'Invite people to Tailchat', () => O.inviteToTailnetDialog(), 'Friends and family need Tailscale to reach you'),
       userRow(S.me, () => startDirect(S.me.id), 'Message yourself'),
     ] : null,
+    !q && S.ownDevices.length > 1 ? [
+      h('div', { class: 'list-section' }, 'Your devices'),
+      S.ownDevices.filter((d) => d.id !== S.device.id).map((d) => h(
+        'div',
+        { class: 'row', onclick: () => A.openDeviceChat(d.id).then(() => { S.panel = null; render(); }).catch((e) => toast(e.message)) },
+        avatar({ id: d.id, name: d.name }, 'md'),
+        h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, d.name), h('div', { class: 'preview ellipsis' }, 'Only that device and this one can read it')),
+      )),
+    ] : null,
     h('div', { class: 'list-section' }, 'Contacts on Tailchat'),
     users.map((u) => userRow(u, () => startDirect(u.id))),
     !users.length
@@ -991,6 +1000,7 @@ function devicesPanel() {
           ? h('div', { class: 'preview warn-text' }, "Its key isn't the one this device saw before")
           : h('div', { class: 'preview mono' }, `Code ${S.deviceCodes.get(d.id) || '…'}`),
       ),
+      iconButton('edit', 'Rename', () => O.renameDeviceDialog(d)),
       d.id !== S.device.id ? h('button', { type: 'button', class: 'btn plain small', onclick: async () => {
         if (!(await confirmDialog(`Log out ${d.name}?`, 'It will stop receiving messages and its key will no longer be used.', 'Log out', 'danger'))) return;
         await api.del(`/api/devices/${encodeURIComponent(d.id)}`).catch((e) => toast(e.message));

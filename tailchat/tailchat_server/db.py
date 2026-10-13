@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS chats (
   admins_only_edit INTEGER NOT NULL DEFAULT 0,
   pinned_message TEXT,
   last_seq INTEGER NOT NULL DEFAULT 0,
-  community_id TEXT                  -- a group that belongs to a community
+  community_id TEXT,                 -- a group that belongs to a community
+  device_pair TEXT                   -- "a|b": a chat between two devices of one person
 );
 
 CREATE TABLE IF NOT EXISTS members (
@@ -184,6 +185,8 @@ class Database:
         self.conn.executescript("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")
         self._migrate()
         self.conn.executescript(SCHEMA)
+        if "device_pair" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(chats)").fetchall()}:
+            self.conn.execute("ALTER TABLE chats ADD COLUMN device_pair TEXT")
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._depth = 0
 

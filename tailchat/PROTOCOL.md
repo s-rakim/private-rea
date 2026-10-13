@@ -253,6 +253,7 @@ Group calls are a mesh of up to 8 people.
 | `GET /api/calls` | call history |
 | `POST /api/history/request`, `GET /api/history/requests`, `DELETE /api/history/requests/:deviceId` | ask your other devices for chat history, list requests, decline or cancel (§9) |
 | `POST /api/history/keys {deviceId, keys: [{messageId, key}], done}` | share message keys with another device of yours (§9) |
+| `POST /api/chats/devices {deviceId, open?}`, `PATCH /api/devices/:id {name}` | chat with one of your other devices (§10), rename a device |
 | `POST /api/chats/community {name, description?, avatar?, members?}` | new community (§8) |
 | `POST /api/communities/:id/groups {name, members?}` or `{groupId}`, `DELETE /api/communities/:id/groups/:groupId` | add a new or existing group, remove a group |
 | `POST /api/communities/:id/groups/:groupId/join`, `DELETE /api/communities/:id` | join a group, deactivate |
@@ -289,8 +290,7 @@ or community announcements.
 ## 9. Sharing history with a new device
 
 A device linked after a message was sent has no key for it. Another device of
-the same user can share the message keys once the user says yes on it, the
-way WhatsApp sends history to a newly linked device.
+the same user can share the message keys once the user says yes on it.
 
 1. The new device `N` calls `POST /api/history/request` (`400` if the user has
    no other device). The server records a pending request and sends
@@ -343,3 +343,21 @@ them in place, so you can retire an old phone after moving to a new one. It can'
 move one to another message: each is bound to the message's aad and to both
 devices. What it can't check is the sharing device's word about who sent each
 message, so users should only approve devices they linked themselves.
+
+## 10. Device chats
+
+A device chat is a chat between two devices of the same person, for sending
+something to one particular device. `POST /api/chats/devices {deviceId}`
+finds or creates the chat between the calling device and `deviceId` (another
+logged-in device of the same user); `open: false` returns `{chat: null}`
+instead of bringing back a chat the user deleted. It is a `direct` chat whose
+only member is that user, and its view carries `devices: [a, b]` (sorted).
+
+The server treats it as belonging to those two devices: only they get it in
+`GET /api/chats`, can fetch it, its messages or its device list, can post to
+it, and get its events. `GET /api/chats/:id/devices` lists just the two, so
+messages are sealed for them alone. It disappears once either device is
+logged out, and history sharing (§9) never copies it to a third device.
+
+`PATCH /api/devices/:id {name}` renames one of your devices; your devices get a
+`devices` event.

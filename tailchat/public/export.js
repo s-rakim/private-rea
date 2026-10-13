@@ -1,4 +1,4 @@
-// Export chat, as on WhatsApp: the conversation as a text file, or a zip of
+// Export chat: the conversation as a text file, or a zip of
 // the text file and the chat's media. Everything is decrypted on this device.
 import { S, api, nameOf, isMe, chatTitle, contentOf, readMessage, systemText, withNames, fileBlob } from './app.js';
 import { safeName } from './media.js';

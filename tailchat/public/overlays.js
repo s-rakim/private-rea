@@ -1,7 +1,7 @@
 // Dialogs and full-screen layers shared by the screens: pickers, message
 // info, media viewer, status viewer and composer, calls, group invites.
-import { S, api, calls, render, nameOf, isMe, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, ownDevice, shareHistory, declineHistory } from './app.js';
-import { h, icon, iconButton, avatar, dialog, toast, viewer, timeOf, listTime, dayLabel, fileSize, duration, reconcile } from './ui.js';
+import { S, api, calls, render, nameOf, isMe, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, ownDevice, shareHistory, declineHistory, renameDevice } from './app.js';
+import { h, icon, iconButton, avatar, dialog, promptDialog, toast, viewer, timeOf, listTime, dayLabel, fileSize, duration, reconcile } from './ui.js';
 import { securityCode } from './crypto.js';
 import { exportChat } from './export.js';
 import { kindFor, safeName } from './media.js';
@@ -110,12 +110,12 @@ export function pickChats({ title, okLabel = 'Send', max = 5 }) {
     const search = h('input', { type: 'search', placeholder: 'Search name or tailnet login', oninput: () => draw() });
     const list = h('div', { class: 'pick-list' });
     const chats = sendableChats();
-    const withDirect = new Set(chats.filter((c) => c.type === 'direct').map((c) => c.members.find((m) => !isMe(m.userId))?.userId || S.me.id));
+    const withDirect = new Set(chats.filter((c) => c.type === 'direct' && !c.devices).map((c) => c.members.find((m) => !isMe(m.userId))?.userId || S.me.id));
     const entries = [
       ...chats.map((c) => ({
         key: c.id,
         title: chatTitle(c),
-        sub: isChannel(c) ? `Channel · ${c.followers} followers` : isGroupish(c) ? `${c.members.filter((m) => !m.left).length} members` : c.members.find((m) => !isMe(m.userId))?.userId || 'Message yourself',
+        sub: isChannel(c) ? `Channel · ${c.followers} followers` : isGroupish(c) ? `${c.members.filter((m) => !m.left).length} members` : c.devices ? 'Your device' : c.members.find((m) => !isMe(m.userId))?.userId || 'Message yourself',
         av: chatAvatar(c),
         chatId: async () => c.id,
       })),
@@ -329,6 +329,12 @@ export function shareHistoryDialog(deviceId) {
       },
     ],
   });
+}
+
+export async function renameDeviceDialog(d) {
+  const name = await promptDialog('Rename device', { label: 'Device name', value: d.name, max: 80, okLabel: 'Save' });
+  if (!name?.trim() || name.trim() === d.name) return;
+  renameDevice(d.id, name.trim()).catch((err) => toast(err.message));
 }
 
 export function declineHistoryAsk(deviceId) {

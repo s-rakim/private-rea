@@ -200,7 +200,36 @@ function settingsSection(chat) {
   );
 }
 
+function deviceInfo(chat) {
+  const d = A.ownDevice(A.devicePeer(chat));
+  return [
+    panelHeader('Device info'),
+    h(
+      'div',
+      { class: 'scroll' },
+      h(
+        'div',
+        { class: 'card center' },
+        avatar(A.chatAvatar(chat), 'lg'),
+        h('h2', null, A.chatTitle(chat)),
+        h('h3', null, d ? `Linked ${listTime(d.createdAt)} · active ${listTime(d.lastActive)}` : 'Logged out'),
+        d ? h('div', { class: 'muted mono' }, `Code ${S.deviceCodes.get(d.id) || '…'}`) : null,
+      ),
+      h('div', { class: 'card' }, h('p', null, "Messages and files you send here are end-to-end encrypted for that device and this one only. Your other devices, and Tailchat's server, can't read them.")),
+      sharedSection(chat),
+      h(
+        'div',
+        { class: 'card flush' },
+        d ? menuRow('edit', 'Rename device', null, () => O.renameDeviceDialog(d)) : null,
+        menuRow('delete', 'Clear chat', null, () => clearChat(chat)),
+        menuRow('delete', 'Delete chat', null, () => deleteChat(chat), { danger: true }),
+      ),
+    ),
+  ];
+}
+
 function directInfo(chat) {
+  if (A.isDeviceChat(chat)) return deviceInfo(chat);
   const uid = A.otherMember(chat);
   const self = A.isMe(uid);
   const u = self ? S.me : S.users.get(uid) || { id: uid, name: A.nameOf(uid) };

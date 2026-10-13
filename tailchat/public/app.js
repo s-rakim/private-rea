@@ -259,14 +259,20 @@ export const isChannel = (chat) => chat?.type === 'channel';
 export const showsSender = (chat) => chat?.type === 'group' || chat?.type === 'community';
 export const noun = (chat) => ({ group: 'group', community: 'community', channel: 'channel' })[chat?.type] || 'chat';
 
+// A device chat is between two of your own devices (PROTOCOL.md §10).
+export const isDeviceChat = (chat) => Array.isArray(chat?.devices);
+export const devicePeer = (chat) => chat?.devices?.find((id) => id !== S.device.id) || null;
+
 export function chatTitle(chat) {
   if (!chat) return '';
+  if (isDeviceChat(chat)) return ownDevice(devicePeer(chat))?.name || 'Your other device';
   if (isGroupish(chat)) return chat.name;
   const other = otherMember(chat);
   return isMe(other) ? `${S.me.name} (You)` : nameOf(other);
 }
 
 export function chatAvatar(chat) {
+  if (isDeviceChat(chat)) return { id: devicePeer(chat) || chat.id, name: chatTitle(chat) };
   if (isGroupish(chat)) return { id: chat.id, name: chat.name, src: chat.avatar, group: chat.type === 'group' || chat.type };
   const u = S.users.get(otherMember(chat)) || S.me;
   return { id: u.id, name: u.name, src: u.avatar };
@@ -575,6 +581,31 @@ export async function loadHistory() {
   if (S.history.loaded && now) ownRequestChanged(before, now);
   S.history.loaded = true;
   render();
+  ensureDeviceChats().catch(() => {});
+}
+
+// Every other device of yours gets a chat, the first time this one sees it.
+const deviceChatTried = new Set();
+async function ensureDeviceChats() {
+  for (const d of S.ownDevices) {
+    if (d.id === S.device.id || deviceChatTried.has(d.id)) continue;
+    deviceChatTried.add(d.id);
+    if ([...S.chats.values()].some((c) => c.devices?.includes(d.id))) continue;
+    const { chat } = await api.post('/api/chats/devices', { deviceId: d.id, open: false });
+    if (chat) S.chats.set(chat.id, chat);
+  }
+  render();
+}
+
+export async function openDeviceChat(deviceId) {
+  const { chat } = await api.post('/api/chats/devices', { deviceId });
+  S.chats.set(chat.id, chat);
+  openChat(chat.id);
+}
+
+export async function renameDevice(deviceId, name) {
+  await api.patch(`/api/devices/${encodeURIComponent(deviceId)}`, { name });
+  await loadHistory();
 }
 
 export const ownDevice = (id) => S.ownDevices.find((d) => d.id === id);
@@ -661,7 +692,8 @@ export async function shareHistory(deviceId, code, onProgress) {
     batch = [];
   };
   try {
-    for (const chat of [...S.chats.values()].filter((c) => !isChannel(c))) {
+    // Channels aren't encrypted, and a device chat is for its two devices only.
+    for (const chat of [...S.chats.values()].filter((c) => !isChannel(c) && !isDeviceChat(c))) {
       let before = 0;
       for (;;) {
         const { messages, hasMore } = await api.get(`/api/chats/${encodeURIComponent(chat.id)}/messages?limit=200${before ? `&before=${before}` : ''}`);

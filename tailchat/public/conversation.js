@@ -678,6 +678,7 @@ function subtitle(chat) {
     names.sort((a, b) => (a === 'You') - (b === 'You'));
     return { text: chat.me.left ? "You're no longer a member" : names.join(', ') };
   }
+  if (A.isDeviceChat(chat)) return { text: 'Your device · only it and this one can read this chat' };
   const other = A.otherMember(chat);
   if (A.isMe(other)) return { text: 'Message yourself' };
   return { text: lastSeenText(S.users.get(other)) || 'click here for contact info' };
@@ -693,7 +694,7 @@ function chatMenuItems(chat) {
   const other = chat.type === 'direct' ? S.users.get(A.otherMember(chat)) : null;
   const self = chat.type === 'direct' && A.isMe(A.otherMember(chat));
   return [
-    { label: A.isGroupish(chat) ? `${A.noun(chat)[0].toUpperCase()}${A.noun(chat).slice(1)} info` : 'Contact info', icon: 'info', onClick: () => { S.details = 'info'; render(); } },
+    { label: A.isGroupish(chat) ? `${A.noun(chat)[0].toUpperCase()}${A.noun(chat).slice(1)} info` : A.isDeviceChat(chat) ? 'Device info' : 'Contact info', icon: 'info', onClick: () => { S.details = 'info'; render(); } },
     chat.type === 'community' ? { label: 'Community home', icon: 'group', onClick: () => openCommunity(chat.id) } : null,
     { label: 'Search', icon: 'search', onClick: () => { S.details = 'search'; render(); } },
     { label: 'Media, links and docs', icon: 'image', onClick: () => { S.details = 'media'; render(); } },
