@@ -155,7 +155,12 @@ std::string Client::resolve_chat(const std::string& chatOrUser) {
 
 // ---------- key ring ----------
 
-void Client::add_public_key(const std::string& deviceId, const Json& jwk) {
+void Client::add_public_key(const std::string& deviceId, const Json& jwk, const std::string& userId) {
+  if (!userId.empty()) {
+    auto [it, fresh] = owners_.emplace(deviceId, userId);
+    if (!fresh && it->second != userId)
+      throw CryptoError("the server now says device " + deviceId + " belongs to " + userId + ", not " + it->second);
+  }
   if (publicKeys_.count(deviceId)) return;
   if (jwk.str("kty") != "EC" || jwk.str("crv") != "P-256") throw CryptoError("device " + deviceId + " has a non-P-256 key");
   publicKeys_.emplace(deviceId, import_public_jwk(jwk.str("x"), jwk.str("y")));
@@ -163,10 +168,10 @@ void Client::add_public_key(const std::string& deviceId, const Json& jwk) {
 
 EVP_PKEY* Client::public_key(const std::string& deviceId) {
   auto it = publicKeys_.find(deviceId);
-  if (it == publicKeys_.end()) {
+  if (it == publicKeys_.end() || !owners_.count(deviceId)) {
     Json r = http_.call("GET", "/api/keys?ids=" + url_encode(deviceId));
     for (const auto& d : r["devices"].items())
-      if (d.str("id") == deviceId) add_public_key(d.str("id"), d["publicKey"]);
+      if (d.str("id") == deviceId) add_public_key(d.str("id"), d["publicKey"], d.str("userId"));
     it = publicKeys_.find(deviceId);
     if (it == publicKeys_.end()) throw CryptoError("Unknown device " + deviceId);
   }
@@ -187,7 +192,7 @@ std::string Client::seal(const Json& content, const std::string& aad, const Json
   std::set<std::string> seen;
   for (const auto& d : devices.items()) {
     std::string id = d.str("id");
-    add_public_key(id, d["publicKey"]);
+    add_public_key(id, d["publicKey"], d.str("userId"));
     if (seen.insert(id).second) ids.push_back(id);
   }
   if (seen.insert(deviceId_).second) ids.push_back(deviceId_);
@@ -205,9 +210,19 @@ std::string Client::seal(const Json& content, const std::string& aad, const Json
   return env.dump();
 }
 
-Json Client::open(const std::string& payload, const std::string& aad) {
+Json Client::open_message(const Json& message) {
+  return open(message["payload"].as_string(), chat_aad(message.str("chatId"), message.str("id")), message.str("senderId"));
+}
+
+Json Client::open(const std::string& payload, const std::string& aad, const std::string& senderId) {
   Json env = Json::parse(payload);
-  if (!env["v"].is_number() || env["v"].as_number() != 1) throw CryptoError("Unsupported envelope version");
+  if (!env["v"].is_number() || env["v"].as_number() != 1 || !env["from"].is_string())
+    throw CryptoError("Unsupported envelope version");
+  public_key(env.str("from"));
+  auto owner = owners_.find(env.str("from"));
+  if (owner == owners_.end() || owner->second != senderId)
+    throw CryptoError("message was sealed by a device of " + (owner == owners_.end() ? std::string("an unknown user") : owner->second) +
+                      ", not " + senderId);
   const Json& wrapped = env["keys"][deviceId_];
   if (!wrapped.is_string()) throw CryptoError("Not encrypted for this device");
   Bytes contentKey = aes_kw_unwrap(wrap_key(env.str("from"), deviceId_), unb64u(wrapped.as_string()));
@@ -394,7 +409,7 @@ void sink_to_fd(void* user, const uint8_t* data, size_t len) {
 
 DownloadResult Client::download(const Json& message, const std::string& outDir, Progress progress) {
   if (!message["payload"].is_string()) throw std::runtime_error("message was deleted or is no longer viewable");
-  Json content = open(message["payload"].as_string(), chat_aad(message.str("chatId"), message.str("id")));
+  Json content = open_message(message);
   const Json& file = content["file"];
   if (content.str("type") != "media" || !file.is_object()) throw std::runtime_error("message has no attachment");
   std::string fileId = file.str("id");

@@ -333,7 +333,7 @@ int run(int argc, char** argv) {
         line = "(" + m.str("kind") + ")";
       } else {
         try {
-          Json content = client.open(m["payload"].as_string(), chat_aad(m.str("chatId"), m.str("id")));
+          Json content = client.open_message(m);
           line = describe(content);
           out.set("content", content);
         } catch (const std::exception& e) {

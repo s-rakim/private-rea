@@ -102,7 +102,8 @@ def derive_wrap_key(private_key: ec.EllipticCurvePrivateKey, peer_public: ec.Ell
 class KeyRing:
     """Mirror of crypto.js KeyRing: seals and opens message envelopes.
 
-    fetch_public_keys(ids) -> [{"id", "publicKey"}, ...] is used for unknown senders.
+    fetch_public_keys(ids) -> [{"id", "publicKey", "userId"}, ...] is used for
+    unknown senders.
     """
 
     def __init__(self, device_id: str, private_key: ec.EllipticCurvePrivateKey,
@@ -111,16 +112,22 @@ class KeyRing:
         self.private_key = private_key
         self.fetch_public_keys = fetch_public_keys
         self.public_keys: dict[str, ec.EllipticCurvePublicKey] = {device_id: private_key.public_key()}
+        self.owners: dict[str, str] = {}  # device id -> the tailnet user it belongs to
         self.wrap_keys: dict[str, bytes] = {}
 
-    def add_public_key(self, device_id: str, jwk: dict) -> None:
+    def add_public_key(self, device_id: str, jwk: dict, user_id: str | None = None) -> None:
+        if user_id:
+            known = self.owners.get(device_id)
+            if known and known != user_id:
+                raise CryptoError(f"The server now says device {device_id} belongs to {user_id}, not {known}")
+            self.owners[device_id] = user_id
         if device_id not in self.public_keys:
             self.public_keys[device_id] = import_public_jwk(jwk)
 
     def public_key(self, device_id: str) -> ec.EllipticCurvePublicKey:
-        if device_id not in self.public_keys and self.fetch_public_keys:
+        if (device_id not in self.public_keys or device_id not in self.owners) and self.fetch_public_keys:
             for d in self.fetch_public_keys([device_id]):
-                self.add_public_key(d["id"], d["publicKey"])
+                self.add_public_key(d["id"], d["publicKey"], d.get("userId"))
         try:
             return self.public_keys[device_id]
         except KeyError:
@@ -138,7 +145,7 @@ class KeyRing:
     def seal(self, content: dict, aad: str, recipients: Iterable[dict]) -> str:
         ids: list[str] = []
         for d in recipients:
-            self.add_public_key(d["id"], d["publicKey"])
+            self.add_public_key(d["id"], d["publicKey"], d.get("userId"))
             if d["id"] not in ids:
                 ids.append(d["id"])
         if self.device_id not in ids:
@@ -150,10 +157,17 @@ class KeyRing:
         return json.dumps({"v": 1, "from": self.device_id, "iv": b64u(iv), "ct": b64u(ct), "keys": keys},
                           separators=(",", ":"))
 
-    def open(self, payload: str | dict, aad: str) -> dict:
+    def open(self, payload: str | dict, aad: str, sender_id: str | None = None) -> dict:
+        """sender_id: the user the server says sent it. The sealing device must
+        be one of theirs, or the server is relabelling messages (§3)."""
         env = json.loads(payload) if isinstance(payload, str) else payload
-        if not isinstance(env, dict) or env.get("v") != 1:
+        if not isinstance(env, dict) or env.get("v") != 1 or not isinstance(env.get("from"), str):
             raise CryptoError("Unsupported envelope version")
+        if sender_id is not None:
+            self.public_key(env["from"])
+            owner = self.owners.get(env["from"])
+            if owner != sender_id:
+                raise CryptoError(f"Message was sealed by a device of {owner or 'an unknown user'}, not {sender_id}")
         wrapped = (env.get("keys") or {}).get(self.device_id)
         if not wrapped:
             raise NoKeyError("Not encrypted for this device")

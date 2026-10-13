@@ -198,6 +198,7 @@ class Session:
         self.state = state
         self.client = client or Client(state.server, state.token, state.dev_user)
         self.ring = crypto.KeyRing(state.device_id, crypto.private_key_from_pem(state.private_key_pem), self.client.keys)
+        self.ring.owners[state.device_id] = state.user_id
 
     @property
     def device_id(self) -> str:
@@ -281,7 +282,7 @@ class Session:
             return {"type": "system", **(event if isinstance(event, dict) else {})}
         if message.get("payload") is None:
             return {"type": "deleted" if message.get("deletedAt") else "unavailable"}
-        return self.ring.open(message["payload"], crypto.chat_aad(message["chatId"], message["id"]))
+        return self.ring.open(message["payload"], crypto.chat_aad(message["chatId"], message["id"]), message.get("senderId") or "")
 
     def history(self, chat_id: str, limit: int = 50, before: int | None = None) -> list[tuple[dict, dict | None, str | None]]:
         out = []

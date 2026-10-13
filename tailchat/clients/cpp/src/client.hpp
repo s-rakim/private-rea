@@ -65,8 +65,12 @@ class Client {
   // chunk in memory.
   FileInfo upload_file(const std::string& path, Json& fileFields, Progress progress);
 
-  // Decrypts a message payload (throws CryptoError / ApiError).
-  Json open(const std::string& payload, const std::string& aad);
+  // Decrypts a message payload (throws CryptoError / ApiError). senderId is
+  // the user the server says sent it: the sealing device must be theirs, or
+  // the server is relabelling messages (PROTOCOL.md §3).
+  Json open(const std::string& payload, const std::string& aad, const std::string& senderId);
+  // Decrypts a chat message from the server, checking its sender.
+  Json open_message(const Json& message);
   std::string seal(const Json& content, const std::string& aad, const Json& devices);
 
   // Finds a message by id: in `chatId` when given, otherwise in every chat.
@@ -82,10 +86,11 @@ class Client {
   std::optional<DeviceKey> key_;
   std::string deviceId_, userId_;
   std::map<std::string, PKey> publicKeys_;
+  std::map<std::string, std::string> owners_;  // device id -> tailnet user
   std::map<std::string, Bytes> wrapKeys_;
 
   EVP_PKEY* public_key(const std::string& deviceId);
-  void add_public_key(const std::string& deviceId, const Json& jwk);
+  void add_public_key(const std::string& deviceId, const Json& jwk, const std::string& userId);
   const Bytes& wrap_key(const std::string& senderId, const std::string& recipientId);
   std::string profile_key() const;
 };

@@ -14,7 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /** Seals and opens message envelopes (PROTOCOL.md §2-3), like KeyRing in public/crypto.js. */
 public final class KeyRing {
-    /** Looks up public JWKs for device ids: returns [{id, publicKey}] as the server does. */
+    /** Looks up public JWKs for device ids: returns [{id, publicKey, userId}] as the server does. */
     public interface KeyFetcher {
         List<Map<String, Object>> fetch(Collection<String> ids) throws Exception;
     }
@@ -30,6 +30,7 @@ public final class KeyRing {
     private final PrivateKey privateKey;
     private final KeyFetcher fetcher;
     private final Map<String, PublicKey> publicKeys = new ConcurrentHashMap<>();
+    private final Map<String, String> owners = new ConcurrentHashMap<>(); // device id -> tailnet user
     private final Map<String, byte[]> wrapKeys = new ConcurrentHashMap<>();
 
     public KeyRing(String deviceId, PrivateKey privateKey, KeyFetcher fetcher) {
@@ -43,15 +44,26 @@ public final class KeyRing {
     }
 
     public void addPublicKey(String id, Map<String, Object> jwk) throws GeneralSecurityException {
+        addPublicKey(id, jwk, null);
+    }
+
+    /** userId: the tailnet user the server says owns the device. It can't change later. */
+    public void addPublicKey(String id, Map<String, Object> jwk, String userId) throws GeneralSecurityException {
+        if (userId != null) {
+            String known = owners.putIfAbsent(id, userId);
+            if (known != null && !known.equals(userId)) {
+                throw new GeneralSecurityException("The server now says device " + id + " belongs to " + userId + ", not " + known);
+            }
+        }
         if (!publicKeys.containsKey(id)) publicKeys.put(id, Crypto.publicKeyFromJwk(jwk));
     }
 
     private PublicKey publicKey(String id) throws GeneralSecurityException {
         PublicKey key = publicKeys.get(id);
-        if (key == null && fetcher != null) {
+        if ((key == null || !owners.containsKey(id)) && fetcher != null) {
             try {
                 for (Map<String, Object> d : fetcher.fetch(List.of(id))) {
-                    addPublicKey(Json.str(d, "id"), Json.obj(d, "publicKey"));
+                    addPublicKey(Json.str(d, "id"), Json.obj(d, "publicKey"), Json.str(d, "userId"));
                 }
             } catch (GeneralSecurityException e) {
                 throw e;
@@ -86,7 +98,7 @@ public final class KeyRing {
         Set<String> ids = new LinkedHashSet<>();
         for (Map<String, Object> d : recipients) {
             String id = Json.str(d, "id");
-            addPublicKey(id, Json.obj(d, "publicKey"));
+            addPublicKey(id, Json.obj(d, "publicKey"), Json.str(d, "userId"));
             ids.add(id);
         }
         ids.add(deviceId);
@@ -101,8 +113,26 @@ public final class KeyRing {
 
     /** Decrypts an envelope (string or parsed map) and returns the content object. */
     public Map<String, Object> open(Object payload, String aad) throws GeneralSecurityException {
+        return open(payload, aad, null);
+    }
+
+    /**
+     * Like {@link #open(Object, String)}, and checks that the sealing device belongs to
+     * {@code senderId}, the user the server says sent it, so the server can't relabel messages.
+     */
+    public Map<String, Object> open(Object payload, String aad, String senderId) throws GeneralSecurityException {
         Map<String, Object> env = payload instanceof String s ? Json.parseObject(s) : Json.obj(payload);
-        if (env == null || Json.num(env, "v", -1) != 1) throw new GeneralSecurityException("Unsupported envelope version");
+        if (env == null || Json.num(env, "v", -1) != 1 || Json.str(env, "from") == null) {
+            throw new GeneralSecurityException("Unsupported envelope version");
+        }
+        if (senderId != null) {
+            String from = Json.str(env, "from");
+            publicKey(from);
+            String owner = owners.get(from);
+            if (!senderId.equals(owner)) {
+                throw new GeneralSecurityException("Message was sealed by a device of " + (owner == null ? "an unknown user" : owner) + ", not " + senderId);
+            }
+        }
         String wrapped = Json.str(Json.obj(env, "keys"), deviceId);
         if (wrapped == null) throw new NoKeyException();
         byte[] contentKey = Crypto.aesKwUnwrap(wrapKey(Json.str(env, "from"), deviceId), Crypto.unb64u(wrapped));

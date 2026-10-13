@@ -309,6 +309,20 @@ class OfflineCryptoInteropTest(unittest.TestCase):
         with self.assertRaises(crypto.NoKeyError):
             c.open(payload, crypto.chat_aad("c1", "m1"))
 
+    def test_relabelled_sender_is_rejected(self):
+        a = crypto.KeyRing("devA", crypto.generate_private_key())
+        b = crypto.KeyRing("devB", crypto.generate_private_key())
+        b.add_public_key("devA", crypto.public_jwk(a.private_key), "alice@example.com")
+        payload = a.seal({"type": "text", "text": "x"}, crypto.chat_aad("c1", "m1"),
+                         [{"id": "devB", "publicKey": crypto.public_jwk(b.private_key), "userId": "bob@example.com"}])
+        self.assertEqual(b.open(payload, crypto.chat_aad("c1", "m1"), "alice@example.com")["text"], "x")
+        # The server claims Mallory sent it: the envelope says otherwise.
+        with self.assertRaises(crypto.CryptoError):
+            b.open(payload, crypto.chat_aad("c1", "m1"), "mallory@example.com")
+        # And it can't change who a device belongs to after the fact.
+        with self.assertRaises(crypto.CryptoError):
+            b.add_public_key("devA", crypto.public_jwk(a.private_key), "mallory@example.com")
+
 
 if __name__ == "__main__":
     unittest.main()

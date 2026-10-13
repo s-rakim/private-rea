@@ -355,7 +355,8 @@ public final class TailchatClient {
         if (!"msg".equals(Json.str(message, "kind"))) {
             return payload instanceof String s ? Json.parseObject(s) : Json.obj(payload);
         }
-        return ring.open(payload, Crypto.chatAad(Json.str(message, "chatId"), Json.str(message, "id")));
+        String sender = Json.str(message, "senderId");
+        return ring.open(payload, Crypto.chatAad(Json.str(message, "chatId"), Json.str(message, "id")), sender == null ? "" : sender);
     }
 
     /** Finds a message by id in any chat this user can read. */

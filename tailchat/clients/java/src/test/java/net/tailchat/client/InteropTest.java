@@ -190,6 +190,32 @@ public final class InteropTest {
             check(Arrays.equals(key, Crypto.aesKwUnwrap(kek, wrapped)), "unwrap");
         });
 
+        test("a message relabelled to another sender is rejected", () -> {
+            java.security.KeyPair a = Crypto.generateKeyPair();
+            java.security.KeyPair b = Crypto.generateKeyPair();
+            KeyRing ringA = new KeyRing("devA", a.getPrivate(), null);
+            KeyRing ringB = new KeyRing("devB", b.getPrivate(), null);
+            ringA.addPublicKey("devA", Crypto.publicJwk(a.getPublic()), "alice@example.com");
+            ringB.addPublicKey("devA", Crypto.publicJwk(a.getPublic()), "alice@example.com");
+            String payload = ringA.seal(Json.map("type", "text", "text", "x"), Crypto.chatAad("c1", "m1"),
+                    List.of(Json.map("id", "devB", "publicKey", Crypto.publicJwk(b.getPublic()), "userId", "bob@example.com")));
+            eq("x", Json.str(ringB.open(payload, Crypto.chatAad("c1", "m1"), "alice@example.com"), "text"), "genuine sender");
+            boolean refused = false;
+            try {
+                ringB.open(payload, Crypto.chatAad("c1", "m1"), "mallory@example.com");
+            } catch (java.security.GeneralSecurityException e) {
+                refused = true;
+            }
+            check(refused, "relabelled sender accepted");
+            refused = false;
+            try {
+                ringB.addPublicKey("devA", Crypto.publicJwk(a.getPublic()), "mallory@example.com");
+            } catch (java.security.GeneralSecurityException e) {
+                refused = true;
+            }
+            check(refused, "device owner changed");
+        });
+
         test("JWK coordinates are exactly 32 bytes (sign byte stripped, short values padded)", () -> {
             BigInteger high = new BigInteger(1, HEX.parseHex("ff".repeat(32)));
             eq(33, high.toByteArray().length, "BigInteger adds a sign byte");
