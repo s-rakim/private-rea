@@ -87,7 +87,8 @@ channels, see §8):
 * To decrypt: look up your device id in `keys`, fetch the sender's public key
   with `GET /api/keys?ids=<from>` (logged-out devices are still listed), derive
   the wrap key, unwrap, then open `ct`. A device that was linked after a
-  message was sent has no entry and can't read it — the same as WhatsApp.
+  message was sent has no entry and can't read it, unless another device of
+  the same user shares the history with it (§9).
 * Your own sends also come back to you over the WebSocket (other devices of
   yours need them); match them by message id.
 * Clients should **pin** every device key they see together with its owner,
@@ -199,6 +200,7 @@ the server answers `{"type":"ready"}`. Server events:
 | `devices` | `{userId}` that user's device list changed: refresh before encrypting |
 | `status` / `status-gone` | status updates |
 | `call` | call signalling, see below |
+| `history` | `{request}` a device of yours asked for chat history, or the request was answered (§9) |
 
 Clients send `{"type":"typing","chatId","on","kind"}` and call frames.
 
@@ -249,6 +251,9 @@ Group calls are a mesh of up to 8 people.
 | `POST /api/files[?public=1]`, `GET /api/files/:id`, `GET /api/avatars/:id` | files |
 | `GET/POST /api/status`, `DELETE /api/status/:id`, `POST /api/status/:id/view`, `GET /api/status/devices` | status updates |
 | `GET /api/calls` | call history |
+| `POST /api/history/request`, `GET /api/history/requests`, `DELETE /api/history/requests/:deviceId` | ask your other devices for chat history, list requests, decline or cancel (§9) |
+| `POST /api/history/keys {deviceId, keys: [{messageId, key}], done}` | share message keys with another device of yours (§9) |
+| `POST /api/chats/devices {deviceId, open?}`, `PATCH /api/devices/:id {name}` | chat with one of your other devices (§10), rename a device |
 | `POST /api/chats/community {name, description?, avatar?, members?}` | new community (§8) |
 | `POST /api/communities/:id/groups {name, members?}` or `{groupId}`, `DELETE /api/communities/:id/groups/:groupId` | add a new or existing group, remove a group |
 | `POST /api/communities/:id/groups/:groupId/join`, `DELETE /api/communities/:id` | join a group, deactivate |
@@ -281,3 +286,81 @@ each other: the chat view shows them only the admins and themselves (with a
 `followers` count), reactions and votes from others come with `userId: null`,
 and receipts and typing reach admins only. Calls aren't available in channels
 or community announcements.
+
+## 9. Sharing history with a new device
+
+A device linked after a message was sent has no key for it. Another device of
+the same user can share the message keys once the user says yes on it.
+
+1. The new device `N` calls `POST /api/history/request` (`400` if the user has
+   no other device). The server records a pending request and sends
+   `{"type":"history","request":{...}}` to all of the user's devices. A request
+   is `{deviceId, state, createdAt, updatedAt, byDevice, shared}` with `state`
+   `pending`, `declined` or `done`, or `gone` once the asking device is logged
+   out. `GET /api/history/requests` lists them. Asking again within 10 seconds
+   of the last time doesn't notify again.
+2. Both devices show `N`'s **device code** so the user can check they see the
+   same key: with `h = SHA-256(x || y)` over `N`'s raw public key coordinates,
+   group `i` (0-3) is `((h[3i] << 16) | (h[3i+1] << 8) | h[3i+2]) mod 10000`,
+   zero-padded to 4 digits. `N` computes it from its own key, and `A` from the
+   key it has pinned for `N` (the one it will encrypt to), never from what the
+   server lists, and `A` refuses if the server's listing differs from its pin.
+3. If the user approves on device `A`, it goes through every message it can
+   open in every chat except channels, skipping view-once messages, deleted
+   ones, and those whose envelope already has a key for `N`, and seals each
+   message's content key for `N`:
+
+   ```
+   historyKey = HKDF-SHA256(ikm = ECDH(A.private, N.public), salt = "tailchat/v1/history",
+                            info = A.id + "|" + N.id, length = 32)
+   iv         = 12 random bytes
+   ct         = AES-256-GCM(historyKey, iv, plaintext = UTF-8 JSON {"k": b64u(contentKey), "from": envelope.from,
+                                                                  "sender": the message's senderId},
+                            aad = <the message's aad (§3)> + "|history|" + A.id + "|" + N.id)
+   key        = b64u(iv) + "." + b64u(ct)
+   ```
+
+   `A` only shares messages that really opened on it, and only with a device
+   the key directory (`/api/keys`) lists as its own user's.
+4. `A` uploads them in batches with `POST /api/history/keys {deviceId: N, keys:
+   [{messageId, key}], done}`, up to 500 at a time; `done: true` on the last one
+   closes the request and tells `N`. The server only accepts keys from another
+   logged-in device of the same user, while the request is pending, and for
+   messages that user can see, and answers `{stored}`. Declining (or
+   cancelling your own request) is `DELETE /api/history/requests/:deviceId`.
+5. Messages `N` fetches (`GET /api/chats/:id/messages`, `/api/messages/:id`,
+   `/api/chats`, `/api/starred`) then carry `historyKey: {by: A, key}`. To open
+   one: check that `by` is another device of yours, derive `historyKey`,
+   decrypt `key` with the aad above, check its `from` equals the envelope's
+   `from`, its `sender` equals the message's `senderId` and that the `from`
+   device belongs to that user (§3), then open `ct` with `k` as usual. `N` can
+   share onwards the same way.
+
+The server deletes history keys when a message is edited (an edit has a new
+content key), deleted for everyone or disappears, and when the device that
+received them is logged out. Logging out the device that shared them leaves
+them in place, so you can retire an old phone after moving to a new one. It can't read or forge one, or
+move one to another message: each is bound to the message's aad and to both
+devices. What it can't check is the sharing device's word about who sent each
+message, so users should only approve devices they linked themselves.
+
+## 10. Device chats
+
+A device chat is a chat between two devices of the same person, for sending
+something to one particular device. `POST /api/chats/devices {deviceId}`
+finds or creates the chat between the calling device and `deviceId` (another
+logged-in device of the same user); `open: false` returns `{chat: null}`
+instead of bringing back a chat the user deleted. It is a `direct` chat whose
+only member is that user, and its view carries `devices: [a, b]` (sorted).
+
+The server treats it as belonging to those two devices: only they get it in
+`GET /api/chats`, can fetch it, its messages or its device list, can post to
+it or change it or its messages, and get its events. Any other device gets
+`404`, and a pinned device chat doesn't count toward another device's three
+pins. `GET /api/chats/:id/devices` lists just the two, so messages are sealed
+for them alone. It disappears once either device is logged out, and history
+sharing (§9) never copies it to a third device. View once messages (`400`)
+and calls aren't available in it, since the device at the other end is you.
+
+`PATCH /api/devices/:id {name}` renames one of your devices; your devices get a
+`devices` event.

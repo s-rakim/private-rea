@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS chats (
   admins_only_edit INTEGER NOT NULL DEFAULT 0,
   pinned_message TEXT,
   last_seq INTEGER NOT NULL DEFAULT 0,
-  community_id TEXT                  -- a group that belongs to a community
+  community_id TEXT,                 -- a group that belongs to a community
+  device_pair TEXT                   -- "a|b": a chat between two devices of one person
 );
 
 CREATE TABLE IF NOT EXISTS members (
@@ -135,6 +136,27 @@ CREATE TABLE IF NOT EXISTS status_views (
   PRIMARY KEY (status_id, viewer_id)
 );
 
+-- Chat history one of your devices shared with another of yours (PROTOCOL.md
+-- §9): each message's key, re-encrypted by the sharing device for the new one.
+CREATE TABLE IF NOT EXISTS history_keys (
+  message_id TEXT NOT NULL,
+  device_id TEXT NOT NULL,           -- the device that may now read the message
+  by_device TEXT NOT NULL,           -- the device that shared it
+  key TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (message_id, device_id)
+);
+CREATE INDEX IF NOT EXISTS history_keys_device ON history_keys(device_id);
+CREATE TABLE IF NOT EXISTS history_requests (
+  device_id TEXT PRIMARY KEY,        -- the device asking for history
+  user_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'declined', 'done')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  by_device TEXT,                    -- the device that answered
+  shared INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS blocks (user_id TEXT NOT NULL, blocked_id TEXT NOT NULL, PRIMARY KEY (user_id, blocked_id));
 
 CREATE TABLE IF NOT EXISTS calls (
@@ -163,6 +185,8 @@ class Database:
         self.conn.executescript("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")
         self._migrate()
         self.conn.executescript(SCHEMA)
+        if "device_pair" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(chats)").fetchall()}:
+            self.conn.execute("ALTER TABLE chats ADD COLUMN device_pair TEXT")
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._depth = 0
 
