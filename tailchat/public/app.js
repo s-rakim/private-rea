@@ -557,8 +557,12 @@ export function dismissSecurityAlerts({ users = [], devices = false } = {}) {
 
 // ---------- chat history between your own devices (PROTOCOL.md §9) ----------
 
+let historyGen = 0;
 export async function loadHistory() {
+  const gen = ++historyGen;
   const [{ requests }, { devices }] = await Promise.all([api.get('/api/history/requests'), api.get('/api/devices')]);
+  // A slower, older call must not bring back an out-of-date device list.
+  if (gen !== historyGen) return;
   S.ownDevices = devices.filter((d) => !d.revokedAt && d.userId === S.me.id);
   // Another device's code is computed from the key this device pinned for
   // it, which is the key history would be encrypted to. If the server's
@@ -592,6 +596,7 @@ const deviceChatTried = new Set();
 async function ensureDeviceChats() {
   for (const [id, c] of S.chats) {
     if (!isDeviceChat(c) || ownDevice(devicePeer(c))) continue;
+    deviceChatTried.delete(devicePeer(c));
     S.chats.delete(id);
     S.msgs.delete(id);
     if (S.active === id) S.active = null;

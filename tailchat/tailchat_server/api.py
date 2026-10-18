@@ -1463,8 +1463,10 @@ class Api:
                 message_id = new_id()
             existing = db.get("SELECT * FROM messages WHERE id = ?", message_id)
             # Retrying a send after a dropped connection must not duplicate it.
+            # A retry is the same message in the same chat, which this device
+            # has just been allowed into.
             if existing:
-                if existing["sender_id"] != uid:
+                if existing["sender_id"] != uid or existing["chat_id"] != chat["id"]:
                     fail(409, "Message id already in use")
                 return {"message": self.message_view(existing, uid)}
             files = self.check_files(body.get("files") or [], uid)

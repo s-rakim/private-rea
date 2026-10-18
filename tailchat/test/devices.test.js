@@ -68,6 +68,12 @@ test('a device chat is between two of your devices and nobody else', async () =>
     ['DELETE', `/api/messages/${message.id}?for=everyone`],
   ]) await assert.rejects(tablet.call(method, path, body), refused, `${method} ${path}`);
   assert.ok(!(await laptop.call('GET', `/api/chats/${chat.id}/messages`)).messages.find((m) => m.id === message.id).deletedAt);
+  // Reusing its id in a chat the tablet can see doesn't hand it over as a "retry".
+  const { chat: withBob } = await tablet.call('POST', '/api/chats/direct', { userId: bob.id });
+  await assert.rejects(
+    tablet.call('POST', `/api/chats/${withBob.id}/messages`, { id: message.id, payload: message.payload }),
+    (e) => e.status === 409,
+  );
   // View once can't work here: the other device is you, and you can't open your own.
   await assert.rejects(
     phone.call('POST', `/api/chats/${chat.id}/messages`, { id: newMessageId(), payload: message.payload, viewOnce: true }),
