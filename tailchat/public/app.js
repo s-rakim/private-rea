@@ -463,7 +463,9 @@ export function upsertMessage(m) {
   const b = box(m.chatId);
   const i = b.list.findIndex((x) => x.id === m.id);
   if (i >= 0) b.list[i] = m;
-  else if (b.loaded) {
+  // While the first page is loading, keep it: the page may have been read
+  // before this message was stored, and is merged into the list after.
+  else if (b.loaded || b.loading) {
     b.list.push(m);
     b.list.sort((a, c) => (a.pending ? Infinity : a.seq) - (c.pending ? Infinity : c.seq));
   }
