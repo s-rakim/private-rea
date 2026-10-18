@@ -106,22 +106,41 @@ export class KeyRing {
 
   // senderId|recipientId always names the sender first, so both ends derive
   // the same key.
-  async wrapKey(senderId, recipientId) {
-    const cacheKey = `${senderId}|${recipientId}`;
+  wrapKey(senderId, recipientId) {
+    return this.pairKey('tailchat/v1/wrap', senderId, recipientId, { name: 'AES-KW', length: 256 }, ['wrapKey', 'unwrapKey']);
+  }
+
+  // Encrypts the message keys one of your devices shares with another (§9).
+  historyKey(fromId, toId) {
+    return this.pairKey('tailchat/v1/history', fromId, toId, { name: 'AES-GCM', length: 256 }, ['encrypt', 'decrypt']);
+  }
+
+  async pairKey(salt, fromId, toId, algorithm, usages) {
+    const cacheKey = `${salt}|${fromId}|${toId}`;
     let key = this.wrapKeys.get(cacheKey);
     if (key) return key;
-    const peer = senderId === this.deviceId ? recipientId : senderId;
+    const peer = fromId === this.deviceId ? toId : fromId;
     const shared = await subtle.deriveBits({ name: 'ECDH', public: await this.publicKey(peer) }, this.privateKey, 256);
     const hkdf = await subtle.importKey('raw', shared, 'HKDF', false, ['deriveKey']);
     key = await subtle.deriveKey(
-      { name: 'HKDF', hash: 'SHA-256', salt: enc.encode('tailchat/v1/wrap'), info: enc.encode(cacheKey) },
+      { name: 'HKDF', hash: 'SHA-256', salt: enc.encode(salt), info: enc.encode(`${fromId}|${toId}`) },
       hkdf,
-      { name: 'AES-KW', length: 256 },
+      algorithm,
       false,
-      ['wrapKey', 'unwrapKey'],
+      usages,
     );
     this.wrapKeys.set(cacheKey, key);
     return key;
+  }
+
+  // Throws unless the device is another one of this device's own user.
+  async ownDevice(deviceId) {
+    await this.publicKey(deviceId);
+    if (!this.owners.has(this.deviceId)) await this.publicKey(this.deviceId);
+    const me = this.owners.get(this.deviceId);
+    if (!me || deviceId === this.deviceId || this.owners.get(deviceId) !== me) {
+      throw keyError(`Device ${deviceId} is not another device of yours`);
+    }
   }
 
   // recipients: [{id, publicKey, userId}] - every device that may read the
@@ -144,33 +163,78 @@ export class KeyRing {
   }
 
   // senderId: the user the server says sent it. The sending device must be
-  // one of theirs, or the server is relabelling messages.
-  async open(payload, aad, senderId) {
-    const env = typeof payload === 'string' ? JSON.parse(payload) : payload;
-    if (env.v !== 1) throw new Error('Unsupported envelope version');
-    if (typeof env.from !== 'string') throw new Error('Malformed envelope');
+  // one of theirs, or the server is relabelling messages. shared: the
+  // message's historyKey, if another of your devices shared it (§9).
+  async open(payload, aad, senderId, shared) {
+    const env = parseEnvelope(payload);
+    const contentKey = await this.messageKey(env, aad, senderId, shared, false);
+    const pt = await subtle.decrypt({ name: 'AES-GCM', iv: unb64u(env.iv), additionalData: enc.encode(aad) }, contentKey, unb64u(env.ct));
+    return JSON.parse(dec.decode(pt));
+  }
+
+  // Re-encrypts a message's key for another device of yours, so it can read
+  // history from before it was linked (§9). Only messages that really open
+  // here are shared.
+  async reshare(payload, aad, senderId, shared, toDevice) {
+    if (typeof senderId !== 'string') throw new Error('Shared history must name who sent each message');
+    const env = parseEnvelope(payload);
+    await this.ownDevice(toDevice);
+    const contentKey = await this.messageKey(env, aad, senderId, shared, true);
+    await subtle.decrypt({ name: 'AES-GCM', iv: unb64u(env.iv), additionalData: enc.encode(aad) }, contentKey, unb64u(env.ct));
+    const raw = new Uint8Array(await subtle.exportKey('raw', contentKey));
+    const iv = randomBytes(12);
+    const ct = await subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: enc.encode(historyAad(aad, this.deviceId, toDevice)) },
+      await this.historyKey(this.deviceId, toDevice),
+      enc.encode(JSON.stringify({ k: b64u(raw), from: env.from, sender: senderId })),
+    );
+    return `${b64u(iv)}.${b64u(ct)}`;
+  }
+
+  async messageKey(env, aad, senderId, shared, extractable) {
     if (senderId !== undefined) {
       await this.publicKey(env.from);
       const owner = this.owners.get(env.from);
       if (owner !== senderId) throw new Error(`Message was sealed by a device of ${owner || 'an unknown user'}, not ${senderId}`);
     }
     const wrapped = env.keys?.[this.deviceId];
-    if (!wrapped) {
-      const err = new Error('Not encrypted for this device');
-      err.code = 'NO_KEY';
-      throw err;
+    if (typeof wrapped === 'string') {
+      return subtle.unwrapKey(
+        'raw', unb64u(wrapped), await this.wrapKey(env.from, this.deviceId), 'AES-KW', 'AES-GCM', extractable, ['decrypt'],
+      );
     }
-    const contentKey = await subtle.unwrapKey(
-      'raw', unb64u(wrapped), await this.wrapKey(env.from, this.deviceId), 'AES-KW', 'AES-GCM', false, ['decrypt'],
-    );
-    const pt = await subtle.decrypt({ name: 'AES-GCM', iv: unb64u(env.iv), additionalData: enc.encode(aad) }, contentKey, unb64u(env.ct));
-    return JSON.parse(dec.decode(pt));
+    if (shared && typeof shared.by === 'string' && typeof shared.key === 'string') {
+      // The sharing device vouches for who sealed the message: it must be
+      // one of yours, and must name the same sending device and person.
+      await this.ownDevice(shared.by);
+      const [iv, ct] = shared.key.split('.');
+      if (!iv || !ct) throw new Error('Malformed shared history');
+      const pt = await subtle.decrypt(
+        { name: 'AES-GCM', iv: unb64u(iv), additionalData: enc.encode(historyAad(aad, shared.by, this.deviceId)) },
+        await this.historyKey(shared.by, this.deviceId),
+        unb64u(ct),
+      );
+      const { k, from, sender } = JSON.parse(dec.decode(pt));
+      if (from !== env.from || sender !== senderId || typeof k !== 'string') throw new Error("Shared history doesn't match this message");
+      return subtle.importKey('raw', unb64u(k), 'AES-GCM', extractable, ['decrypt']);
+    }
+    const err = new Error('Not encrypted for this device');
+    err.code = 'NO_KEY';
+    throw err;
   }
+}
+
+function parseEnvelope(payload) {
+  const env = typeof payload === 'string' ? JSON.parse(payload) : payload;
+  if (env?.v !== 1) throw new Error('Unsupported envelope version');
+  if (typeof env.from !== 'string' || typeof env.iv !== 'string' || typeof env.ct !== 'string') throw new Error('Malformed envelope');
+  return env;
 }
 
 export const chatAad = (chatId, messageId) => `tailchat/v1|chat:${chatId}|msg:${messageId}`;
 export const statusAad = (userId) => `tailchat/v1|status:${userId}`;
 export const callAad = (callId, fromDevice, toDevice) => `tailchat/v1|call:${callId}|${fromDevice}|${toDevice}`;
+export const historyAad = (aad, fromDevice, toDevice) => `${aad}|history|${fromDevice}|${toDevice}`;
 
 function chunkIv(prefix, i) {
   const iv = new Uint8Array(12);
@@ -229,6 +293,20 @@ export async function decryptFile(encrypted, file, mime = 'application/octet-str
   }
   if (!file.sha256 || b64u(await chunkedDigest(digests)) !== file.sha256) throw new Error('File checksum mismatch');
   return new Blob(parts, { type: mime });
+}
+
+// A short code for one device key, shown on both of your devices before one
+// shares chat history with the other (PROTOCOL.md §9): 4 groups of 4 digits.
+export async function deviceCode(jwk) {
+  return codeFromFingerprint(await keyFingerprint(jwk));
+}
+
+// The same code from a key's fingerprint, e.g. a pinned one.
+export function codeFromFingerprint(fp) {
+  const h = unb64u(fp);
+  const groups = [];
+  for (let i = 0; i < 4; i++) groups.push(String(((h[i * 3] << 16) | (h[i * 3 + 1] << 8) | h[i * 3 + 2]) % 10000).padStart(4, '0'));
+  return groups.join(' ');
 }
 
 // Security code for a set of device keys (PROTOCOL.md §3).

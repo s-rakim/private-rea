@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import unicodedata
 from pathlib import Path
@@ -28,6 +29,11 @@ UNUSED_FILE = (
     " AND NOT EXISTS (SELECT 1 FROM users u WHERE u.avatar = files.id)"
     " AND NOT EXISTS (SELECT 1 FROM chats c WHERE c.avatar = files.id)"
 )
+# History sharing (PROTOCOL.md §9): message keys per upload, how often a
+# device may re-ask, and the shape of one re-encrypted key.
+MAX_HISTORY_BATCH = 500
+HISTORY_REQUEST_EVERY_MS = 10_000
+HISTORY_KEY = re.compile(r"[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22,1000}")
 MAX_GROUP = 1024
 BIG = 2**53 - 1
 # Chats with admins, a name and members: groups, community announcement
@@ -147,6 +153,17 @@ class Api:
         return view
 
     @staticmethod
+    def history_request_view(r: dict) -> dict:
+        return {
+            "deviceId": r["device_id"],
+            "state": r["state"],
+            "createdAt": r["created_at"],
+            "updatedAt": r["updated_at"],
+            "byDevice": r["by_device"],
+            "shared": r["shared"],
+        }
+
+    @staticmethod
     def device_view(d: dict) -> dict:
         return {
             "id": d["id"],
@@ -160,13 +177,41 @@ class Api:
 
     # ---------- chats ----------
 
+    @staticmethod
+    def device_pair(chat: dict) -> list[str] | None:
+        """The two devices of a device chat (one person's chat between two of
+        their devices), or None for every other chat."""
+        return chat["device_pair"].split("|") if chat.get("device_pair") else None
+
+    def send_chat(self, chat: dict, uid: str, event: dict, **options) -> None:
+        """An event about a chat, for one member: in a device chat only its
+        two devices hear about it."""
+        pair = self.device_pair(chat)
+        if not pair:
+            self.hub.send_to_user(uid, event, **options)
+            return
+        for d in pair:
+            if d != options.get("except_device"):
+                self.hub.send_to_user(uid, event, only_device=d)
+
+    def visible_to_device(self, chat: dict, device_id: str | None) -> bool:
+        pair = self.device_pair(chat)
+        if not pair:
+            return True
+        if device_id not in pair:
+            return False
+        return len(pair) == 2 and self.db.get(
+            "SELECT COUNT(*) AS n FROM devices WHERE id IN (?, ?) AND revoked_at IS NULL", pair[0], pair[1]
+        )["n"] == 2
+
     def active_member(self, chat_id: str, user_id: str) -> dict | None:
         m = self.db.get("SELECT * FROM members WHERE chat_id = ? AND user_id = ?", chat_id, user_id)
         return m if m and m["left_at"] is None else None
 
-    def require_member(self, chat_id: str, user_id: str, *, allow_former: bool = False):
+    def require_member(self, chat_id: str, user_id: str, *, allow_former: bool = False, device: str | None = None):
+        """device: the asking device, which must be one of a device chat's two."""
         chat = self.db.get("SELECT * FROM chats WHERE id = ?", chat_id)
-        if not chat:
+        if not chat or (device and not self.visible_to_device(chat, device)):
             fail(404, "No such chat")
         member = self.db.get("SELECT * FROM members WHERE chat_id = ? AND user_id = ?", chat_id, user_id)
         if not member or (member["left_at"] is not None and not allow_former):
@@ -214,7 +259,7 @@ class Api:
             "readSeq": 0 if hide_read else m["read_seq"],
         }
 
-    def chat_view(self, chat: dict, viewer: str) -> dict:
+    def chat_view(self, chat: dict, viewer: str, device: str | None = None) -> dict:
         db = self.db
         me = db.get("SELECT * FROM members WHERE chat_id = ? AND user_id = ?", chat["id"], viewer)
         members = db.all("SELECT * FROM members WHERE chat_id = ? ORDER BY joined_at", chat["id"])
@@ -271,7 +316,8 @@ class Api:
                 "markedUnread": bool(me["marked_unread"]),
             },
             "unread": unread,
-            "lastMessage": self.message_view(last, viewer) if last else None,
+            "lastMessage": self.message_view(last, viewer, device) if last else None,
+            "devices": self.device_pair(chat),
         }
 
     def community_groups(self, community_id: str, viewer: str) -> list[dict]:
@@ -344,7 +390,9 @@ class Api:
     def opened_by(self, message_id: str) -> list[dict]:
         return self.db.all("SELECT user_id AS userId, at FROM view_once_opened WHERE message_id = ?", message_id)
 
-    def message_view(self, m: dict, viewer: str) -> dict:
+    def message_view(self, m: dict, viewer: str, device: str | None = None) -> dict:
+        """device: the viewing device, to include history another of its
+        user's devices shared with it (PROTOCOL.md §9)."""
         db = self.db
         opened = bool(m["view_once"]) and bool(
             db.get("SELECT 1 FROM view_once_opened WHERE message_id = ? AND user_id = ?", m["id"], viewer)
@@ -387,6 +435,10 @@ class Api:
         }
         if m["view_once"]:
             view["opened"] = self.opened_by(m["id"]) if mine else opened
+        if device and view["payload"]:
+            shared = db.get("SELECT by_device, key FROM history_keys WHERE message_id = ? AND device_id = ?", m["id"], device)
+            if shared:
+                view["historyKey"] = {"by": shared["by_device"], "key": shared["key"]}
         return view
 
     def broadcast_chat(self, chat_id: str, extra_user_ids=()) -> None:
@@ -396,7 +448,7 @@ class Api:
         for uid in dict.fromkeys([*self.ever_member_ids(chat_id), *extra_user_ids]):
             if not self.db.get("SELECT 1 FROM members WHERE chat_id = ? AND user_id = ?", chat_id, uid):
                 continue
-            self.hub.send_to_user(uid, {"type": "chat", "chat": self.chat_view(chat, uid)})
+            self.send_chat(chat, uid, {"type": "chat", "chat": self.chat_view(chat, uid)})
 
     def can_see_message(self, m: dict, user_id: str) -> bool:
         member = self.db.get("SELECT * FROM members WHERE chat_id = ? AND user_id = ?", m["chat_id"], user_id)
@@ -405,9 +457,10 @@ class Api:
         return m["seq"] > self.visible_floor(member) and (member["left_seq"] is None or m["seq"] <= member["left_seq"])
 
     def broadcast_message(self, m: dict, kind: str = "message", **options) -> None:
+        chat = self.get_chat(m["chat_id"])
         for uid in self.ever_member_ids(m["chat_id"]):
             if self.can_see_message(m, uid):
-                self.hub.send_to_user(uid, {"type": kind, "message": self.message_view(m, uid)}, **options)
+                self.send_chat(chat, uid, {"type": kind, "message": self.message_view(m, uid)}, **options)
 
     def insert_message(self, chat: dict, *, id: str, sender_id: str, sender_device: str | None, kind: str,
                        payload: str | None, files=(), view_once: bool = False) -> dict:
@@ -586,6 +639,7 @@ class Api:
         self.db.run("DELETE FROM file_links WHERE message_id = ?", m["id"])
         self.db.run("DELETE FROM reactions WHERE message_id = ?", m["id"])
         self.db.run("DELETE FROM poll_votes WHERE message_id = ?", m["id"])
+        self.db.run("DELETE FROM history_keys WHERE message_id = ?", m["id"])
         self.delete_orphan_files(files)
 
     # ---------- periodic cleanup ----------
@@ -598,7 +652,9 @@ class Api:
             for table in ("stars", "hidden", "view_once_opened"):
                 db.run(f"DELETE FROM {table} WHERE message_id = ?", m["id"])
             db.run("DELETE FROM messages WHERE id = ?", m["id"])
-            self.hub.send_to_users(self.ever_member_ids(m["chat_id"]), {"type": "message-gone", "chatId": m["chat_id"], "id": m["id"]})
+            chat = self.get_chat(m["chat_id"])
+            for uid in self.ever_member_ids(m["chat_id"]):
+                self.send_chat(chat, uid, {"type": "message-gone", "chatId": m["chat_id"], "id": m["id"]})
         for s in db.all("SELECT * FROM statuses WHERE expires_at <= ?", t):
             self._delete_status(s)
         # Uploads that never made it into a message or status, and photos
@@ -626,9 +682,10 @@ class Api:
                 fail(400, "A channel post must be a JSON object with a type")
         return payload
 
-    def require_message(self, message_id: str, user_id: str) -> dict:
+    def require_message(self, message_id: str, user_id: str, device: str | None = None) -> dict:
+        """device: the asking device, which must be able to see the message's chat."""
         m = self.db.get("SELECT * FROM messages WHERE id = ?", message_id)
-        if not m or not self.can_see_message(m, user_id):
+        if not m or not self.can_see_message(m, user_id) or (device and not self.visible_to_device(self.get_chat(m["chat_id"]), device)):
             fail(404, "No such message")
         return m
 
@@ -728,9 +785,28 @@ class Api:
             if not d:
                 fail(404, "No such device")
             db.run("UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", now(), d["id"])
+            # History it was given goes with it. History it shared stays, so an
+            # old phone can be retired once a new one has your chats.
+            db.run("DELETE FROM history_keys WHERE device_id = ?", d["id"])
+            if db.get("SELECT 1 FROM history_requests WHERE device_id = ?", d["id"]):
+                db.run("DELETE FROM history_requests WHERE device_id = ?", d["id"])
+                hub.send_to_user(ctx.user["id"], {"type": "history", "request": {"deviceId": d["id"], "state": "gone"}})
             hub.revoke_device(d["id"])
             self.notify_device_change(ctx.user["id"])
             return {"ok": True}
+
+        @r.add("PATCH", "/api/devices/:id")
+        async def rename_device(ctx: Context):
+            body = await read_json(ctx.request)
+            d = db.get("SELECT * FROM devices WHERE id = ? AND user_id = ? AND revoked_at IS NULL", ctx.params["id"], ctx.user["id"])
+            if not d:
+                fail(404, "No such device")
+            name = v_str(body.get("name"), "name", min=1, max=80).strip()
+            if not name:
+                fail(400, "name can't be blank")
+            db.run("UPDATE devices SET name = ? WHERE id = ?", name, d["id"])
+            hub.send_to_user(ctx.user["id"], {"type": "devices", "userId": ctx.user["id"]})
+            return {"device": self.device_view(db.get("SELECT * FROM devices WHERE id = ?", d["id"]))}
 
         # Public keys of any devices, including logged-out ones, so old
         # messages from them still decrypt.
@@ -751,6 +827,113 @@ class Api:
         async def user_devices(ctx: Context):
             rows = db.all("SELECT * FROM devices WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at", ctx.params["id"])
             return {"devices": [self.device_view(d) for d in rows]}
+
+        # ---------- history sharing between your own devices (PROTOCOL.md §9) ----------
+
+        def own_device(device_id, uid: str) -> dict:
+            d = db.get("SELECT * FROM devices WHERE id = ? AND user_id = ? AND revoked_at IS NULL", device_id, uid)
+            if not d:
+                fail(404, "No such device")
+            return d
+
+        def send_history_state(uid: str, device_id: str) -> dict:
+            row = db.get("SELECT * FROM history_requests WHERE device_id = ?", device_id)
+            view = self.history_request_view(row)
+            hub.send_to_user(uid, {"type": "history", "request": view})
+            return view
+
+        # A newly linked device asks the user's other devices for the chat
+        # history it can't read. Nothing is shared until one of them says yes.
+        @r.add("POST", "/api/history/request")
+        async def request_history(ctx: Context):
+            uid, me = ctx.user["id"], ctx.device["id"]
+            if not db.get("SELECT 1 FROM devices WHERE user_id = ? AND id != ? AND revoked_at IS NULL", uid, me):
+                fail(400, "Link another device first: there is nowhere to get history from")
+            existing = db.get("SELECT * FROM history_requests WHERE device_id = ?", me)
+            t = now()
+            if existing and existing["state"] == "pending" and t - existing["updated_at"] < HISTORY_REQUEST_EVERY_MS:
+                return {"request": self.history_request_view(existing)}
+            db.run(
+                """INSERT INTO history_requests (device_id, user_id, state, created_at, updated_at) VALUES (?, ?, 'pending', ?, ?)
+                   ON CONFLICT (device_id) DO UPDATE SET state = 'pending', updated_at = excluded.updated_at, by_device = NULL, shared = 0""",
+                me, uid, t, t,
+            )
+            return {"request": send_history_state(uid, me)}
+
+        @r.add("GET", "/api/history/requests")
+        async def history_requests(ctx: Context):
+            rows = db.all(
+                """SELECT r.* FROM history_requests r JOIN devices d ON d.id = r.device_id
+                   WHERE r.user_id = ? AND d.user_id = ? AND d.revoked_at IS NULL ORDER BY r.created_at""",
+                ctx.user["id"], ctx.user["id"],
+            )
+            return {"requests": [self.history_request_view(row) for row in rows]}
+
+        # Decline a request (from another device), or cancel your own.
+        @r.add("DELETE", "/api/history/requests/:deviceId")
+        async def decline_history(ctx: Context):
+            uid = ctx.user["id"]
+            target = own_device(ctx.params["deviceId"], uid)
+            if not db.get("SELECT 1 FROM history_requests WHERE device_id = ? AND state = 'pending'", target["id"]):
+                fail(404, "That device isn't waiting for history")
+            db.run(
+                "UPDATE history_requests SET state = 'declined', by_device = ?, updated_at = ? WHERE device_id = ?",
+                ctx.device["id"], now(), target["id"],
+            )
+            send_history_state(uid, target["id"])
+            return {"ok": True}
+
+        # The answering device re-encrypts each message key for the asking
+        # device. The server stores what it is given; it can't read or forge
+        # it, because both ends check it against their own keys.
+        @r.add("POST", "/api/history/keys")
+        async def share_history(ctx: Context):
+            body = await read_json(ctx.request, 2 * 1024 * 1024)
+            uid, me = ctx.user["id"], ctx.device["id"]
+            target = own_device(v_str(body.get("deviceId"), "deviceId", min=1, max=40), uid)
+            if target["id"] == me:
+                fail(400, "A device can't share history with itself")
+            if not db.get("SELECT 1 FROM history_requests WHERE device_id = ? AND state = 'pending'", target["id"]):
+                fail(409, "That device isn't waiting for history")
+            keys = body.get("keys")
+            if not isinstance(keys, list) or len(keys) > MAX_HISTORY_BATCH:
+                fail(400, f"keys must be a list of up to {MAX_HISTORY_BATCH}")
+            wanted = {}
+            for k in keys:
+                if not isinstance(k, dict):
+                    fail(400, "Each key must be an object")
+                mid = v_str(k.get("messageId"), "messageId", min=1, max=32)
+                key = v_str(k.get("key"), "key", min=1, max=1024)
+                if not HISTORY_KEY.fullmatch(key):
+                    fail(400, "key must be <b64u iv>.<b64u ciphertext>")
+                wanted[mid] = key
+            stored = 0
+            t = now()
+            with db.tx():
+                for mid, key in wanted.items():
+                    m = db.get("SELECT * FROM messages WHERE id = ?", mid)
+                    if (
+                        not m or m["kind"] != "msg" or m["payload"] is None or m["deleted_at"] or m["view_once"]
+                        or not self.can_see_message(m, uid) or self.get_chat(m["chat_id"])["type"] == "channel"
+                        or self.get_chat(m["chat_id"])["device_pair"]
+                    ):
+                        continue
+                    db.run(
+                        """INSERT INTO history_keys (message_id, device_id, by_device, key, created_at) VALUES (?, ?, ?, ?, ?)
+                           ON CONFLICT (message_id, device_id) DO UPDATE SET by_device = excluded.by_device, key = excluded.key,
+                             created_at = excluded.created_at""",
+                        mid, target["id"], me, key, t,
+                    )
+                    stored += 1
+                done = body.get("done") is True
+                db.run(
+                    f"""UPDATE history_requests SET by_device = ?, shared = shared + ?, updated_at = ?
+                        {", state = 'done'" if done else ""} WHERE device_id = ?""",
+                    me, stored, t, target["id"],
+                )
+            if done:
+                send_history_state(uid, target["id"])
+            return {"stored": stored}
 
         @r.add("POST", "/api/blocks")
         async def block(ctx: Context):
@@ -778,12 +961,14 @@ class Api:
                 "SELECT c.* FROM chats c JOIN members m ON m.chat_id = c.id WHERE m.user_id = ? AND m.removed = 0",
                 ctx.user["id"],
             )
-            return {"chats": [self.chat_view(c, ctx.user["id"]) for c in rows]}
+            return {
+                "chats": [self.chat_view(c, ctx.user["id"], ctx.device["id"]) for c in rows if self.visible_to_device(c, ctx.device["id"])]
+            }
 
         @r.add("GET", "/api/chats/:id")
         async def chat(ctx: Context):
-            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True)
-            return {"chat": self.chat_view(chat, ctx.user["id"])}
+            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True, device=ctx.device["id"])
+            return {"chat": self.chat_view(chat, ctx.user["id"], ctx.device["id"])}
 
         @r.add("POST", "/api/chats/direct")
         async def direct(ctx: Context):
@@ -805,6 +990,37 @@ class Api:
                 chat = self.get_chat(chat_id)
             db.run("UPDATE members SET removed = 0 WHERE chat_id = ? AND user_id = ?", chat["id"], ctx.user["id"])
             return {"chat": self.chat_view(chat, ctx.user["id"])}
+
+        # A chat between two of your own devices: messages in it are sealed for
+        # those two only. open=false finds or creates it without bringing back
+        # a chat you deleted.
+        @r.add("POST", "/api/chats/devices")
+        async def device_chat(ctx: Context):
+            body = await read_json(ctx.request)
+            uid, me = ctx.user["id"], ctx.device["id"]
+            other = v_str(body.get("deviceId"), "deviceId", min=1, max=40)
+            if other == me or not db.get("SELECT 1 FROM devices WHERE id = ? AND user_id = ? AND revoked_at IS NULL", other, uid):
+                fail(404, "No such device")
+            pair = "|".join(sorted([me, other]))
+            key = f"devices:{pair}"
+            chat = db.get("SELECT * FROM chats WHERE direct_key = ?", key)
+            if not chat:
+                chat_id = new_id()
+                with db.tx():
+                    db.run(
+                        """INSERT OR IGNORE INTO chats (id, type, created_by, created_at, direct_key, device_pair)
+                           VALUES (?, 'direct', ?, ?, ?, ?)""",
+                        chat_id, uid, now(), key, pair,
+                    )
+                    chat = db.get("SELECT * FROM chats WHERE direct_key = ?", key)
+                    db.run("INSERT OR IGNORE INTO members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)", chat["id"], uid, now())
+            elif body.get("open") is not False:
+                db.run("UPDATE members SET removed = 0 WHERE chat_id = ? AND user_id = ?", chat["id"], uid)
+            view = self.chat_view(chat, uid, me)
+            if db.get("SELECT removed FROM members WHERE chat_id = ? AND user_id = ?", chat["id"], uid)["removed"]:
+                return {"chat": None}
+            self.send_chat(chat, uid, {"type": "chat", "chat": view}, except_device=me)
+            return {"chat": view}
 
         @r.add("POST", "/api/chats/group")
         async def group(ctx: Context):
@@ -837,7 +1053,7 @@ class Api:
         @r.add("PATCH", "/api/chats/:id")
         async def update_chat(ctx: Context):
             body = await read_json(ctx.request)
-            chat, member = self.require_member(ctx.params["id"], ctx.user["id"])
+            chat, member = self.require_member(ctx.params["id"], ctx.user["id"], device=ctx.device["id"])
             is_admin = member["role"] == "admin"
             changes: list[dict] = []
             if any(k in body for k in ("name", "description", "avatar")):
@@ -887,7 +1103,7 @@ class Api:
         @r.add("PATCH", "/api/chats/:id/prefs")
         async def prefs(ctx: Context):
             body = await read_json(ctx.request)
-            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True)
+            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True, device=ctx.device["id"])
             uid = ctx.user["id"]
 
             def set_(column: str, value) -> None:
@@ -895,9 +1111,17 @@ class Api:
 
             if "pinned" in body:
                 if v_bool(body["pinned"], "pinned", optional=False):
-                    pinned = db.get(
-                        "SELECT COUNT(*) AS n FROM members WHERE user_id = ? AND pinned_at IS NOT NULL AND chat_id != ?", uid, chat["id"]
-                    )["n"]
+                    # Only chats this device can see, so a device chat it can't
+                    # see (or can't any more) doesn't take up a pin here.
+                    pinned = sum(
+                        1
+                        for c in db.all(
+                            """SELECT c.* FROM members m JOIN chats c ON c.id = m.chat_id
+                               WHERE m.user_id = ? AND m.pinned_at IS NOT NULL AND m.chat_id != ?""",
+                            uid, chat["id"],
+                        )
+                        if self.visible_to_device(c, ctx.device["id"])
+                    )
                     if pinned >= 3:
                         fail(400, "You can only pin up to 3 chats")
                     set_("pinned_at", now())
@@ -910,26 +1134,26 @@ class Api:
             if "markedUnread" in body:
                 set_("marked_unread", int(v_bool(body["markedUnread"], "markedUnread", optional=False)))
             view = self.chat_view(chat, uid)
-            hub.send_to_user(uid, {"type": "chat", "chat": view})
+            self.send_chat(chat, uid, {"type": "chat", "chat": view})
             return {"chat": view}
 
         @r.add("POST", "/api/chats/:id/clear")
         async def clear(ctx: Context):
-            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True)
+            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True, device=ctx.device["id"])
             seq = self.get_chat(chat["id"])["last_seq"]
             db.run(
                 "UPDATE members SET cleared_seq = ?, read_seq = MAX(read_seq, ?) WHERE chat_id = ? AND user_id = ?",
                 seq, seq, chat["id"], ctx.user["id"],
             )
             view = self.chat_view(chat, ctx.user["id"])
-            hub.send_to_user(ctx.user["id"], {"type": "chat", "chat": view})
+            self.send_chat(chat, ctx.user["id"], {"type": "chat", "chat": view})
             return {"chat": view}
 
         # "Delete chat": clears it and hides it until someone writes again. A
         # former group member's copy is removed for good.
         @r.add("DELETE", "/api/chats/:id")
         async def delete_chat(ctx: Context):
-            chat, member = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True)
+            chat, member = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True, device=ctx.device["id"])
             if chat["type"] in GROUPISH and member["left_at"] is None:
                 fail(400, "Exit the group before deleting it")
             seq = chat["last_seq"]
@@ -941,7 +1165,7 @@ class Api:
                        WHERE chat_id = ? AND user_id = ?""",
                     seq, seq, chat["id"], ctx.user["id"],
                 )
-            hub.send_to_user(ctx.user["id"], {"type": "chat-removed", "chatId": chat["id"]})
+            self.send_chat(chat, ctx.user["id"], {"type": "chat-removed", "chatId": chat["id"]})
             return {"ok": True}
 
         @r.add("POST", "/api/chats/:id/members")
@@ -1173,9 +1397,13 @@ class Api:
         # message key once for each of them.
         @r.add("GET", "/api/chats/:id/devices")
         async def chat_devices(ctx: Context):
-            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"])
+            chat, _ = self.require_member(ctx.params["id"], ctx.user["id"], device=ctx.device["id"])
             if chat["type"] == "channel":
                 fail(400, "Channel posts aren't encrypted to devices")
+            pair = self.device_pair(chat)
+            if pair:
+                rows = db.all("SELECT * FROM devices WHERE id IN (?, ?) AND revoked_at IS NULL", pair[0], pair[1])
+                return {"devices": [self.device_view(d) for d in rows]}
             rows = db.all(
                 """SELECT d.* FROM devices d JOIN members m ON m.user_id = d.user_id
                    WHERE m.chat_id = ? AND m.left_at IS NULL AND d.revoked_at IS NULL""",
@@ -1185,7 +1413,7 @@ class Api:
 
         @r.add("GET", "/api/chats/:id/messages")
         async def messages(ctx: Context):
-            chat, member = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True)
+            chat, member = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True, device=ctx.device["id"])
 
             def qint(name: str, default: int) -> int:
                 try:
@@ -1207,13 +1435,13 @@ class Api:
             )
             if order == "DESC":
                 rows.reverse()
-            return {"messages": [self.message_view(m, ctx.user["id"]) for m in rows], "hasMore": len(rows) == limit}
+            return {"messages": [self.message_view(m, ctx.user["id"], ctx.device["id"]) for m in rows], "hasMore": len(rows) == limit}
 
         @r.add("POST", "/api/chats/:id/messages")
         async def send(ctx: Context):
             body = await read_json(ctx.request, MAX_PAYLOAD + 64 * 1024)
             uid = ctx.user["id"]
-            chat, member = self.require_member(ctx.params["id"], uid)
+            chat, member = self.require_member(ctx.params["id"], uid, device=ctx.device["id"])
             if chat["type"] in GROUPISH and chat["admins_only_send"] and member["role"] != "admin":
                 fail(403, "Only admins can send messages here")
             if chat["type"] == "direct":
@@ -1223,6 +1451,10 @@ class Api:
                 if other and self.is_blocked(other, uid):
                     fail(403, "You can't message this contact")
             payload = self.check_payload(chat, body.get("payload"))
+            # The other device is you too, and you can't open your own view
+            # once message.
+            if body.get("viewOnce") is True and chat["device_pair"]:
+                fail(400, "View once isn't available between your own devices")
             if "id" in body:
                 message_id = v_str(body["id"], "id", min=16, max=32)
                 if not all(c.isascii() and (c.isalnum() or c in "-_") for c in message_id):
@@ -1231,8 +1463,10 @@ class Api:
                 message_id = new_id()
             existing = db.get("SELECT * FROM messages WHERE id = ?", message_id)
             # Retrying a send after a dropped connection must not duplicate it.
+            # A retry is the same message in the same chat, which this device
+            # has just been allowed into.
             if existing:
-                if existing["sender_id"] != uid:
+                if existing["sender_id"] != uid or existing["chat_id"] != chat["id"]:
                     fail(409, "Message id already in use")
                 return {"message": self.message_view(existing, uid)}
             files = self.check_files(body.get("files") or [], uid)
@@ -1246,16 +1480,16 @@ class Api:
 
         @r.add("GET", "/api/messages/:id")
         async def get_message(ctx: Context):
-            m = self.require_message(ctx.params["id"], ctx.user["id"])
+            m = self.require_message(ctx.params["id"], ctx.user["id"], ctx.device["id"])
             if self.db.get("SELECT 1 FROM hidden WHERE user_id = ? AND message_id = ?", ctx.user["id"], m["id"]):
                 fail(404, "No such message")
-            return {"message": self.message_view(m, ctx.user["id"])}
+            return {"message": self.message_view(m, ctx.user["id"], ctx.device["id"])}
 
         @r.add("PUT", "/api/messages/:id")
         async def edit(ctx: Context):
             body = await read_json(ctx.request, MAX_PAYLOAD + 64 * 1024)
             uid = ctx.user["id"]
-            m = self.require_message(ctx.params["id"], uid)
+            m = self.require_message(ctx.params["id"], uid, ctx.device["id"])
             if m["sender_id"] != uid or m["kind"] != "msg":
                 fail(403, "You can only edit your own messages")
             if m["deleted_at"]:
@@ -1266,6 +1500,8 @@ class Api:
                 fail(403, "You are not in this chat")
             payload = self.check_payload(self.get_chat(m["chat_id"]), body.get("payload"))
             db.run("UPDATE messages SET payload = ?, sender_device = ?, edited_at = ? WHERE id = ?", payload, ctx.device["id"], now(), m["id"])
+            # The edit has a new message key, so shared copies of the old one go.
+            db.run("DELETE FROM history_keys WHERE message_id = ?", m["id"])
             updated = db.get("SELECT * FROM messages WHERE id = ?", m["id"])
             self.broadcast_message(updated, "message-update")
             return {"message": self.message_view(updated, uid)}
@@ -1273,7 +1509,7 @@ class Api:
         @r.add("DELETE", "/api/messages/:id")
         async def delete_message(ctx: Context):
             uid = ctx.user["id"]
-            m = self.require_message(ctx.params["id"], uid)
+            m = self.require_message(ctx.params["id"], uid, ctx.device["id"])
             if ctx.query.get("for") == "everyone":
                 chat = self.get_chat(m["chat_id"])
                 member = self.active_member(m["chat_id"], uid)
@@ -1290,14 +1526,14 @@ class Api:
                 self.broadcast_chat(m["chat_id"])
             else:
                 db.run("INSERT OR IGNORE INTO hidden (user_id, message_id) VALUES (?, ?)", uid, m["id"])
-                hub.send_to_user(uid, {"type": "message-gone", "chatId": m["chat_id"], "id": m["id"]})
+                self.send_chat(self.get_chat(m["chat_id"]), uid, {"type": "message-gone", "chatId": m["chat_id"], "id": m["id"]})
             return {"ok": True}
 
         @r.add("POST", "/api/messages/:id/react")
         async def react(ctx: Context):
             body = await read_json(ctx.request)
             uid = ctx.user["id"]
-            m = self.require_message(ctx.params["id"], uid)
+            m = self.require_message(ctx.params["id"], uid, ctx.device["id"])
             if not self.active_member(m["chat_id"], uid):
                 fail(403, "You are not in this chat")
             if m["kind"] != "msg" or m["deleted_at"]:
@@ -1320,12 +1556,12 @@ class Api:
         async def star(ctx: Context):
             body = await read_json(ctx.request)
             uid = ctx.user["id"]
-            m = self.require_message(ctx.params["id"], uid)
+            m = self.require_message(ctx.params["id"], uid, ctx.device["id"])
             if v_bool(body.get("starred"), "starred", optional=False):
                 db.run("INSERT OR IGNORE INTO stars (user_id, message_id, at) VALUES (?, ?, ?)", uid, m["id"], now())
             else:
                 db.run("DELETE FROM stars WHERE user_id = ? AND message_id = ?", uid, m["id"])
-            hub.send_to_user(uid, {"type": "message-update", "message": self.message_view(m, uid)})
+            self.send_chat(self.get_chat(m["chat_id"]), uid, {"type": "message-update", "message": self.message_view(m, uid)})
             return {"ok": True}
 
         # Poll options are encrypted; the server only stores the chosen indices.
@@ -1333,7 +1569,7 @@ class Api:
         async def vote(ctx: Context):
             body = await read_json(ctx.request)
             uid = ctx.user["id"]
-            m = self.require_message(ctx.params["id"], uid)
+            m = self.require_message(ctx.params["id"], uid, ctx.device["id"])
             if not self.active_member(m["chat_id"], uid):
                 fail(403, "You are not in this chat")
             if m["kind"] != "msg" or m["deleted_at"]:
@@ -1359,7 +1595,7 @@ class Api:
         @r.add("POST", "/api/messages/:id/opened")
         async def opened(ctx: Context):
             uid = ctx.user["id"]
-            m = self.require_message(ctx.params["id"], uid)
+            m = self.require_message(ctx.params["id"], uid, ctx.device["id"])
             if not m["view_once"] or m["sender_id"] == uid:
                 fail(400, "Not a view-once message for you")
             db.run("INSERT OR IGNORE INTO view_once_opened (message_id, user_id, at) VALUES (?, ?, ?)", m["id"], uid, now())
@@ -1370,12 +1606,12 @@ class Api:
         async def pin(ctx: Context):
             body = await read_json(ctx.request)
             uid = ctx.user["id"]
-            chat, member = self.require_member(ctx.params["id"], uid)
+            chat, member = self.require_member(ctx.params["id"], uid, device=ctx.device["id"])
             if chat["type"] in GROUPISH and chat["admins_only_edit"] and member["role"] != "admin":
                 fail(403, "Only admins can pin messages")
             message_id = None
             if body.get("messageId") is not None:
-                m = self.require_message(v_str(body["messageId"], "messageId"), uid)
+                m = self.require_message(v_str(body["messageId"], "messageId"), uid, ctx.device["id"])
                 if m["chat_id"] != chat["id"] or m["kind"] != "msg" or m["deleted_at"]:
                     fail(400, "You can't pin that message")
                 message_id = m["id"]
@@ -1388,7 +1624,7 @@ class Api:
         async def receipts(ctx: Context):
             body = await read_json(ctx.request)
             uid = ctx.user["id"]
-            chat, member = self.require_member(ctx.params["id"], uid, allow_former=True)
+            chat, member = self.require_member(ctx.params["id"], uid, allow_former=True, device=ctx.device["id"])
             ceiling = min(chat["last_seq"], member["left_seq"] if member["left_seq"] is not None else BIG)
             delivered = min(v_int(body.get("delivered"), "delivered", optional=True) or 0, ceiling)
             read = min(v_int(body.get("read"), "read", optional=True) or 0, ceiling)
@@ -1407,8 +1643,8 @@ class Api:
             if chat["type"] == "channel":
                 watchers = [u for u in watchers if u == uid or (self.active_member(chat["id"], u) or {}).get("role") == "admin"]
             for other in watchers:
-                hub.send_to_user(other, {"type": "receipt", "chatId": chat["id"], "member": self.member_view(fresh, chat, other)})
-            hub.send_to_user(uid, {"type": "chat", "chat": self.chat_view(chat, uid)})
+                self.send_chat(chat, other, {"type": "receipt", "chatId": chat["id"], "member": self.member_view(fresh, chat, other)})
+            self.send_chat(chat, uid, {"type": "chat", "chat": self.chat_view(chat, uid)})
             return {"ok": True}
 
         @r.add("GET", "/api/starred")
@@ -1418,7 +1654,12 @@ class Api:
                 "SELECT m.* FROM stars s JOIN messages m ON m.id = s.message_id WHERE s.user_id = ? ORDER BY s.at DESC LIMIT 500",
                 uid,
             )
-            return {"messages": [self.message_view(m, uid) for m in rows if self.can_see_message(m, uid)]}
+            return {
+                "messages": [
+                    self.message_view(m, uid, ctx.device["id"]) for m in rows
+                    if self.can_see_message(m, uid) and self.visible_to_device(self.get_chat(m["chat_id"]), ctx.device["id"])
+                ]
+            }
 
         # Files are uploaded as raw bytes. Message attachments are encrypted on
         # the device first, so the server stores ciphertext; ?public=1 is for
@@ -1628,6 +1869,9 @@ class Api:
             chat = self.get_chat(chat_id)
             if chat["type"] in ADMIN_POSTS:
                 sock.send(json.dumps({"type": "call", "action": "error", "callId": call_id, "message": "Calls aren't available in channels and community announcements"}))
+                return
+            if chat["device_pair"]:
+                sock.send(json.dumps({"type": "call", "action": "error", "callId": call_id, "message": "You can't call your own device"}))
                 return
             others = [u for u in self.active_member_ids(chat_id) if u != user_id and not self.either_blocked(u, user_id)]
             if chat["type"] == "group" and len(others) > 7:

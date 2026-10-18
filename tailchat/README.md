@@ -101,6 +101,34 @@ tailnet by itself (tsnet) and does the same job as `tailscale serve`.
 | `TAILCHAT_STATUS_HOURS` | `24` | how long status updates last |
 | `TAILCHAT_EDIT_WINDOW_S`, `TAILCHAT_DELETE_WINDOW_S` | 15 minutes, 2 days | edit and "delete for everyone" windows |
 
+## Adding people and devices
+
+Tailchat only answers inside your tailnet, so everyone you chat with needs
+Tailscale. People show up under **New chat** once they have opened Tailchat;
+**New chat > Invite people to Tailchat** walks through this in the app.
+
+* **Someone outside your tailnet**: in the [admin
+  console](https://login.tailscale.com/admin/machines), open the Tailchat
+  machine's ⋯ menu and choose **Share**, then send them the link. They install
+  Tailscale (free), accept the share and open your Tailchat address. They can
+  reach that one machine and nothing else on your tailnet, but inside Tailchat
+  they are a user like anyone else: they see everyone's names, photos and
+  status updates and can message anyone. Only a Tailscale admin can share the
+  machine. If your tailnet has its own access rules, let `autogroup:shared`
+  reach port 443 on the Tailchat machine. To add someone to your whole tailnet
+  instead, use **Users > Invite users**.
+* **Your own devices** are one account, since they are all signed in as you.
+  Each other device you have opened Tailchat on gets its own chat, for sending
+  a message or file to just that device; **Message yourself** reaches all of
+  them. Rename devices under **Linked devices** so the chats are easy to tell
+  apart.
+* **Another device of yours, anywhere in the world**: install Tailscale on it,
+  sign in with the same account and open the Tailchat address. Tailscale
+  connects it over the internet from any country, with nothing to set up on
+  your router. The new device then asks your other devices for your chat
+  history: on one of them tap **Review and share**, after checking that the
+  code it shows matches the one on the new device.
+
 ## What's in it
 
 * **Chats**: one-to-one chats, groups of up to 1024 people, message yourself,
@@ -109,8 +137,9 @@ tailnet by itself (tsnet) and does the same job as `tailscale serve`.
 * **Messages**: replies, forwarding ("Forwarded many times"), edits, delete for
   me or everyone, reactions, stars, pinned messages, @mentions, polls,
   locations, contacts, voice notes with waveforms, photos, videos, documents up
-  to 2 GB, view once, disappearing messages, blue ticks, message info, and
-  typing and recording indicators.
+  to 2 GB, view once, disappearing messages, blue ticks, message info,
+  typing and recording indicators, and export chat (a text file, or a zip
+  with the media).
 * **Groups**: admins, "only admins send" and "only admins edit info", invite
   links, descriptions and photos.
 * **Communities**: related groups under one community with an announcements
@@ -122,7 +151,9 @@ tailnet by itself (tsnet) and does the same job as `tailscale serve`.
   with a viewer list and replies.
 * **Calls**: voice and video, one-to-one and groups of up to 8, with a call log.
 * **Privacy and devices**: last seen, read receipts, blocking, security codes
-  to compare in person, and linked devices you can log out remotely.
+  to compare in person, linked devices you can rename or log out remotely, a
+  chat with each of your other devices, and chat history sent end-to-end
+  encrypted to a device you link later.
 * **Settings**: profile name, about and photo, light and dark themes, enter is
   send, desktop notifications.
 
@@ -166,11 +197,20 @@ Things to know:
   signed, which is a trade-off for keeping one shared key per message.
 * Someone who runs the server could hold back messages, replay an old status
   or roll back an edit. They can't read or change what's inside.
-* Status updates go to everyone on your tailnet who uses Tailchat, like
+* Status updates go to everyone who uses your Tailchat, including people you
+  shared it with, like
   WhatsApp's "My contacts" setting.
 * Broadcast lists are saved in the browser that made them.
-* A device linked after a message was sent can't read that message, as on
-  WhatsApp.
+* A device linked after a message was sent can't read it until another of
+  your devices shares your chat history with it, which you approve on that
+  other device after comparing codes. That device re-encrypts each message's
+  key for the new one; the server stores those keys and still can't read
+  anything. The device that shares vouches for who sent each message, so only
+  approve devices you linked yourself. The codes are worked out from the keys
+  each device actually uses, so a server that swaps a key makes them differ.
+  Logging out the old device afterwards keeps the history on the new one.
+* **Export chat** writes an ordinary, unencrypted file. Anyone you give it to
+  can read it.
 
 ## Clients
 

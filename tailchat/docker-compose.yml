@@ -46,7 +46,11 @@ services:
     image: tailchat:latest
     network_mode: service:tailscale
     depends_on:
-      - tailscale
+      tailscale:
+        condition: service_started
+        # Recreating the tailscale container gives it a new network; this
+        # restarts Tailchat with it, so `tailscale serve` can still reach it.
+        restart: true
     environment:
       TAILCHAT_AUTH: serve
       TAILCHAT_HOST: 127.0.0.1
