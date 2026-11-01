@@ -227,6 +227,26 @@ putting itself in the middle of a call.
 
 Group calls are a mesh of up to 8 people.
 
+Calling yourself rings your own devices. In a device chat (§10) the other
+device gets the `ring`; in your own chat (the direct chat whose only member is
+you) every other device you have gets it. A `ring` also carries `fromDevice`.
+Each device answers for itself: one of them picking up or declining doesn't
+stop the others ringing, `declined` says which `deviceId` declined, and the
+call ends once all of them have declined. No other device can join. Calls are
+limited to 8 people or devices.
+
+#### Call service
+
+`GET /api/me` returns `calls: {port}` when the server is set up with a call
+service (`TAILCHAT_CALLS_PORT`, peer-calls in the Docker setup), or `null`.
+With one, clients still ring, accept, decline and hang up as above, but skip
+`signal`: each device in the call opens the room
+`https://<this host>:<port>/call/<callId>`, and the room sets up WebRTC
+between them. The room is on another origin, so it can't reach the client's
+keys; pages allow framing it (`frame-src`) and give it the camera, microphone
+and screen (`Permissions-Policy`), and nothing else. Call ids are 128 random
+bits, so only the devices that were rung know the room.
+
 ## 7. REST summary
 
 | Method & path | Purpose |

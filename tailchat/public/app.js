@@ -125,6 +125,7 @@ export async function boot(setStatus) {
   const anon = await api.get('/api/me');
   S.me = anon.user;
   S.limits = anon.limits;
+  S.callService = anon.calls || null; // { port } when calls go through the call service
   const key = `device:${S.me.id}`;
   let stored = await kvGet(key);
   if (stored) {
@@ -194,7 +195,7 @@ export async function boot(setStatus) {
   calls = new CallManager({
     realtime,
     onChange: render,
-    onIncoming: (ring) => notify(`Incoming ${ring.video ? 'video' : 'voice'} call`, nameOf(ring.from), ring.chatId),
+    onIncoming: (ring) => notify(`Incoming ${ring.video ? 'video' : 'voice'} call`, callerName(ring), ring.chatId),
     onEnded: () => loadCalls(),
     onError: (err) => toast(err.message),
     seal: async (callId, toDevice, toUser, data) => {
@@ -207,6 +208,7 @@ export async function boot(setStatus) {
       if (JSON.parse(sealed).from !== fromDevice) throw new Error('Call signalling from the wrong device refused');
       return S.ring.open(sealed, callAad(callId, fromDevice, S.device.id), fromUser);
     },
+    room: callRoom,
   });
   realtime.connect();
   document.addEventListener('visibilitychange', () => {
@@ -711,6 +713,25 @@ export async function renameDevice(deviceId, name) {
 }
 
 export const ownDevice = (id) => S.ownDevices.find((d) => d.id === id);
+
+// A call's room on the call service: same host, the service's own port, so
+// the room is another origin and can't reach this page's keys. The call id
+// is random, so only the devices that were rung know the room.
+export function callRoom(callId) {
+  const port = Number(S.callService?.port);
+  if (!port) return null;
+  return `https://${location.hostname}:${port}/call/${encodeURIComponent(callId)}`;
+}
+
+// Who is calling: a person, or, when you call from one of your devices to
+// another, that device.
+export function callerName(ring) {
+  if (isMe(ring.from)) return ownDevice(ring.fromDevice)?.name || 'Your other device';
+  return nameOf(ring.from);
+}
+
+// Devices of yours you can call from this one.
+export const callableDevices = () => S.ownDevices.filter((d) => d.id !== S.device.id);
 
 // Requests from your other devices that this one can answer.
 export function historyAsks() {

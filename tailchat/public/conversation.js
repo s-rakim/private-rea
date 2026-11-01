@@ -781,7 +781,7 @@ function header(chat) {
   const sub = subtitle(chat);
   const av = A.chatAvatar(chat);
   const self = chat.type === 'direct' && A.isMe(A.otherMember(chat));
-  const callable = !chat.me.left && !self && !canSend(chat) && (chat.type === 'direct' || chat.type === 'group');
+  const callable = !chat.me.left && (!self || A.callableDevices().length > 0) && !canSend(chat) && (chat.type === 'direct' || chat.type === 'group');
   const sig = JSON.stringify([chat.id, A.chatTitle(chat), av, sub, S.details, callable, chat.me.mutedUntil, chat.me.left, chat.me.role, chat.adminsOnlyEdit, !!A.calls?.call]);
   return slots.get('header', sig, () => {
     let moreBtn;
