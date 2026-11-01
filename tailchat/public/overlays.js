@@ -506,7 +506,7 @@ export function statusGroups() {
   return byUser;
 }
 
-export const STATUS_COLORS = ['#128c7e', '#25d366', '#34b7f1', '#7e57c2', '#ec407a', '#ff7043', '#5c6bc0', '#26a69a', '#8d6e63', '#54656f'];
+export const STATUS_COLORS = ['#3f5db3', '#1e8b63', '#0e7c86', '#7552c7', '#c43d6e', '#c94f24', '#4b70cc', '#2f7d4f', '#8a6d3b', '#444342'];
 
 export function openStatus(userId) {
   const groups = statusGroups();

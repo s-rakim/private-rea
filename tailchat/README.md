@@ -147,6 +147,28 @@ Tailscale. People show up under **New chat** once they have opened Tailchat;
   history: on one of them tap **Review and share**, after checking that the
   code it shows matches the one on the new device.
 
+## Use it as an app
+
+Tailchat installs as an app straight from the browser, with its own icon and
+window. The device needs Tailscale switched on and signed in to your tailnet.
+
+* **Windows, macOS or Linux (Chrome or Edge)**: open your Tailchat address,
+  for example `https://tailchat.<your-tailnet>.ts.net`. In Chrome, click the
+  install icon at the right of the address bar, or open the ⋮ menu and choose
+  **Cast, save and share > Install page as app**. In Edge, open the ⋯ menu and
+  choose **Apps > Install this site as an app**. Tailchat then opens in its own
+  window and appears in the Start menu or Applications, where you can pin it to
+  the taskbar or dock.
+* **Android (Chrome)**: install Tailscale from the Play Store, sign in and turn
+  it on. Open your Tailchat address in Chrome, then open the ⋮ menu and tap
+  **Add to Home screen > Install**. Tailchat opens full screen from its icon.
+* **Android APK**: a separate Android app (`tailchat/mobile`, in its own pull
+  request until it is merged) asks for your Tailchat address the first time it
+  opens.
+
+Each installed copy is its own device, with its own key and its own chat in
+everyone else's list of your devices.
+
 ## What's in it
 
 * **Chats**: one-to-one chats, groups of up to 1024 people, message yourself,
@@ -172,8 +194,13 @@ Tailscale. People show up under **New chat** once they have opened Tailchat;
   to compare in person, linked devices you can rename or log out remotely, a
   chat with each of your other devices, and chat history sent end-to-end
   encrypted to a device you link later.
-* **Settings**: profile name, about and photo, light and dark themes, enter is
-  send, desktop notifications.
+* **Settings**: profile name, about and photo, enter is send, desktop
+  notifications.
+* **Themes**: Tailscale (the default), Ocean, Forest, Sunset, Grape, Rose and
+  Graphite, each with light and dark colours that follow your system or stay
+  fixed. Any theme can be edited: Tailchat makes your own copy, shows the
+  colours live as you pick them, warns about text that would be hard to read,
+  and gives each theme a code you can paste on another device.
 
 Not included: payments, business tools, live location and a sticker store.
 

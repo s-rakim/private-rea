@@ -28,6 +28,8 @@ MIME = {
     ".png": "image/png",
     ".ico": "image/x-icon",
     ".mp3": "audio/mpeg",
+    ".woff2": "font/woff2",
+    ".txt": "text/plain; charset=utf-8",
 }
 
 SECURITY_HEADERS = {

@@ -1,5 +1,6 @@
 // Tailchat web app: state, sync, encryption and actions. Rendering lives in
 // views.js; this module owns the data and everything that talks to the server.
+import { PRESETS, findTheme, paint } from './themes.js';
 import { Api, ApiError, Realtime, kvGet, kvSet } from './api.js';
 import { CallManager } from './calls.js';
 import { KeyRing, callAad, chatAad, codeFromFingerprint, decryptFile, deviceCode, encryptFile, generateDeviceKeys, keyFingerprint, newMessageId, statusAad } from './crypto.js';
@@ -41,6 +42,7 @@ export const S = {
   ownDevices: [], // this account's linked devices
   machines: { available: false, list: [] }, // your machines on the tailnet (PROTOCOL.md §10)
   machine: null, // the machine shown in the main pane, one with no Tailchat yet
+  themePreview: null, // 'light' or 'dark' while the theme editor shows that mode
   deviceCodes: new Map(), // deviceId -> code of the key this device actually uses for it
   badKeys: new Set(), // own devices the server lists with a key other than the pinned one
   history: { requests: new Map(), sharing: null, loaded: false, epoch: 0 }, // chat history between your devices
@@ -84,10 +86,25 @@ export function savePrefs(changes) {
   render();
 }
 
-export function applyTheme() {
+// ---------- themes (themes.js) ----------
+
+let darkQuery = null;
+export function themeMode() {
   const t = S.prefs.theme;
-  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
-  else delete document.documentElement.dataset.theme;
+  if (t === 'light' || t === 'dark') return t;
+  if (!darkQuery && window.matchMedia) {
+    darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    darkQuery.addEventListener?.('change', () => applyTheme());
+  }
+  return darkQuery?.matches ? 'dark' : 'light';
+}
+
+export const activeTheme = () => findTheme(S.prefs, S.prefs.palette) || PRESETS[0];
+
+// S.themePreview shows the other mode's colours while you edit them.
+export function applyTheme(palette) {
+  const mode = S.themePreview || themeMode();
+  paint(palette || activeTheme()[mode], mode);
 }
 
 // ---------- boot ----------

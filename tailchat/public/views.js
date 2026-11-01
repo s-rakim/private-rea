@@ -6,6 +6,7 @@ import { kvDelete } from './api.js';
 import { h, icon, iconButton, avatar, toast, menu, dialog, confirmDialog, promptDialog, listTime, duration, lastSeenText, reconcile, Slots, toggle } from './ui.js';
 import { resizePhoto, kindFor } from './media.js';
 import * as O from './overlays.js';
+import * as T from './themes.js';
 import { renderConversation, drafts, clearChat, deleteChat, exitGroup, exitLabel, attachDialog, canSend, followChannel, openCommunity } from './conversation.js';
 import { renderDetails, starredRow, inviteDialog, addMembers, deactivateCommunity } from './details.js';
 
@@ -917,7 +918,8 @@ function settingsPanel() {
   return panelShell('Settings', [
     h('div', { class: 'row tall', onclick: () => openPanel('profile') }, avatar(S.me, 'md'), h('div', { class: 'body' }, h('div', { class: 'name' }, S.me.name), h('div', { class: 'preview ellipsis' }, S.me.about || S.me.id))),
     settingsRow('lock', 'Privacy', 'Last seen, read receipts, blocked contacts', () => openPanel('privacy')),
-    settingsRow('chat', 'Chats', 'Theme, enter to send', () => openPanel('chat-settings')),
+    settingsRow('theme', 'Themes', `${A.activeTheme().name} · ${MODE_LABELS[S.prefs.theme] || MODE_LABELS.system}`, () => openPanel('themes')),
+    settingsRow('chat', 'Chats', 'Enter to send', () => openPanel('chat-settings')),
     settingsRow('bell', 'Notifications', S.prefs.notifications ? 'On' : 'Off', () => openPanel('notifications')),
     settingsRow('devices', 'Linked devices', null, () => openPanel('devices')),
     settingsRow('shield', 'Security', 'How Tailchat protects your messages', () => openPanel('help')),
@@ -980,15 +982,151 @@ function privacyPanel() {
 }
 
 function chatSettingsPanel() {
-  const theme = (value, label) => h('label', { class: 'radio-row pad' }, h('input', { type: 'radio', name: 'theme', checked: S.prefs.theme === value, onchange: () => A.savePrefs({ theme: value }) }), label);
   return panelShell('Chats', [
-    h('div', { class: 'list-section' }, 'Theme'),
-    theme('system', 'System default'),
-    theme('light', 'Light'),
-    theme('dark', 'Dark'),
+    settingsRow('theme', 'Themes', `${A.activeTheme().name} · ${MODE_LABELS[S.prefs.theme] || MODE_LABELS.system}`, () => openPanel('themes')),
     h('div', { class: 'list-section' }, 'Keyboard'),
     h('div', { class: 'menu-row' }, icon('send'), h('div', { class: 'grow' }, h('div', null, 'Enter is send'), h('div', { class: 'sub' }, 'Shift+Enter adds a new line')), toggle(S.prefs.enterToSend, (on) => A.savePrefs({ enterToSend: on }), 'Enter is send')),
   ], 'settings');
+}
+
+// ---------- themes ----------
+
+const MODE_LABELS = { system: 'System default', light: 'Light', dark: 'Dark' };
+const themeEdit = { id: null, mode: 'light' };
+
+// A small picture of a theme: a bar, two messages and its accent.
+function themeSwatch(pal) {
+  return h(
+    'div',
+    { class: 'theme-swatch', style: { background: pal.chat } },
+    h('div', { class: 'bar', style: { background: pal.header } }, h('span', { class: 'dot', style: { background: pal.accent } })),
+    h('div', { class: 'msg in', style: { background: pal.in } }, h('span', { style: { background: pal.text } })),
+    h('div', { class: 'msg out', style: { background: pal.out } }, h('span', { style: { background: pal.text } })),
+  );
+}
+
+function themeCard(t, mode, selected) {
+  return slots.get(`theme-card:${t.id}`, JSON.stringify([t, mode, selected]), () => h(
+    'button',
+    { type: 'button', class: `theme-card${selected ? ' selected' : ''}`, 'aria-pressed': String(selected), title: t.name, onclick: () => A.savePrefs({ palette: t.id }) },
+    themeSwatch(t[mode]),
+    h('span', { class: 'theme-name ellipsis' }, selected ? icon('check') : null, t.name),
+  ));
+}
+
+function saveThemes(themes) {
+  A.savePrefs({ themes });
+}
+
+// Built-in themes stay as they are: editing one makes your own copy.
+function editTheme(theme) {
+  let t = theme;
+  if (T.isPreset(theme.id)) {
+    const mine = T.customThemes(S.prefs);
+    if (mine.length >= 30) return toast('You have 30 themes. Delete one to make another.');
+    t = T.copyTheme(theme, S.prefs);
+    saveThemes([...mine, t]);
+    A.savePrefs({ palette: t.id });
+  }
+  themeEdit.id = t.id;
+  themeEdit.mode = A.themeMode();
+  openPanel('theme-editor');
+}
+
+async function importTheme() {
+  const code = await promptDialog('Add a theme', { label: 'Theme code', placeholder: 'Paste a theme code copied from Tailchat', multiline: true, max: 4000, okLabel: 'Add' });
+  if (code === null) return;
+  const t = T.parseThemeCode(code);
+  if (!t) return toast("That isn't a Tailchat theme code");
+  const mine = T.customThemes(S.prefs);
+  if (mine.length >= 30) return toast('You have 30 themes. Delete one to add another.');
+  saveThemes([...mine, t]);
+  A.savePrefs({ palette: t.id });
+  toast(`Added ${t.name}`);
+}
+
+function themesPanel() {
+  const active = A.activeTheme();
+  const mode = A.themeMode();
+  const mine = T.customThemes(S.prefs);
+  const modeChip = (value) => h('button', {
+    type: 'button',
+    class: `chip${(S.prefs.theme || 'system') === value ? ' active' : ''}`,
+    onclick: () => A.savePrefs({ theme: value }),
+  }, MODE_LABELS[value]);
+  return panelShell('Themes', [
+    h('div', { class: 'list-section' }, 'Mode'),
+    h('div', { class: 'filters pad-x' }, ['system', 'light', 'dark'].map(modeChip)),
+    h('div', { class: 'list-section' }, 'Built-in themes'),
+    h('div', { class: 'theme-grid' }, T.PRESETS.map((t) => themeCard(t, mode, t.id === active.id))),
+    h('div', { class: 'list-section' }, 'Your themes'),
+    mine.length
+      ? h('div', { class: 'theme-grid' }, mine.map((t) => themeCard(t, mode, t.id === active.id)))
+      : h('div', { class: 'empty small' }, 'Edit a theme to make your own version of it. Your themes appear here.'),
+    action('edit', T.isPreset(active.id) ? `Edit a copy of ${active.name}` : `Edit ${active.name}`, () => editTheme(active)),
+    action('add', 'Add a theme from a code', () => importTheme()),
+    h('div', { class: 'empty small' }, 'Themes are kept on this device. To use one on another device, copy its code in the editor and add it there.'),
+  ], 'settings');
+}
+
+function themeEditorPanel() {
+  const t = T.customThemes(S.prefs).find((x) => x.id === themeEdit.id);
+  if (!t) {
+    S.panel = 'themes';
+    return themesPanel();
+  }
+  const mode = themeEdit.mode;
+  const pal = t[mode];
+  const issues = T.readability(pal);
+  const weak = new Set(issues.flatMap((i) => i.keys));
+  const update = (fn) => saveThemes(T.customThemes(S.prefs).map((x) => (x.id === t.id ? T.cleanTheme(fn(structuredClone(x)), x.id) : x)));
+  const nameInput = slots.get(`theme-name:${t.id}`, t.name, () => {
+    const input = h('input', { maxlength: 40, value: t.name, 'aria-label': 'Theme name' });
+    input.addEventListener('change', () => {
+      const name = input.value.trim();
+      if (name) update((x) => ({ ...x, name }));
+      else input.value = t.name;
+    });
+    return input;
+  });
+  const colourRow = ([key, , label]) => slots.get(`theme-colour:${t.id}:${mode}:${key}`, JSON.stringify([pal[key], weak.has(key)]), () => {
+    const hex = h('span', { class: 'sub mono' }, pal[key]);
+    const input = h('input', { type: 'color', value: pal[key], 'aria-label': label });
+    // Dragging around the picker repaints the app; letting go saves it.
+    input.addEventListener('input', () => {
+      hex.textContent = input.value;
+      const now = T.customThemes(S.prefs).find((x) => x.id === t.id)?.[mode] || pal;
+      A.applyTheme({ ...now, [key]: input.value });
+    });
+    input.addEventListener('change', () => update((x) => ({ ...x, [mode]: { ...x[mode], [key]: input.value } })));
+    return h('label', { class: 'menu-row colour-row' }, h('div', { class: 'grow' }, h('div', null, label), hex, weak.has(key) ? h('div', { class: 'sub warn-text' }, 'Hard to read') : null), input);
+  });
+  const modeChip = (m) => h('button', {
+    type: 'button',
+    class: `chip${mode === m ? ' active' : ''}`,
+    onclick: () => {
+      themeEdit.mode = m;
+      S.themePreview = m;
+      A.applyTheme();
+      render();
+    },
+  }, m === 'light' ? 'Light colours' : 'Dark colours');
+  const base = T.PRESETS.find((x) => x.id === t.base) || T.PRESETS[0];
+  return panelShell('Edit theme', [
+    h('div', { class: 'card' }, h('label', { class: 'field' }, h('span', null, 'Name'), nameInput)),
+    h('div', { class: 'filters pad-x' }, ['light', 'dark'].map(modeChip)),
+    h('div', { class: 'empty small left' }, `You're editing the ${mode} colours. The app shows them while you edit.`),
+    T.KEYS.map(colourRow),
+    issues.length ? h('div', { class: 'banner warn' }, icon('info'), h('div', null, `Hard to read: ${issues.map((i) => i.label.toLowerCase()).join(', ')}.`)) : null,
+    action('history', `Reset the ${mode} colours to ${base.name}`, () => update((x) => ({ ...x, [mode]: { ...base[mode] } }))),
+    action('copy', 'Copy theme code', () => navigator.clipboard.writeText(T.themeCode(t)).then(() => toast('Theme code copied'), () => toast("Couldn't copy the code"))),
+    action('delete', 'Delete theme', async () => {
+      if (!(await confirmDialog(`Delete ${t.name}?`, 'This removes it from this device.', 'Delete', 'danger'))) return;
+      saveThemes(T.customThemes(S.prefs).filter((x) => x.id !== t.id));
+      if (S.prefs.palette === t.id) A.savePrefs({ palette: t.base });
+      openPanel('themes');
+    }),
+  ], 'themes');
 }
 
 function notificationsPanel() {
@@ -1177,6 +1315,10 @@ function panelNodes() {
       return privacyPanel();
     case 'chat-settings':
       return chatSettingsPanel();
+    case 'themes':
+      return themesPanel();
+    case 'theme-editor':
+      return themeEditorPanel();
     case 'notifications':
       return notificationsPanel();
     case 'devices':
@@ -1202,6 +1344,8 @@ function renderSidebar() {
     if (S.panel !== 'devices') devicesCache = null;
     if (S.panel !== 'new-group') ng = null;
     if (S.panel !== 'channels') directory = null;
+    S.themePreview = S.panel === 'theme-editor' ? themeEdit.mode : null;
+    A.applyTheme();
   }
   let nodes = S.panel ? panelNodes() : null;
   if (!nodes) {
