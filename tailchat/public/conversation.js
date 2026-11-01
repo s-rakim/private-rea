@@ -582,6 +582,7 @@ function renderMessages(chat) {
   const v = messagesView(chat);
   const b = A.box(chat.id);
   const el = v.el;
+  O.paintWallpaper(el, A.wallpaperOf(chat));
   if (!b.loaded) {
     if (!b.loading) A.loadMessages(chat.id);
     reconcile(el, [h('div', { class: 'spacer' }), h('div', { class: 'day' }, 'Loading messages…')]);
@@ -708,6 +709,7 @@ function chatMenuItems(chat) {
       onClick: () => (muted ? api.patch(`/api/chats/${encodeURIComponent(chat.id)}/prefs`, { mutedUntil: 0 }).catch((e) => toast(e.message)) : O.muteDialog(chat)),
     },
     !chat.me.left && (!A.isGroupish(chat) || !chat.adminsOnlyEdit || chat.me.role === 'admin') ? { label: 'Disappearing messages', icon: 'timer', onClick: () => O.disappearingDialog(chat) } : null,
+    A.canChangeWallpaper(chat) ? { label: 'Wallpaper', icon: 'wallpaper', onClick: () => O.wallpaperDialog(chat) } : null,
     { label: 'Export chat', icon: 'download', onClick: () => O.exportChatDialog(chat) },
     { label: 'Clear chat', icon: 'delete', onClick: () => clearChat(chat) },
     other && !self ? { label: other.blocked ? `Unblock ${other.name}` : `Block ${other.name}`, icon: 'block', danger: !other.blocked, onClick: () => blockUser(other) } : null,

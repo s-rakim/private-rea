@@ -193,11 +193,18 @@ function settingsSection(chat) {
       if (A.isGroupish(chat) && chat.adminsOnlyEdit && chat.me.role !== 'admin') toast('Only admins can change this');
       else O.disappearingDialog(chat);
     }) : null,
+    !chat.me.left && !A.isChannel(chat) ? wallpaperRow(chat) : null,
     chat.type === 'group' && chat.me.role === 'admin' && !chat.me.left ? menuRow('settings', 'Group settings', null, () => groupSettingsDialog(chat)) : null,
     A.isChannel(chat)
       ? menuRow('info', 'Not end-to-end encrypted', "Channel posts are stored as they are so anyone can follow. Don't post secrets here.", () => {})
       : menuRow('lock', 'Encryption', 'Messages and calls are end-to-end encrypted. Click to verify.', () => O.securityCodeDialog(chat)),
   );
+}
+
+function wallpaperRow(chat) {
+  const by = chat.wallpaper?.by;
+  const sub = !chat.wallpaper ? 'Theme background' : A.isDeviceChat(chat) || !by ? 'Custom' : `Set by ${A.isMe(by) ? 'you' : A.nameOf(by)}`;
+  return menuRow('wallpaper', 'Wallpaper', sub, () => O.wallpaperDialog(chat));
 }
 
 function deviceInfo(chat) {
@@ -222,6 +229,7 @@ function deviceInfo(chat) {
         'div',
         { class: 'card flush' },
         d ? menuRow('edit', 'Rename device', null, () => O.renameDeviceDialog(d)) : null,
+        wallpaperRow(chat),
         menuRow('delete', 'Clear chat', null, () => clearChat(chat)),
         menuRow('delete', 'Delete chat', null, () => deleteChat(chat), { danger: true }),
       ),

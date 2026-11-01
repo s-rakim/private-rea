@@ -29,7 +29,10 @@ UNUSED_FILE = (
     "NOT EXISTS (SELECT 1 FROM file_links l WHERE l.file_id = files.id)"
     " AND NOT EXISTS (SELECT 1 FROM users u WHERE u.avatar = files.id)"
     " AND NOT EXISTS (SELECT 1 FROM chats c WHERE c.avatar = files.id)"
+    " AND NOT EXISTS (SELECT 1 FROM chats c WHERE c.wallpaper_file = files.id)"
 )
+# A chat wallpaper's id, chosen by the client like a message id (PROTOCOL.md §11).
+WALLPAPER_ID = re.compile(r"[A-Za-z0-9_-]{16,32}")
 # History sharing (PROTOCOL.md §9): message keys per upload, how often a
 # device may re-ask, and the shape of one re-encrypted key.
 MAX_HISTORY_BATCH = 500
@@ -340,7 +343,20 @@ class Api:
             "unread": unread,
             "lastMessage": self.message_view(last, viewer, device) if last else None,
             "devices": self.device_pair(chat),
+            "wallpaper": self.wallpaper_view(chat),
         }
+
+    @staticmethod
+    def wallpaper_view(chat: dict) -> dict | None:
+        if not chat.get("wallpaper"):
+            return None
+        wp = json.loads(chat["wallpaper"])
+        return {**wp, "file": chat["wallpaper_file"]}
+
+    def can_change_wallpaper(self, chat: dict, member: dict) -> bool:
+        if chat["type"] == "channel" or member["left_at"] is not None:
+            return False
+        return not (chat["type"] in GROUPISH and chat["admins_only_edit"] and member["role"] != "admin")
 
     def community_groups(self, community_id: str, viewer: str) -> list[dict]:
         rows = self.db.all(
@@ -610,6 +626,9 @@ class Api:
             return None
         if f["owner"] == user_id or f["public"]:
             return f
+        for c in db.all("SELECT id FROM chats WHERE wallpaper_file = ?", file_id):
+            if self.active_member(c["id"], user_id):
+                return f
         for link in db.all("SELECT * FROM file_links WHERE file_id = ?", file_id):
             if link["message_id"]:
                 m = db.get("SELECT * FROM messages WHERE id = ?", link["message_id"])
@@ -1131,6 +1150,64 @@ class Api:
             if chat["community_id"] and any(k in body for k in ("name", "description", "avatar")):
                 self.broadcast_chat(chat["community_id"])
             return {"chat": self.chat_view(self.get_chat(chat["id"]), ctx.user["id"])}
+
+        # A chat's wallpaper (PROTOCOL.md §11): an envelope sealed for every
+        # device in the chat, so the server never sees the colour or image.
+        @r.add("PUT", "/api/chats/:id/wallpaper")
+        async def set_wallpaper(ctx: Context):
+            body = await read_json(ctx.request)
+            uid = ctx.user["id"]
+            chat, member = self.require_member(ctx.params["id"], uid, device=ctx.device["id"])
+            if chat["type"] == "channel":
+                fail(400, "Channels don't have a wallpaper")
+            if not self.can_change_wallpaper(chat, member):
+                fail(403, "Only admins can change this group's wallpaper")
+            wp_id = body.get("id")
+            if not isinstance(wp_id, str) or not WALLPAPER_ID.fullmatch(wp_id):
+                fail(400, "id must be 16-32 base64url characters")
+            payload = body.get("payload")
+            if not isinstance(payload, str) or len(payload) > MAX_PAYLOAD:
+                fail(400, "payload must be an encrypted envelope string")
+            current = self.wallpaper_view(chat)
+            reseal = v_bool(body.get("reseal", False), "reseal", optional=False)
+            file_id = body.get("file")
+            if reseal:
+                # The same wallpaper sealed again for devices that joined
+                # since: same id, same image, no notice in the chat.
+                if not current or current["id"] != wp_id or file_id != current["file"]:
+                    fail(409, "The wallpaper has changed since")
+            else:
+                if current and current["id"] == wp_id:
+                    fail(409, "Pick a new id for a new wallpaper")
+                if file_id is not None:
+                    f = db.get("SELECT * FROM files WHERE id = ? AND public = 0", file_id) if isinstance(file_id, str) else None
+                    if not f or f["owner"] != uid and file_id != (current or {}).get("file"):
+                        fail(400, "file must be an encrypted image you uploaded")
+            wallpaper = json.dumps({"id": wp_id, "payload": payload, "by": uid, "at": now()})
+            with db.tx():
+                db.run("UPDATE chats SET wallpaper = ?, wallpaper_file = ? WHERE id = ?", wallpaper, file_id, chat["id"])
+                if not reseal:
+                    self.system_message(self.get_chat(chat["id"]), uid, {"event": "wallpaper"})
+            if current and current["file"] and current["file"] != file_id:
+                self.delete_orphan_files([current["file"]])
+            self.broadcast_chat(chat["id"])
+            return {"chat": self.chat_view(self.get_chat(chat["id"]), uid, ctx.device["id"])}
+
+        @r.add("DELETE", "/api/chats/:id/wallpaper")
+        async def remove_wallpaper(ctx: Context):
+            uid = ctx.user["id"]
+            chat, member = self.require_member(ctx.params["id"], uid, device=ctx.device["id"])
+            if not self.can_change_wallpaper(chat, member):
+                fail(403, "Only admins can change this group's wallpaper")
+            current = self.wallpaper_view(chat)
+            if current:
+                with db.tx():
+                    db.run("UPDATE chats SET wallpaper = NULL, wallpaper_file = NULL WHERE id = ?", chat["id"])
+                    self.system_message(self.get_chat(chat["id"]), uid, {"event": "wallpaper", "removed": True})
+                if current["file"]:
+                    self.delete_orphan_files([current["file"]])
+                self.broadcast_chat(chat["id"])
+            return {"chat": self.chat_view(self.get_chat(chat["id"]), uid, ctx.device["id"])}
 
         @r.add("PATCH", "/api/chats/:id/prefs")
         async def prefs(ctx: Context):

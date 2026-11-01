@@ -53,7 +53,9 @@ CREATE TABLE IF NOT EXISTS chats (
   pinned_message TEXT,
   last_seq INTEGER NOT NULL DEFAULT 0,
   community_id TEXT,                 -- a group that belongs to a community
-  device_pair TEXT                   -- "a|b": a chat between two devices of one person
+  device_pair TEXT,                  -- "a|b": a chat between two devices of one person
+  wallpaper TEXT,                    -- JSON {id, payload, by, at}: the chat's encrypted wallpaper
+  wallpaper_file TEXT                -- the encrypted image that wallpaper uses, if any
 );
 
 CREATE TABLE IF NOT EXISTS members (
@@ -188,7 +190,8 @@ class Database:
         self.conn.executescript("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")
         self._migrate()
         self.conn.executescript(SCHEMA)
-        self._add_columns("chats", device_pair="TEXT")
+        self._add_columns("chats", device_pair="TEXT", wallpaper="TEXT", wallpaper_file="TEXT")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS chats_wallpaper ON chats(wallpaper_file) WHERE wallpaper_file IS NOT NULL")
         self._add_columns("devices", machine_id="TEXT", machine_name="TEXT", renamed="INTEGER NOT NULL DEFAULT 0")
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._depth = 0

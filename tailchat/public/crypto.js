@@ -234,6 +234,7 @@ function parseEnvelope(payload) {
 export const chatAad = (chatId, messageId) => `tailchat/v1|chat:${chatId}|msg:${messageId}`;
 export const statusAad = (userId) => `tailchat/v1|status:${userId}`;
 export const callAad = (callId, fromDevice, toDevice) => `tailchat/v1|call:${callId}|${fromDevice}|${toDevice}`;
+export const wallpaperAad = (chatId, wallpaperId) => `tailchat/v1|wallpaper:${chatId}|${wallpaperId}`;
 export const historyAad = (aad, fromDevice, toDevice) => `${aad}|history|${fromDevice}|${toDevice}`;
 
 function chunkIv(prefix, i) {

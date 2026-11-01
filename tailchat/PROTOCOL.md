@@ -78,6 +78,7 @@ channels, see §8):
     picks `messageId` (16-32 base64url characters) and sends it as `id` when posting.
   * status update: `tailchat/v1|status:<userId>`
   * call signalling: `tailchat/v1|call:<callId>|<from device id>|<to device id>` (§6)
+  * chat wallpaper: `tailchat/v1|wallpaper:<chatId>|<wallpaperId>` (§11)
 * `keys` holds one wrapped content key for every device that may read it:
   `GET /api/chats/:id/devices` (all logged-in devices of all current members,
   including the sender's own) or `GET /api/status/devices` for a status.
@@ -136,7 +137,8 @@ plain JSON such as `{"event": "added", "users": [...]}` or
 are never decrypted. `senderId` is the person who caused the event. Events:
 `created`, `added`, `joined` (`via: "community"` when joined from a community),
 `left`, `removed`, `promoted`, `demoted`, `renamed`, `description`, `photo`,
-`disappearing`, `settings`, `pinned`, `unpinned`, and for communities
+`disappearing`, `settings`, `pinned`, `unpinned`, `wallpaper` (`removed: true`
+when it was taken away, §11), and for communities
 `community` / `community-left` (in a group: added to or removed from the
 community `name`), `community-group` / `community-group-removed` (in the
 announcements: group `name` added or removed) and `deactivated`.
@@ -237,6 +239,7 @@ Group calls are a mesh of up to 8 people.
 | `GET /api/chats`, `GET /api/chats/:id` | chat list with unread counts and last message |
 | `POST /api/chats/direct {userId}`, `POST /api/chats/group {name, members, description?, avatar?}` | start chats |
 | `PATCH /api/chats/:id` | group name/description/photo, `disappearing` seconds, `adminsOnlySend`, `adminsOnlyEdit` |
+| `PUT /api/chats/:id/wallpaper {id, payload, file?, reseal?}`, `DELETE /api/chats/:id/wallpaper` | the chat's wallpaper, seen by everyone in it (§11) |
 | `PATCH /api/chats/:id/prefs` | `pinned`, `archived`, `mutedUntil`, `markedUnread` |
 | `POST /api/chats/:id/clear`, `DELETE /api/chats/:id` | clear / delete chat |
 | `POST /api/chats/:id/members`, `DELETE /api/chats/:id/members/:userId`, `POST /api/chats/:id/admins` | membership |
@@ -393,3 +396,49 @@ device's machine unless the device was renamed, adding the device's own name
 when two devices share a machine, and list each machine with no device as a
 chat that tells you to open Tailchat on it. They only do this once the
 calling device's own machine is known, so it never lists itself.
+
+## 11. Chat wallpapers
+
+A chat can have a wallpaper that everyone in it sees, on every device: both
+devices of a device chat, both people in a direct chat, every member of a
+group. It is end-to-end encrypted like a message, so the server never learns
+the colour or sees the image. Channels have none. In a group with
+`adminsOnlyEdit` only admins can change it; in any other chat every member
+can.
+
+The wallpaper is this content, sealed in an envelope (§3) for
+`GET /api/chats/:id/devices` with the aad
+`tailchat/v1|wallpaper:<chatId>|<wallpaperId>`:
+
+```json
+{"type": "wallpaper", "color": "#rrggbb", "file": { ... }, "dim": 0}
+```
+
+`color` is a 6-digit hex colour, shown when there is no image or while the
+image loads. `file` (optional) is an encrypted image uploaded with
+`POST /api/files` exactly like an attachment (§5); clients should shrink it
+first (the web app keeps the long side at 2560 px or less). `dim` (0-80) is
+how many percent of black to lay over it so messages stay readable.
+
+```
+PUT /api/chats/:id/wallpaper {"id": "<16-32 base64url>", "payload": "<envelope>", "file": "<file id>" | null}
+-> {"chat": {...}}
+DELETE /api/chats/:id/wallpaper
+```
+
+Each new wallpaper gets a new `id` (`409` if it repeats the current one), and
+`file` must be an upload of yours or the current wallpaper's image. The
+server stores it, posts a `wallpaper` system message (`{"event":
+"wallpaper"}`, or `"removed": true` on `DELETE`) and sends everyone a `chat`
+event. A chat view carries `wallpaper: {id, payload, by, at, file}` or
+`null`, where `by` is who set it. Anyone in the chat can download the image
+with `GET /api/files/:id`. The old image is deleted once nothing else uses it.
+
+To read it, open the envelope with `senderId = by`, so the server can't
+pass one person's wallpaper off as another's.
+
+A device or member that joins later has no key for it. Any device that can
+change the wallpaper and finds that a device in the chat's device list has no
+entry in `keys` seals the same content again for the current list and sends
+it with `reseal: true`, the same `id` and the same `file` (`409` if the
+wallpaper changed in the meantime). That posts no system message.
