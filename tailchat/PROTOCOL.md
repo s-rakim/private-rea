@@ -226,7 +226,7 @@ putting itself in the middle of a call.
 Group calls are a mesh of up to 8 people.
 
 Calling yourself rings your own devices. In a device chat (§10) the other
-device gets the `ring`; in your own chat (the direct chat whose only member is
+device gets the `ring`, in a device group its other logged-in devices; in your own chat (the direct chat whose only member is
 you) every other device you have gets it. A `ring` also carries `fromDevice`.
 Each device answers for itself: one of them picking up or declining doesn't
 stop the others ringing, `declined` says which `deviceId` declined, and the
@@ -382,7 +382,7 @@ it or change it or its messages, and get its events. Any other device gets
 pins. `GET /api/chats/:id/devices` lists just the two, so messages are sealed
 for them alone. It disappears once either device is logged out, and history
 sharing (§9) never copies it to a third device. View once messages (`400`)
-and calls aren't available in it, since the device at the other end is you.
+aren't available in it, since the device at the other end is you.
 
 `PATCH /api/devices/:id {name}` renames one of your devices; your devices get a
 `devices` event.
@@ -416,7 +416,8 @@ carries on when one of its devices is logged out.
   chat is gone.
 
 Group features (members, admins, invite links, communities) don't apply, and
-neither do view once messages and calls. History sharing (§9) never copies a
+neither do view once messages. A call in a device group rings its other
+logged-in devices (up to 7). History sharing (§9) never copies a
 device group to another device.
 
 ### Machines

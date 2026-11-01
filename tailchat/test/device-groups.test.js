@@ -143,3 +143,20 @@ test('devices can be added to and removed from a device group', async () => {
   await pc.call('DELETE', `/api/chats/${chat.id}`);
   assert.ok(!(await pc.call('GET', '/api/chats')).chats.some((c) => c.id === chat.id));
 });
+
+test('a call in a device group rings its other logged-in devices only', async () => {
+  const pc = await connectUser(server.base, 'cal');
+  const phone = await connectUser(server.base, 'cal');
+  const tablet = await connectUser(server.base, 'cal');
+  const tv = await connectUser(server.base, 'cal');
+  const outside = await connectUser(server.base, 'cal');
+  const ws = await pc.socket();
+  await Promise.all([phone.socket(), tablet.socket(), tv.socket(), outside.socket()]);
+  const { chat } = await pc.call('POST', '/api/chats/device-group', { name: 'Ring', deviceIds: [phone.deviceId, tablet.deviceId, tv.deviceId] });
+  await pc.call('DELETE', `/api/devices/${tv.deviceId}`);
+  const callId = `call-${Date.now()}`;
+  ws.send(JSON.stringify({ type: 'call', action: 'ring', callId, chatId: chat.id, video: false }));
+  for (const d of [phone, tablet]) await d.waitFor((e) => e.type === 'call' && e.action === 'ring' && e.callId === callId);
+  await quiet();
+  assert.ok(!outside.events.some((e) => e.type === 'call' && e.callId === callId), 'a device outside the group is not rung');
+});

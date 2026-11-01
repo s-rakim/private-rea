@@ -2002,14 +2002,21 @@ class Api:
                 return
             others = [u for u in self.active_member_ids(chat_id) if u != user_id and not self.either_blocked(u, user_id)]
             # Calling yourself rings your own devices: in a device chat the
-            # other device, in your own chat every other device you have.
+            # other device, in a device group its other logged-in devices, in
+            # your own chat every other device you have.
             own: list[str] = []
             if not others and chat["type"] == "direct":
                 pair = self.device_pair(chat)
                 if pair:
                     if sock.device_id not in pair or not self.visible_to_device(chat, sock.device_id):
                         return
-                    own = [d for d in pair if d != sock.device_id]
+                    own = [
+                        r["id"]
+                        for r in db.all(
+                            f"SELECT id FROM devices WHERE id IN ({', '.join('?' * len(pair))}) AND user_id = ? AND revoked_at IS NULL AND id != ?",
+                            *pair, user_id, sock.device_id,
+                        )
+                    ]
                 else:
                     own = [
                         r["id"]
