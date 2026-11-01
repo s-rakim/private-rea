@@ -3,30 +3,20 @@
 A messenger for your Tailscale tailnet, with end-to-end
 encrypted chats, file sharing, status updates and calls.
 
-Everything is in [`tailchat/`](tailchat/): start with
-[tailchat/README.md](tailchat/README.md) for running it on Docker, and
-[tailchat/PROTOCOL.md](tailchat/PROTOCOL.md) for how the encryption works.
+Everything is in [`tailchat/`](tailchat/): the server, the browser app, the
+Windows app (`tailchat/desktop`), the Android app (`tailchat/mobile`) and the
+command-line clients. [tailchat/PROTOCOL.md](tailchat/PROTOCOL.md) explains
+how the encryption works.
 
-## Setup
+## Install
 
-Tailchat runs on Docker. On the computer that will host it:
+The [step-by-step install guide](tailchat/README.md#install) walks through
+all of it:
 
-1. Install [Docker](https://docs.docker.com/get-docker/) (Docker Desktop on
-   Windows and macOS).
-2. In the [Tailscale admin console](https://login.tailscale.com/admin/dns),
-   turn on **MagicDNS** and **HTTPS certificates**, then create a one-off,
-   pre-approved auth key under **Settings > Keys**.
-3. Get the code (green **Code** button > **Download ZIP**, or `git clone`),
-   then start it:
-
-   ```sh
-   cd tailchat
-   echo "TS_AUTHKEY=tskey-auth-..." > .env
-   docker compose up -d --build
-   ```
-
-4. Open `https://tailchat.<your-tailnet>.ts.net` on any device signed in to
-   your tailnet, including phones.
-
-The full guide, with settings and hardening, is in
-[tailchat/README.md](tailchat/README.md).
+1. Set up Tailscale and turn on MagicDNS and HTTPS certificates.
+2. Install Docker on the computer that will be the server.
+3. Download this repository.
+4. Start the server with `docker compose up -d --build`.
+5. Install the Windows app (from the **Tailchat for Windows** release).
+6. Install the Android app (from the **Tailchat for Android** release).
+7. Open Tailchat on any other device in a browser.
