@@ -1,6 +1,6 @@
 # Tailchat
 
-A WhatsApp-style messenger that runs on your own server and is only reachable
+A messenger that runs on your own server and is only reachable
 from your [Tailscale](https://tailscale.com) tailnet. Messages, files, voice
 notes, status updates and calls are end-to-end encrypted, and Tailscale tells
 the server who everyone is, so there are no phone numbers or passwords.
@@ -47,11 +47,19 @@ and `no-new-privileges`, and the Tailchat one as an unprivileged user.
 Tailscale uses userspace networking, so it needs no tun device and nothing
 but `tailscale serve` is reachable on the node.
 
+To list each of your machines as a chat, Tailchat asks the Tailscale
+container which machines are on the tailnet and which one each visitor uses.
+The two containers share tailscaled's socket through the in-memory
+`tailscale-socket` volume. Because Tailchat runs as an unprivileged user,
+tailscaled only lets it read that information; it can't change any Tailscale
+setting. Set `TAILCHAT_TAILNET=off` in `.env` to turn the machine list off.
+
 To harden it further:
 
 * Limit who can reach the node with [Tailscale access
   rules](https://tailscale.com/kb/1018/acls): for example, allow your users
-  only port 443 on `tag:tailchat`.
+  only port 443 on `tag:tailchat`. The Tailchat node then only sees the
+  machines allowed to reach it, so only those are listed as chats.
 * Pin the images to digests (`image: tailscale/tailscale@sha256:…`) so an
   update only happens when you choose it.
 
@@ -86,7 +94,9 @@ account no one else uses.
 
 To run the steps yourself, use `python -m tailchat_server --tailscale`, or set
 `TAILCHAT_SERVE_SECRET` and point `tailscale serve --bg --https=443` at
-`http://127.0.0.1:8443/<secret>` (never use `tailscale funnel`). If you'd
+`http://127.0.0.1:8443/<secret>` (never use `tailscale funnel`). With
+`--tailscale` the server lists your machines with the `tailscale` command, and
+the computer it runs on counts as one of them. If you'd
 rather not install the Tailscale app, the Go gateway in `clients/go` joins the
 tailnet by itself (tsnet) and does the same job as `tailscale serve`.
 
@@ -100,6 +110,9 @@ tailnet by itself (tsnet) and does the same job as `tailscale serve`.
 | `TAILCHAT_MAX_UPLOAD_MB` | `2048` | largest file |
 | `TAILCHAT_STATUS_HOURS` | `24` | how long status updates last |
 | `TAILCHAT_EDIT_WINDOW_S`, `TAILCHAT_DELETE_WINDOW_S` | 15 minutes, 2 days | edit and "delete for everyone" windows |
+| `TAILCHAT_TAILNET` | `localapi` (`cli` with `--tailscale`) | where the list of your machines comes from: `localapi` (tailscaled's socket, read-only), `cli` (the `tailscale` command) or `off` |
+| `TAILSCALE_SOCKET` | `/var/run/tailscale/tailscaled.sock` | tailscaled's socket, for `localapi` |
+| `TAILCHAT_LIST_SELF` | on for `cli`, off otherwise | list the server's own machine as one of yours |
 
 ## Adding people and devices
 
@@ -118,10 +131,15 @@ Tailscale. People show up under **New chat** once they have opened Tailchat;
   reach port 443 on the Tailchat machine. To add someone to your whole tailnet
   instead, use **Users > Invite users**.
 * **Your own devices** are one account, since they are all signed in as you.
-  Each other device you have opened Tailchat on gets its own chat, for sending
-  a message or file to just that device; **Message yourself** reaches all of
-  them. Rename devices under **Linked devices** so the chats are easy to tell
-  apart.
+  Every machine signed in to your Tailscale account is listed as its own chat,
+  named after the machine: on `holysukuns` you see a chat for your phone, your
+  laptop and every other machine of yours. A machine that hasn't opened
+  Tailchat yet shows the address to open on it once; after that its chat sends
+  messages and files to just that device, end-to-end encrypted. **Message
+  yourself** reaches all of them. Two browsers on one machine are told apart
+  by browser, and you can rename any device under **Linked devices**. Tagged
+  machines (servers) and machines shared with you by other people aren't
+  listed.
 * **Another device of yours, anywhere in the world**: install Tailscale on it,
   sign in with the same account and open the Tailchat address. Tailscale
   connects it over the internet from any country, with nothing to set up on
@@ -181,8 +199,8 @@ tailnet.
 
 Things to know:
 
-* **Channel posts aren't end-to-end encrypted**, the same as WhatsApp
-  channels: anyone can follow, so the server stores posts as they are. The app
+* **Channel posts aren't end-to-end encrypted**: anyone can follow, so the
+  server stores posts as they are. The app
   says so in every channel.
 * The web app's code comes from your server. Someone who controls the server
   could serve a modified app, as with any web-based messenger. Comparing
@@ -198,8 +216,7 @@ Things to know:
 * Someone who runs the server could hold back messages, replay an old status
   or roll back an edit. They can't read or change what's inside.
 * Status updates go to everyone who uses your Tailchat, including people you
-  shared it with, like
-  WhatsApp's "My contacts" setting.
+  shared it with.
 * Broadcast lists are saved in the browser that made them.
 * A device linked after a message was sent can't read it until another of
   your devices shares your chat history with it, which you approve on that
@@ -236,7 +253,10 @@ pip install -r requirements.txt
 TAILCHAT_AUTH=dev python3 -m tailchat_server   # then open http://127.0.0.1:8443/dev/login
 ```
 
-Dev mode lets you pick any user name and only listens on loopback. Tests:
+Dev mode lets you pick any user name and only listens on loopback. To try the
+machine list, point `TAILCHAT_DEV_TAILNET` at a file in the format of
+`tailscale status --json` (dev users are `<name>@dev`) and sign in at
+`/dev/login?user=<name>&machine=<machine>`. Tests:
 
 ```sh
 python3 -m unittest discover -s tests -t .     # server unit tests
@@ -244,7 +264,3 @@ npm install && npm test                        # API contract tests (Node 22+), 
 ```
 
 Each client folder has its own build and test instructions.
-
-Tailchat is an independent project based on WhatsApp's publicly known
-features. It contains no WhatsApp code or assets and isn't affiliated with
-WhatsApp or Meta.

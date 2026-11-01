@@ -39,6 +39,8 @@ export const S = {
   highlight: null,
   uploads: new Map(), // temp message id -> progress
   ownDevices: [], // this account's linked devices
+  machines: { available: false, list: [] }, // your machines on the tailnet (PROTOCOL.md §10)
+  machine: null, // the machine shown in the main pane, one with no Tailchat yet
   deviceCodes: new Map(), // deviceId -> code of the key this device actually uses for it
   badKeys: new Set(), // own devices the server lists with a key other than the pinned one
   history: { requests: new Map(), sharing: null, loaded: false, epoch: 0 }, // chat history between your devices
@@ -194,6 +196,10 @@ export async function boot(setStatus) {
   });
   setInterval(expireTyping, 2000);
   setInterval(() => render(), 60_000); // relative times, disappearing messages
+  // Which machines are online, and new ones joining the tailnet.
+  setInterval(() => {
+    if (document.visibilityState === 'visible') loadMachines().catch(() => {});
+  }, 60_000);
 }
 
 async function loadUsers() {
@@ -272,7 +278,8 @@ export function chatTitle(chat) {
 }
 
 export function chatAvatar(chat) {
-  if (isDeviceChat(chat)) return { id: devicePeer(chat) || chat.id, name: chatTitle(chat) };
+  // Coloured like the machine's row was before it opened Tailchat.
+  if (isDeviceChat(chat)) return { id: ownDevice(devicePeer(chat))?.machine?.id || devicePeer(chat) || chat.id, name: chatTitle(chat) };
   if (isGroupish(chat)) return { id: chat.id, name: chat.name, src: chat.avatar, group: chat.type === 'group' || chat.type };
   const u = S.users.get(otherMember(chat)) || S.me;
   return { id: u.id, name: u.name, src: u.avatar };
@@ -312,9 +319,9 @@ export function chatOf(chatId) {
   return p;
 }
 
-// Channel posts are plain JSON (channels aren't end-to-end encrypted, as on
-// WhatsApp). Whether a payload is read as plain JSON depends only on the
-// chat's type, never on what the payload looks like.
+// Channel posts are plain JSON (channels aren't end-to-end encrypted).
+// Whether a payload is read as plain JSON depends only on the chat's type,
+// never on what the payload looks like.
 function channelPost(payload) {
   const post = JSON.parse(payload);
   if (!post || typeof post !== 'object' || Array.isArray(post) || typeof post.type !== 'string') throw new Error('Unreadable channel post');
@@ -513,7 +520,7 @@ async function devicesFor(chatId) {
 
 // ---------- new devices (security code changes) ----------
 
-// Like WhatsApp's "security code changed" notices: a device appearing for
+// "Security code changed" notices: a device appearing for
 // someone whose devices this browser already knew means their code changed.
 // A new device on your own account gets a louder warning, since anyone
 // signed in to Tailscale as you could have linked it. `complete` lists hold
@@ -536,7 +543,7 @@ function noticeDevices(devices, { complete = false } = {}) {
   const alerts = { users: { ...(S.prefs.securityAlerts?.users || {}) }, devices: [...(S.prefs.securityAlerts?.devices || [])] };
   for (const d of fresh) {
     if (!isMe(d.userId)) alerts.users[d.userId] = Date.now();
-    else if (!alerts.devices.some((x) => x.id === d.id)) alerts.devices.push({ id: d.id, name: String(d.name).slice(0, 80), at: d.createdAt || Date.now() });
+    else if (!alerts.devices.some((x) => x.id === d.id)) alerts.devices.push({ id: d.id, name: String(d.machine && !d.renamed ? `${d.machine.name} (${d.name})` : d.name).slice(0, 80), at: d.createdAt || Date.now() });
   }
   savePrefs({ securityAlerts: alerts });
 }
@@ -563,7 +570,7 @@ export async function loadHistory() {
   const [{ requests }, { devices }] = await Promise.all([api.get('/api/history/requests'), api.get('/api/devices')]);
   // A slower, older call must not bring back an out-of-date device list.
   if (gen !== historyGen) return;
-  S.ownDevices = devices.filter((d) => !d.revokedAt && d.userId === S.me.id);
+  S.ownDevices = labelDevices(devices.filter((d) => !d.revokedAt && d.userId === S.me.id));
   // Another device's code is computed from the key this device pinned for
   // it, which is the key history would be encrypted to. If the server's
   // list shows a different key, sharing with that device is refused.
@@ -588,6 +595,67 @@ export async function loadHistory() {
   S.history.loaded = true;
   render();
   ensureDeviceChats().catch(() => {});
+  loadMachines().catch(() => {});
+}
+
+// A device is called after the tailnet machine it runs on ("holysukuns"),
+// unless you renamed it. Two browsers on one machine add their own names.
+// The name the device registered with stays in d.browser.
+function labelDevices(list) {
+  const perMachine = new Map();
+  for (const d of list) if (d.machine) perMachine.set(d.machine.id, (perMachine.get(d.machine.id) || 0) + 1);
+  const seen = new Map();
+  return list.map((d) => {
+    let name = d.name;
+    if (d.machine?.name && !d.renamed) name = perMachine.get(d.machine.id) > 1 ? `${d.machine.name} · ${d.name}` : d.machine.name;
+    // Same name twice (two Chrome profiles on one machine): number them.
+    const n = (seen.get(name) || 0) + 1;
+    seen.set(name, n);
+    return { ...d, browser: d.name, name: n > 1 ? `${name} (${n})` : name };
+  });
+}
+
+// What a device's name leaves out: its browser, or the machine it's on.
+export function deviceWhere(d) {
+  if (!d?.machine) return null;
+  if (d.renamed) return d.machine.name === d.name ? null : `On ${d.machine.name}`;
+  return d.name === d.machine.name ? d.browser : null;
+}
+
+let machinesGen = 0;
+export async function loadMachines() {
+  const gen = ++machinesGen;
+  const { available, machines } = await api.get('/api/machines');
+  if (gen !== machinesGen) return;
+  const before = JSON.stringify(S.machines);
+  S.machines = { available: !!available, list: Array.isArray(machines) ? machines : [] };
+  if (JSON.stringify(S.machines) !== before) render();
+}
+
+// Your machines that haven't opened Tailchat yet, each listed as a chat to
+// start. They are only listed once this device knows its own machine, so the
+// machine you're on never shows up as one.
+export function machineChats() {
+  if (!S.machines.available || !ownDevice(S.device.id)?.machine) return [];
+  const bound = new Set(S.ownDevices.map((d) => d.machine?.id).filter(Boolean));
+  return S.machines.list.filter((m) => !bound.has(m.id));
+}
+
+export const machineOf = (deviceId) => {
+  const id = ownDevice(deviceId)?.machine?.id;
+  return id ? S.machines.list.find((m) => m.id === id) || null : null;
+};
+
+export function openMachine(machineId) {
+  // A machine that has since opened Tailchat goes straight to its chat.
+  const chat = [...S.chats.values()].find((c) => isDeviceChat(c) && ownDevice(devicePeer(c))?.machine?.id === machineId);
+  if (chat) return openChat(chat.id);
+  if (S.active) stopTyping(S.active);
+  S.active = null;
+  S.details = null;
+  S.machine = machineId;
+  S.view = 'chats';
+  render();
 }
 
 // Every other device of yours gets a chat, the first time this one sees it.
@@ -1098,6 +1166,7 @@ export function updateTitle() {
 // ---------- navigation ----------
 
 export function openChat(chatId, { highlight } = {}) {
+  S.machine = null;
   if (S.active !== chatId) {
     if (S.active) stopTyping(S.active);
     const chat = S.chats.get(chatId);

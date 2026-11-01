@@ -3,7 +3,7 @@
 import * as A from './app.js';
 import { S, api, render } from './app.js';
 import { kvDelete } from './api.js';
-import { h, icon, iconButton, avatar, toast, menu, dialog, confirmDialog, promptDialog, listTime, duration, reconcile, Slots, toggle } from './ui.js';
+import { h, icon, iconButton, avatar, toast, menu, dialog, confirmDialog, promptDialog, listTime, duration, lastSeenText, reconcile, Slots, toggle } from './ui.js';
 import { resizePhoto, kindFor } from './media.js';
 import * as O from './overlays.js';
 import { renderConversation, drafts, clearChat, deleteChat, exitGroup, exitLabel, attachDialog, canSend, followChannel, openCommunity } from './conversation.js';
@@ -134,6 +134,28 @@ function chatRow(chat, title) {
   });
 }
 
+// One of your machines that hasn't opened Tailchat yet, listed like a chat.
+function machineRow(m) {
+  const d = { name: m.name, seen: lastSeenText(m), selected: S.machine === m.id };
+  return slots.get(`machine:${m.id}`, JSON.stringify(d), () => h(
+    'div',
+    {
+      class: `row machine-row${d.selected ? ' selected' : ''}`,
+      onclick: () => {
+        S.panel = null;
+        A.openMachine(m.id);
+      },
+    },
+    avatar({ id: m.id, name: d.name }, 'md'),
+    h(
+      'div',
+      { class: 'body' },
+      h('div', { class: 'line' }, h('div', { class: 'name ellipsis grow' }, d.name), h('span', { class: 'time' }, d.seen === 'online' ? 'online' : '')),
+      h('div', { class: 'line' }, h('div', { class: 'preview grow' }, h('span', { class: 'ellipsis' }, 'Your device · open Tailchat on it to chat'))),
+    ),
+  ));
+}
+
 function userRow(u, onClick, sub) {
   return h(
     'div',
@@ -162,7 +184,8 @@ async function startDirect(userId) {
 function searchResults(q) {
   const nodes = [];
   const chats = sortChats([...S.chats.values()].filter((c) => A.chatTitle(c).toLowerCase().includes(q)));
-  if (chats.length) nodes.push(h('div', { class: 'list-section' }, 'Chats'), chats.map(chatRow));
+  const machines = A.machineChats().filter((m) => m.name.toLowerCase().includes(q));
+  if (chats.length || machines.length) nodes.push(h('div', { class: 'list-section' }, 'Chats'), chats.map(chatRow), machines.map(machineRow));
   const direct = new Set(chats.filter((c) => c.type === 'direct' && !A.isDeviceChat(c)).map((c) => A.otherMember(c)));
   const people = [...S.users.values()].filter((u) => !direct.has(u.id) && (u.name.toLowerCase().includes(q) || u.id.toLowerCase().includes(q)));
   if (people.length) nodes.push(h('div', { class: 'list-section' }, 'Contacts'), people.map((u) => userRow(u, () => startDirect(u.id))));
@@ -272,6 +295,7 @@ function chatsTab() {
       if (S.filter === 'groups') return c.type === 'group' || c.type === 'community';
       return true;
     }));
+    const machines = S.filter === 'all' ? A.machineChats() : [];
     list = [
       archived.length && S.filter === 'all'
         ? slots.get('archived-row', `${archived.length}:${unreadArchived}`, () => h(
@@ -282,10 +306,11 @@ function chatsTab() {
         ))
         : null,
       shown.map(chatRow),
-      !shown.length
+      machines.map(machineRow),
+      !shown.length && !machines.length
         ? h('div', { class: 'empty' }, S.filter === 'unread' ? 'No unread chats' : S.filter === 'groups' ? 'No groups yet' : 'No chats yet. Start one with the new chat button.')
         : null,
-      shown.length ? h('div', { class: 'empty small' }, icon('lock'), ' Your personal messages are end-to-end encrypted') : null,
+      shown.length || machines.length ? h('div', { class: 'empty small' }, icon('lock'), ' Your personal messages are end-to-end encrypted') : null,
     ];
   }
   return [
@@ -383,7 +408,7 @@ function newChannel() {
     content: [
       h('label', { class: 'field' }, name),
       h('label', { class: 'field' }, description),
-      h('p', { class: 'muted small' }, icon('info'), " Anyone on your tailnet can find and follow your channel. Like WhatsApp channels, posts aren't end-to-end encrypted, and followers can't see each other."),
+      h('p', { class: 'muted small' }, icon('info'), " Anyone on your tailnet can find and follow your channel. Channel posts aren't end-to-end encrypted, and followers can't see each other."),
     ],
     actions: [
       { label: 'Cancel', onClick: (close) => close() },
@@ -758,13 +783,19 @@ function newChatPanel() {
       action('link', 'Invite people to Tailchat', () => O.inviteToTailnetDialog(), 'Friends and family need Tailscale to reach you'),
       userRow(S.me, () => startDirect(S.me.id), 'Message yourself'),
     ] : null,
-    !q && S.ownDevices.length > 1 ? [
+    !q && (S.ownDevices.length > 1 || A.machineChats().length) ? [
       h('div', { class: 'list-section' }, 'Your devices'),
       S.ownDevices.filter((d) => d.id !== S.device.id).map((d) => h(
         'div',
         { class: 'row', onclick: () => A.openDeviceChat(d.id).then(() => { S.panel = null; render(); }).catch((e) => toast(e.message)) },
         avatar({ id: d.id, name: d.name }, 'md'),
         h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, d.name), h('div', { class: 'preview ellipsis' }, 'Only that device and this one can read it')),
+      )),
+      A.machineChats().map((m) => h(
+        'div',
+        { class: 'row', onclick: () => { S.panel = null; A.openMachine(m.id); } },
+        avatar({ id: m.id, name: m.name }, 'md'),
+        h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, m.name), h('div', { class: 'preview ellipsis' }, "Tailchat isn't open on it yet")),
       )),
     ] : null,
     h('div', { class: 'list-section' }, 'Contacts on Tailchat'),
@@ -995,6 +1026,7 @@ function devicesPanel() {
         'div',
         { class: 'body' },
         h('div', { class: 'name ellipsis' }, d.name, d.id === S.device.id ? ' (this device)' : ''),
+        A.deviceWhere(d) ? h('div', { class: 'preview ellipsis' }, A.deviceWhere(d)) : null,
         h('div', { class: 'preview' }, `Linked ${listTime(d.createdAt)} · active ${listTime(d.lastActive)}`),
         S.badKeys.has(d.id)
           ? h('div', { class: 'preview warn-text' }, "Its key isn't the one this device saw before")
@@ -1204,12 +1236,55 @@ function welcome() {
   );
 }
 
+// The main pane for a machine of yours that hasn't opened Tailchat yet.
+function machinePane(m) {
+  const seen = lastSeenText(m);
+  return slots.get('machine-pane', JSON.stringify([m.id, m.name, seen, location.origin]), () => h(
+    'div',
+    { class: 'conversation machine-pane' },
+    h(
+      'header',
+      { class: 'topbar' },
+      iconButton('back', 'Back', () => { S.machine = null; render(); }, { class: 'icon-btn back-btn' }),
+      avatar({ id: m.id, name: m.name }),
+      h('div', { class: 'title' }, h('div', { class: 'name ellipsis' }, m.name), h('div', { class: 'sub ellipsis' }, seen ? `${seen} on your tailnet` : 'Your device on the tailnet')),
+    ),
+    h(
+      'div',
+      { class: 'welcome' },
+      icon('devices'),
+      h('h1', null, `Chat with ${m.name}`),
+      h('p', null, `${m.name} is one of your devices on the tailnet. To send it messages and files, open this address on it once, in any browser:`),
+      h('div', { class: 'invite-link' }, location.origin),
+      h('button', {
+        type: 'button',
+        class: 'btn plain',
+        onclick: () => navigator.clipboard.writeText(location.origin).then(() => toast('Address copied'), () => toast("Couldn't copy the address")),
+      }, 'Copy address'),
+      h('p', { class: 'muted small' }, 'Its chat then takes the place of this one. Only that device and this one can read what you send in it.'),
+      h('div', { class: 'lock' }, icon('lock'), 'End-to-end encrypted between your devices'),
+    ),
+  ));
+}
+
 function update() {
-  const chat = S.active ? S.chats.get(S.active) : null;
+  let chat = S.active ? S.chats.get(S.active) : null;
   if (S.active && !chat) S.active = null;
-  root.classList.toggle('chat-open', !!chat);
+  let machine = null;
+  if (!chat && S.machine) {
+    // It opened Tailchat while you were looking: show its chat instead,
+    // once that's there.
+    const opened = [...S.chats.values()].find((c) => A.isDeviceChat(c) && A.ownDevice(A.devicePeer(c))?.machine?.id === S.machine);
+    machine = opened ? null : S.machines.list.find((m) => m.id === S.machine) || null;
+    if (!machine) S.machine = null;
+    if (opened) {
+      A.openChat(opened.id);
+      chat = S.chats.get(opened.id);
+    }
+  }
+  root.classList.toggle('chat-open', !!chat || !!machine);
   renderSidebar();
-  reconcile(mainEl, [chat ? convEl : welcomeEl, chat && S.details ? detailsEl : null]);
+  reconcile(mainEl, [chat ? convEl : machine ? machinePane(machine) : welcomeEl, chat && S.details ? detailsEl : null]);
   if (chat) renderConversation(convEl, chat);
   if (chat && S.details) renderDetails(detailsEl, chat);
   O.renderCalls();

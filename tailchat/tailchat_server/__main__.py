@@ -33,6 +33,9 @@ def main() -> None:
                 raise ValueError("--tailscale only works with TAILCHAT_AUTH=serve")
             serve = TailscaleServe(config.port, config.data_dir)
             secret, url = serve.prepare()
+            # Your machines come from the same tailscale command.
+            env.setdefault("TAILCHAT_TAILNET", "cli")
+            env.setdefault("TAILCHAT_TAILSCALE_CLI", serve.cli)
             config = load_config({**env, "TAILCHAT_SERVE_SECRET": secret})
     except (ValueError, SetupError) as err:
         sys.exit(f"tailchat: {err}")

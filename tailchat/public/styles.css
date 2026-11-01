@@ -502,3 +502,7 @@ button.e2e-note { font: inherit; font-size: 12.5px; cursor: pointer; }
 button.link.small { font-size: 12.5px; padding: 0; margin-top: 4px; background: none; border: 0; text-align: left; }
 .preview.warn-text { color: #c62828; }
 .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.machine-pane .welcome { border-bottom: none; background: var(--chat-bg); }
+.machine-pane .welcome > svg { width: 72px; height: 72px; fill: var(--muted); }
+.machine-pane .welcome p { max-width: 440px; }
+.machine-pane .welcome .lock { margin-top: 18px; }

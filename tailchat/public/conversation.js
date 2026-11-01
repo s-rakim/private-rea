@@ -678,7 +678,10 @@ function subtitle(chat) {
     names.sort((a, b) => (a === 'You') - (b === 'You'));
     return { text: chat.me.left ? "You're no longer a member" : names.join(', ') };
   }
-  if (A.isDeviceChat(chat)) return { text: 'Your device · only it and this one can read this chat' };
+  if (A.isDeviceChat(chat)) {
+    const seen = lastSeenText(A.machineOf(A.devicePeer(chat)));
+    return { text: `${seen ? `Your device, ${seen}` : 'Your device'} · only it and this one can read this chat` };
+  }
   const other = A.otherMember(chat);
   if (A.isMe(other)) return { text: 'Message yourself' };
   return { text: lastSeenText(S.users.get(other)) || 'click here for contact info' };

@@ -195,7 +195,7 @@ function settingsSection(chat) {
     }) : null,
     chat.type === 'group' && chat.me.role === 'admin' && !chat.me.left ? menuRow('settings', 'Group settings', null, () => groupSettingsDialog(chat)) : null,
     A.isChannel(chat)
-      ? menuRow('info', 'Not end-to-end encrypted', "Like WhatsApp channels, posts are stored as they are so anyone can follow. Don't post secrets here.", () => {})
+      ? menuRow('info', 'Not end-to-end encrypted', "Channel posts are stored as they are so anyone can follow. Don't post secrets here.", () => {})
       : menuRow('lock', 'Encryption', 'Messages and calls are end-to-end encrypted. Click to verify.', () => O.securityCodeDialog(chat)),
   );
 }
@@ -212,6 +212,7 @@ function deviceInfo(chat) {
         { class: 'card center' },
         avatar(A.chatAvatar(chat), 'lg'),
         h('h2', null, A.chatTitle(chat)),
+        A.deviceWhere(d) ? h('div', { class: 'muted' }, A.deviceWhere(d)) : null,
         h('h3', null, d ? `Linked ${listTime(d.createdAt)} · active ${listTime(d.lastActive)}` : 'Logged out'),
         d ? h('div', { class: 'muted mono' }, `Code ${S.deviceCodes.get(d.id) || '…'}`) : null,
       ),

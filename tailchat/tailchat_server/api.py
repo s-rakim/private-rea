@@ -19,6 +19,7 @@ from aiohttp import web
 from .config import Config
 from .db import Database
 from .hub import Hub, Socket
+from .machines import Tailnet
 from .httputil import Context, HttpError, Router, fail, json_response, new_id, read_json, v_bool, v_int, v_str
 
 MAX_PAYLOAD = 512 * 1024  # an encrypted message envelope, thumbnails included
@@ -78,6 +79,8 @@ class Api:
         self.router = Router()
         self.calls: dict[str, dict] = {}
         self.uploading: dict[str, int] = {}  # user id -> bytes being uploaded now
+        self.tailnet = Tailnet(config)
+        self._machine_tried: dict[str, float] = {}  # device id -> when its machine was last looked up
         self._register_routes()
         hub.on_connect = self.presence_changed
         hub.on_disconnect = self._on_disconnect
@@ -125,6 +128,23 @@ class Api:
         self.db.run("UPDATE devices SET last_active = ? WHERE id = ?", now(), device["id"])
         return device
 
+    async def find_machine(self, ctx: Context) -> None:
+        """Which of your tailnet machines a device runs on, looked up once
+        (devices linked before this was kept, and lookups that failed, are
+        retried now and then)."""
+        device = ctx.device
+        if device["machine_id"] or self.tailnet.source == "off":
+            return
+        if time.monotonic() - self._machine_tried.get(device["id"], -1e9) < 600:
+            return
+        self._machine_tried[device["id"]] = time.monotonic()
+        machine = await self.tailnet.machine_of(ctx.request, ctx.user["id"])
+        if not machine:
+            return
+        self.db.run("UPDATE devices SET machine_id = ?, machine_name = ? WHERE id = ?", machine["id"], machine["name"], device["id"])
+        device.update(machine_id=machine["id"], machine_name=machine["name"])
+        self.hub.send_to_user(ctx.user["id"], {"type": "devices", "userId": ctx.user["id"]})
+
     def is_blocked(self, by: str, whom: str) -> bool:
         return bool(self.db.get("SELECT 1 FROM blocks WHERE user_id = ? AND blocked_id = ?", by, whom))
 
@@ -133,7 +153,7 @@ class Api:
 
     def user_view(self, u: dict, viewer: str | None) -> dict:
         viewer_row = self.db.get("SELECT hide_last_seen FROM users WHERE id = ?", viewer) if viewer else None
-        # Like WhatsApp: hiding your own last seen also hides everyone else's from you.
+        # Hiding your own last seen also hides everyone else's from you.
         hidden = viewer != u["id"] and bool(
             u["hide_last_seen"] or (viewer_row and viewer_row["hide_last_seen"]) or (viewer and self.either_blocked(u["id"], viewer))
         )
@@ -173,6 +193,8 @@ class Api:
             "createdAt": d["created_at"],
             "lastActive": d["last_active"],
             "revokedAt": d["revoked_at"],
+            "machine": {"id": d["machine_id"], "name": d["machine_name"]} if d["machine_id"] else None,
+            "renamed": bool(d["renamed"]),
         }
 
     # ---------- chats ----------
@@ -243,7 +265,7 @@ class Api:
     def member_view(self, m: dict, chat: dict, viewer: str) -> dict:
         user = self.db.get("SELECT read_receipts FROM users WHERE id = ?", m["user_id"])
         viewer_user = self.db.get("SELECT read_receipts FROM users WHERE id = ?", viewer)
-        # Turning read receipts off works both ways, as on WhatsApp, except in groups.
+        # Turning read receipts off works both ways, except in groups.
         hide_read = (
             chat["type"] == "direct"
             and m["user_id"] != viewer
@@ -346,7 +368,7 @@ class Api:
             fail(400, f"Groups are limited to {MAX_GROUP} members")
         chat_id = new_id()
         admin_posts = int(type in ADMIN_POSTS)
-        # Everyone added at creation sees the "created" message, as on WhatsApp.
+        # Everyone added at creation sees the "created" message.
         with db.tx():
             db.run(
                 """INSERT INTO chats (id, type, name, description, avatar, created_by, created_at, admins_only_send, admins_only_edit, community_id)
@@ -554,7 +576,7 @@ class Api:
                 chat["id"], uid,
             ):
                 self.remove_member(g, actor, uid)
-        # Keep at least one admin, like WhatsApp: promote the longest-standing member.
+        # Keep at least one admin: promote the longest-standing member.
         if chat["type"] != "channel" and not db.get("SELECT 1 FROM members WHERE chat_id = ? AND left_at IS NULL AND role = 'admin'", chat["id"]):
             nxt = db.get("SELECT user_id FROM members WHERE chat_id = ? AND left_at IS NULL ORDER BY joined_at LIMIT 1", chat["id"])
             if nxt:
@@ -766,9 +788,11 @@ class Api:
             device_id = new_id(12)
             secret = new_id(32)
             public_key = json.dumps({"kty": "EC", "crv": "P-256", "x": key["x"], "y": key["y"]})
+            machine = await self.tailnet.machine_of(ctx.request, ctx.user["id"]) or {}
             db.run(
-                "INSERT INTO devices (id, user_id, name, public_key, token_hash, created_at, last_active) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                device_id, ctx.user["id"], name, public_key, hash_token(secret), now(), now(),
+                """INSERT INTO devices (id, user_id, name, public_key, token_hash, created_at, last_active, machine_id, machine_name)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                device_id, ctx.user["id"], name, public_key, hash_token(secret), now(), now(), machine.get("id"), machine.get("name"),
             )
             self.notify_device_change(ctx.user["id"])
             device = db.get("SELECT * FROM devices WHERE id = ?", device_id)
@@ -804,9 +828,17 @@ class Api:
             name = v_str(body.get("name"), "name", min=1, max=80).strip()
             if not name:
                 fail(400, "name can't be blank")
-            db.run("UPDATE devices SET name = ? WHERE id = ?", name, d["id"])
+            db.run("UPDATE devices SET name = ?, renamed = 1 WHERE id = ?", name, d["id"])
             hub.send_to_user(ctx.user["id"], {"type": "devices", "userId": ctx.user["id"]})
             return {"device": self.device_view(db.get("SELECT * FROM devices WHERE id = ?", d["id"]))}
+
+        # Your machines on the tailnet, so each can be a chat even before
+        # Tailchat is opened on it. available is false when the server can't
+        # ask tailscaled (see machines.py).
+        @r.add("GET", "/api/machines")
+        async def machines(ctx: Context):
+            found = await self.tailnet.machines_of(ctx.user["id"])
+            return {"available": found is not None, "machines": found or []}
 
         # Public keys of any devices, including logged-out ones, so old
         # messages from them still decrypt.
@@ -1041,7 +1073,7 @@ class Api:
             return {"chat": self.chat_view(chat, ctx.user["id"])}
 
         # Channels are one-way broadcasts that anyone on the tailnet can follow.
-        # Like WhatsApp channels, posts are not end-to-end encrypted: the client
+        # Channel posts are not end-to-end encrypted: the client
         # sends them as plain JSON and the server stores them as they are.
         @r.add("POST", "/api/chats/channel")
         async def channel(ctx: Context):
@@ -1737,7 +1769,7 @@ class Api:
             }
 
         # Status updates are encrypted to every logged-in device on the server
-        # (everyone on the tailnet who uses Tailchat), like "My contacts" on WhatsApp.
+        # (everyone on the tailnet who uses Tailchat).
         @r.add("GET", "/api/status/devices")
         async def status_devices(ctx: Context):
             return {"devices": [self.device_view(d) for d in db.all("SELECT * FROM devices WHERE revoked_at IS NULL")]}
@@ -1781,7 +1813,7 @@ class Api:
                 fail(404, "No such status")
             if s["user_id"] == uid:
                 return {"ok": True}
-            # With read receipts off, your views aren't recorded (WhatsApp behaves the same).
+            # With read receipts off, your views aren't recorded.
             if db.get("SELECT read_receipts FROM users WHERE id = ?", uid)["read_receipts"]:
                 db.run("INSERT OR IGNORE INTO status_views (status_id, viewer_id, at) VALUES (?, ?, ?)", s["id"], uid, now())
                 hub.send_to_user(s["user_id"], {"type": "status", "status": self.status_view(s, s["user_id"])})

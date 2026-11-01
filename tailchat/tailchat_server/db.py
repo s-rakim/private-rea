@@ -29,7 +29,10 @@ CREATE TABLE IF NOT EXISTS devices (
   token_hash TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   last_active INTEGER,
-  revoked_at INTEGER
+  revoked_at INTEGER,
+  machine_id TEXT,                   -- the tailnet machine it runs on (Tailscale's stable node id)
+  machine_name TEXT,
+  renamed INTEGER NOT NULL DEFAULT 0 -- named by you, rather than after its browser
 );
 CREATE INDEX IF NOT EXISTS devices_user ON devices(user_id);
 
@@ -185,10 +188,17 @@ class Database:
         self.conn.executescript("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")
         self._migrate()
         self.conn.executescript(SCHEMA)
-        if "device_pair" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(chats)").fetchall()}:
-            self.conn.execute("ALTER TABLE chats ADD COLUMN device_pair TEXT")
+        self._add_columns("chats", device_pair="TEXT")
+        self._add_columns("devices", machine_id="TEXT", machine_name="TEXT", renamed="INTEGER NOT NULL DEFAULT 0")
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._depth = 0
+
+    def _add_columns(self, table: str, **columns: str) -> None:
+        """Columns added since a database was made."""
+        have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, kind in columns.items():
+            if name not in have:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
     def _migrate(self) -> None:
         """Databases from before communities and channels: widen the chat

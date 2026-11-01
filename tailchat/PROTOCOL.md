@@ -95,7 +95,7 @@ channels, see §8):
   and refuse a key or owner that later changes. Once a client has seen a
   person's whole device list (`/api/chats/:id/devices`, `/api/users/:id/devices`
   or `/api/status/devices`), a device that turns up for them later is new and
-  the client should say so, the way WhatsApp says a security code changed. A
+  the client should say so, as a notice that their security code changed. A
   new device on your own account deserves a louder warning. Never wrap a key
   for a device with `revokedAt` set.
 * Clients should show a contact's **security code** (computed over that
@@ -254,6 +254,7 @@ Group calls are a mesh of up to 8 people.
 | `POST /api/history/request`, `GET /api/history/requests`, `DELETE /api/history/requests/:deviceId` | ask your other devices for chat history, list requests, decline or cancel (§9) |
 | `POST /api/history/keys {deviceId, keys: [{messageId, key}], done}` | share message keys with another device of yours (§9) |
 | `POST /api/chats/devices {deviceId, open?}`, `PATCH /api/devices/:id {name}` | chat with one of your other devices (§10), rename a device |
+| `GET /api/machines` | your machines on the tailnet, to list each as a chat (§10) |
 | `POST /api/chats/community {name, description?, avatar?, members?}` | new community (§8) |
 | `POST /api/communities/:id/groups {name, members?}` or `{groupId}`, `DELETE /api/communities/:id/groups/:groupId` | add a new or existing group, remove a group |
 | `POST /api/communities/:id/groups/:groupId/join`, `DELETE /api/communities/:id` | join a group, deactivate |
@@ -274,7 +275,7 @@ admin rights in both. Deactivating unlinks every group and closes the
 announcements group.
 
 **Channels.** A `channel` is a one-way broadcast that anyone on the tailnet
-can find (`GET /api/channels`) and follow. As on WhatsApp, channel posts are
+can find (`GET /api/channels`) and follow. Channel posts are
 **not end-to-end encrypted**: the payload is the content object of §4 as plain
 JSON (it must have a string `type` and must not look like an envelope), and
 attachments carry their file key in that JSON, so the server can read
@@ -364,3 +365,31 @@ and calls aren't available in it, since the device at the other end is you.
 
 `PATCH /api/devices/:id {name}` renames one of your devices; your devices get a
 `devices` event.
+
+### Machines
+
+Each of your machines on the tailnet is listed as a chat, including machines
+that haven't opened Tailchat yet. The server asks tailscaled (read-only) which
+machine each request comes from (in `serve` mode, the address `tailscale
+serve` puts in `X-Forwarded-For`; in `direct` mode, the peer address) and
+remembers it with the device. A device view then carries
+`machine: {id, name}` (the node's stable ID and short MagicDNS name, or
+`null` when it isn't known) and `renamed` (whether the user picked the
+device's name). Only machines owned by the same Tailscale login and without
+tags count. Once set, a device's machine doesn't change; when it is set
+later, your devices get a `devices` event.
+
+```
+GET /api/machines
+-> {"available": true, "machines": [{"id": "nXXXX", "name": "holysukuns", "os": "windows",
+                                     "online": true, "lastSeen": null}, ...]}
+```
+
+`machines` lists the caller's machines (`lastSeen` in ms, or `null`), sorted
+by name; the server's own machine is left out unless it runs on one of yours
+(`TAILCHAT_LIST_SELF`). `available` is `false`, with an empty list, when the
+server can't ask tailscaled. Clients name a device chat after the other
+device's machine unless the device was renamed, adding the device's own name
+when two devices share a machine, and list each machine with no device as a
+chat that tells you to open Tailchat on it. They only do this once the
+calling device's own machine is known, so it never lists itself.
