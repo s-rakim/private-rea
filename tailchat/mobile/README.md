@@ -9,6 +9,7 @@ Tailscale app.
   permission prompts.
 * Saving a file opens the share sheet, so you can keep it in Files or send it
   to another app.
+* Copy buttons (addresses, theme codes) use the phone's clipboard.
 * Links to other sites open in the browser.
 * If the server can't be reached, the error screen lets you retry or change
   the address.

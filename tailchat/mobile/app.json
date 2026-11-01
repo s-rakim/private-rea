@@ -2,21 +2,21 @@
   "expo": {
     "name": "Tailchat",
     "slug": "tailchat",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#111b21",
+    "backgroundColor": "#1f1e1e",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#111b21"
+      "backgroundColor": "#1f1e1e"
     },
     "android": {
       "package": "net.tailchat.app",
-      "versionCode": 1,
+      "versionCode": 2,
       "adaptiveIcon": {
-        "backgroundColor": "#25d366",
+        "backgroundColor": "#3f5db3",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -30,6 +30,8 @@
         "android.permission.ACCESS_COARSE_LOCATION"
       ]
     },
-    "plugins": ["expo-sharing"]
+    "plugins": [
+      "expo-sharing"
+    ]
   }
 }

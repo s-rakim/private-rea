@@ -16,16 +16,24 @@ import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+import * as Clipboard from 'expo-clipboard';
 
 const SERVER_KEY = 'tailchat-server';
-const GREEN = '#008069';
-const DARK = '#111b21';
+const ACCENT = '#3f5db3';
+const DARK = '#1f1e1e';
 
 // The web app saves files by clicking an <a download> that points at a blob:
 // URL, which Android's WebView ignores. This catches those clicks, reads the
 // blob in the page and hands it to the app, which opens the share sheet.
-const DOWNLOAD_BRIDGE = `
+// WebView also refuses navigator.clipboard.writeText, so copies go to the app.
+const PAGE_BRIDGE = `
 (function () {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText = function (text) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'copy', text: String(text) }));
+      return Promise.resolve();
+    };
+  }
   document.addEventListener('click', function (e) {
     var a = e.target && e.target.closest && e.target.closest('a[download]');
     if (!a || a.href.indexOf('blob:') !== 0) return;
@@ -144,6 +152,10 @@ function Chat({ server, onChangeServer }) {
     } catch {
       return;
     }
+    if (msg?.type === 'copy' && typeof msg.text === 'string') {
+      Clipboard.setStringAsync(msg.text).catch(() => {});
+      return;
+    }
     if (msg?.type !== 'download' || typeof msg.data !== 'string') return;
     try {
       const file = new File(Paths.cache, safeFileName(msg.name));
@@ -183,7 +195,7 @@ function Chat({ server, onChangeServer }) {
       onNavigationStateChange={(s) => { canGoBack.current = s.canGoBack; }}
       onError={() => setFailed(true)}
       onMessage={onMessage}
-      injectedJavaScriptBeforeContentLoaded={DOWNLOAD_BRIDGE}
+      injectedJavaScriptBeforeContentLoaded={PAGE_BRIDGE}
       javaScriptEnabled
       domStorageEnabled
       geolocationEnabled
@@ -196,7 +208,7 @@ function Chat({ server, onChangeServer }) {
       startInLoadingState
       renderLoading={() => (
         <View style={styles.loading}>
-          <ActivityIndicator size="large" color={GREEN} />
+          <ActivityIndicator size="large" color={ACCENT} />
         </View>
       )}
     />
@@ -221,7 +233,7 @@ export default function App() {
 
   let screen;
   if (server === undefined) {
-    screen = <View style={styles.loading}><ActivityIndicator size="large" color={GREEN} /></View>;
+    screen = <View style={styles.loading}><ActivityIndicator size="large" color={ACCENT} /></View>;
   } else if (!server || editing) {
     screen = <ServerForm initial={server} onSave={save} />;
   } else {
@@ -247,15 +259,15 @@ const styles = StyleSheet.create({
   body: { color: '#8696a0', fontSize: 16, lineHeight: 22, marginBottom: 24 },
   input: {
     color: '#e9edef',
-    backgroundColor: '#202c33',
+    backgroundColor: '#2e2d2d',
     borderRadius: 8,
     paddingHorizontal: 14,
     paddingVertical: 12,
     fontSize: 16,
   },
   error: { color: '#f15c6d', marginTop: 8 },
-  button: { backgroundColor: GREEN, borderRadius: 24, paddingVertical: 12, alignItems: 'center', marginTop: 20 },
+  button: { backgroundColor: ACCENT, borderRadius: 24, paddingVertical: 12, alignItems: 'center', marginTop: 20 },
   buttonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   link: { alignItems: 'center', marginTop: 16, padding: 8 },
-  linkText: { color: '#00a884', fontSize: 16 },
+  linkText: { color: '#8ea2e6', fontSize: 16 },
 });
