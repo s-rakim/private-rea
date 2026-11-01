@@ -653,6 +653,49 @@ async function newCall(video) {
   }
 }
 
+// Calling your own devices: one of them (its device chat), or all of them at
+// once (your own chat rings every other device you have).
+async function callDevices(deviceId, video) {
+  try {
+    const { chat } = deviceId
+      ? await api.post('/api/chats/devices', { deviceId })
+      : await api.post('/api/chats/direct', { userId: S.me.id });
+    if (!chat) throw new Error('That device chat was deleted. Open it again from New chat.');
+    S.chats.set(chat.id, chat);
+    await O.startCall(chat, video);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function deviceCallRows() {
+  const devices = A.callableDevices();
+  if (!devices.length) return null;
+  const buttons = (id) => [
+    iconButton('video', 'Video call', (e) => { e.stopPropagation(); callDevices(id, true); }),
+    iconButton('phone', 'Voice call', (e) => { e.stopPropagation(); callDevices(id, false); }),
+  ];
+  return [
+    h('div', { class: 'list-section' }, 'Your devices'),
+    devices.length > 1
+      ? h(
+        'div',
+        { class: 'row', onclick: () => callDevices(null, true) },
+        h('div', { class: 'row-icon accent' }, icon('group')),
+        h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, 'All your devices'), h('div', { class: 'preview ellipsis' }, `Rings all ${devices.length} of them`)),
+        buttons(null),
+      )
+      : null,
+    devices.map((d) => h(
+      'div',
+      { class: 'row', onclick: () => callDevices(d.id, true) },
+      avatar({ id: d.machine?.id || d.id, name: d.name }, 'md'),
+      h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, d.name), h('div', { class: 'preview ellipsis' }, A.deviceWhere(d) || 'Your device')),
+      buttons(d.id),
+    )),
+  ];
+}
+
 function callsTab() {
   const rows = S.calls
     .map((c) => {
@@ -681,9 +724,10 @@ function callsTab() {
       { class: 'list' },
       h('div', { class: 'row short', onclick: () => newCall(false) }, h('div', { class: 'row-icon accent' }, icon('phone')), h('div', { class: 'body' }, 'New voice call')),
       h('div', { class: 'row short', onclick: () => newCall(true) }, h('div', { class: 'row-icon accent' }, icon('video')), h('div', { class: 'body' }, 'New video call')),
+      deviceCallRows(),
       h('div', { class: 'list-section' }, 'Recent'),
       rows.length ? rows : h('div', { class: 'empty' }, 'No calls yet'),
-      h('div', { class: 'empty small' }, icon('lock'), ' Calls go device to device across your tailnet and are end-to-end encrypted'),
+      h('div', { class: 'empty small' }, icon('lock'), S.callService ? ' Calls go device to device across your tailnet' : ' Calls go device to device across your tailnet and are end-to-end encrypted'),
     ),
   ];
 }

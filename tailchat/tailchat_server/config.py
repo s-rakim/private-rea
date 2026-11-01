@@ -34,6 +34,7 @@ class Config:
     edit_window_s: int
     delete_window_s: int
     sweep_interval_s: float
+    calls_port: int = 0
 
 
 def _int(env: dict, name: str, fallback: int) -> int:
@@ -82,6 +83,11 @@ def load_config(env: dict | None = None) -> Config:
         raise ValueError("TAILCHAT_TAILNET must be localapi, cli or off (dev needs TAILCHAT_AUTH=dev and TAILCHAT_DEV_TAILNET)")
     # The server's own machine is one of yours when it runs on your computer
     # (the cli setup), not when it is its own node in Docker.
+    # The HTTPS port on this same host where the call service (peer-calls)
+    # is served; 0 keeps calls built in.
+    calls_port = _int(env, "TAILCHAT_CALLS_PORT", 0)
+    if not 0 <= calls_port <= 65535:
+        raise ValueError("TAILCHAT_CALLS_PORT must be a port number, or 0 for built-in calls")
     list_self = env.get("TAILCHAT_LIST_SELF", "1" if tailnet == "cli" else "0").lower() in ("1", "true", "yes")
     return Config(
         auth=auth,
@@ -103,4 +109,5 @@ def load_config(env: dict | None = None) -> Config:
         edit_window_s=_int(env, "TAILCHAT_EDIT_WINDOW_S", 15 * 60),
         delete_window_s=_int(env, "TAILCHAT_DELETE_WINDOW_S", 2 * 24 * 3600),
         sweep_interval_s=_int(env, "TAILCHAT_SWEEP_INTERVAL_MS", 15000) / 1000,
+        calls_port=calls_port,
     )

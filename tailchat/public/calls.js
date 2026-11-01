@@ -4,6 +4,10 @@
 // media with DTLS-SRTP on top of WireGuard. Signalling is sealed to the other
 // device's key like a message, so the server relaying it can't swap the DTLS
 // fingerprints and listen in.
+//
+// With a call service (peer-calls, see docker-compose.yml), Tailchat only
+// rings: each device that picks up joins the call's room there, and the room
+// does the WebRTC, still device to device across the tailnet.
 import { newMessageId } from './crypto.js';
 
 const RTC_CONFIG = { iceServers: [], bundlePolicy: 'max-bundle' };
@@ -12,7 +16,8 @@ export class CallManager {
   // seal(callId, toDevice, toUser, data) -> envelope string, and
   // open(callId, fromDevice, fromUser, envelope) -> data, which throws unless
   // the envelope was sealed by fromDevice and fromDevice belongs to fromUser.
-  constructor({ realtime, onChange, onIncoming, onEnded, onError, seal, open }) {
+  // room(callId) -> the call room's URL, or null for built-in calls.
+  constructor({ realtime, onChange, onIncoming, onEnded, onError, seal, open, room }) {
     this.rt = realtime;
     this.onChange = onChange;
     this.onIncoming = onIncoming;
@@ -20,6 +25,7 @@ export class CallManager {
     this.onError = onError;
     this.seal = seal;
     this.open = open;
+    this.room = room || (() => null);
     this.call = null; // the call this device is in
     this.incoming = new Map(); // callId -> ring event
     this.queue = Promise.resolve(); // events are handled one at a time, in order
@@ -37,6 +43,8 @@ export class CallManager {
       callId, chatId, video, direction,
       status: direction === 'out' ? 'ringing' : 'connecting',
       startedAt: null, local: null, peers: new Map(), muted: false, cameraOff: !video, sharing: false,
+      room: this.room(callId), // the call service's room, or null
+      joined: new Set(), // in a room call: the other devices that picked up
     };
     return this.call;
   }
@@ -45,7 +53,7 @@ export class CallManager {
     if (this.call) throw new Error('You are already in a call');
     const call = this.newCall(newMessageId(), chatId, video, 'out');
     try {
-      call.local = await this.media(video);
+      if (!call.room) call.local = await this.media(video);
     } catch (err) {
       this.call = null;
       throw new Error(`Can't use your ${video ? 'camera or microphone' : 'microphone'}: ${err.message}`);
@@ -60,7 +68,7 @@ export class CallManager {
     this.incoming.delete(callId);
     const call = this.newCall(callId, ring.chatId, ring.video, 'in');
     try {
-      call.local = await this.media(ring.video);
+      if (!call.room) call.local = await this.media(ring.video);
     } catch (err) {
       this.call = null;
       this.rt.send({ type: 'call', action: 'decline', callId });
@@ -164,15 +172,27 @@ export class CallManager {
     if (!call || call.callId !== callId) return;
     switch (action) {
       case 'joined':
+        if (call.room) {
+          // The room connects everyone; Tailchat just keeps the call log.
+          for (const peer of event.peers) call.joined.add(peer.deviceId);
+          this.answered(call);
+          break;
+        }
         // We just accepted: offer a connection to everyone already in the call.
         call.status = 'connecting';
         for (const peer of event.peers) await this.offer(peer.deviceId, peer.userId);
         break;
       case 'peer-joined':
+        if (call.room) {
+          call.joined.add(event.deviceId);
+          this.answered(call);
+          break;
+        }
         call.status = call.status === 'ringing' ? 'connecting' : call.status;
         this.peer(event.deviceId, event.userId);
         break;
       case 'signal': {
+        if (call.room) return;
         const { sdp, candidate } = await this.open(callId, event.fromDevice, event.from, event.data?.sealed);
         if (this.call !== call) return;
         const p = this.peer(event.fromDevice, event.from);
@@ -191,6 +211,7 @@ export class CallManager {
         break;
       }
       case 'peer-left': {
+        call.joined.delete(event.deviceId);
         const p = call.peers.get(event.deviceId);
         p?.pc.close();
         call.peers.delete(event.deviceId);
@@ -207,6 +228,12 @@ export class CallManager {
         break;
     }
     this.onChange();
+  }
+
+  answered(call) {
+    if (call.status === 'active') return;
+    call.status = 'active';
+    call.startedAt ??= Date.now();
   }
 
   toggleMute() {

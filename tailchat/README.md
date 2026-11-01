@@ -11,10 +11,12 @@ framework and a tailnet gateway in other languages.
 
 ## Run it with Docker
 
-The compose file runs two containers. A Tailscale container joins your tailnet
-as its own machine and serves `https://tailchat.<your-tailnet>.ts.net` with a
-real certificate. The Tailchat container shares its network, so `tailscale
-serve` reaches it on `127.0.0.1` and tells it who each visitor is. Nothing is
+The compose file runs three containers. A Tailscale container joins your
+tailnet as its own machine and serves `https://tailchat.<your-tailnet>.ts.net`
+with a real certificate. The Tailchat container shares its network, so
+`tailscale serve` reaches it on `127.0.0.1` and tells it who each visitor is.
+The calls container runs [peer-calls](https://github.com/peer-calls/peer-calls)
+for voice and video calls, served on port 3443 of the same name. Nothing is
 published on the Docker host, and Funnel stays off.
 
 1. In the [Tailscale admin console](https://login.tailscale.com/admin/dns),
@@ -42,8 +44,9 @@ other than `tailchat`, and `TAILCHAT_MAX_UPLOAD_MB` to change the 2 GB file
 limit. To update, pull the new code and run `docker compose up -d --build`
 again.
 
-Both containers run with a read-only root filesystem, no Linux capabilities
-and `no-new-privileges`, and the Tailchat one as an unprivileged user.
+All three containers run with a read-only root filesystem, no Linux
+capabilities and `no-new-privileges`, and the Tailchat and calls ones as
+unprivileged users.
 Tailscale uses userspace networking, so it needs no tun device and nothing
 but `tailscale serve` is reachable on the node.
 
@@ -53,6 +56,24 @@ The two containers share tailscaled's socket through the in-memory
 `tailscale-socket` volume. Because Tailchat runs as an unprivileged user,
 tailscaled only lets it read that information; it can't change any Tailscale
 setting. Set `TAILCHAT_TAILNET=off` in `.env` to turn the machine list off.
+
+### Calls
+
+Calling a chat, or one of your devices from the Calls tab, rings the other
+side in Tailchat. Each device that picks up joins the call's room on
+peer-calls, which opens inside the app. The first time on each device the room
+asks for a name to show and which camera and microphone to use, then remembers
+them. The link button above the call opens the room in its own window.
+
+peer-calls only passes call setup between the browsers. The audio and video go
+device to device over WebRTC on your tailnet addresses, and no public STUN or
+TURN server is used. The room runs on its own port, so it is a separate site
+from Tailchat and can't read Tailchat's keys or messages. Each call gets a
+random room that only the devices that were rung know.
+
+Set `TAILCHAT_CALLS_PORT=0` in `.env` to use the calls built into Tailchat
+instead. Those seal call setup end to end, but have a simpler call screen. If
+your access rules limit ports on the Tailchat node, allow 3443 as well as 443.
 
 To harden it further:
 
@@ -194,6 +215,8 @@ shares its key and its chats. The Android APK is a device of its own.
 * **Status**: text, photo and video updates that disappear after 24 hours,
   with a viewer list and replies.
 * **Calls**: voice and video, one-to-one and groups of up to 8, with a call log.
+  You can also call any of your own devices, or ring all of them at once from
+  the Calls tab.
 * **Privacy and devices**: last seen, read receipts, blocking, security codes
   to compare in person, linked devices you can rename or log out remotely, a
   chat with each of your other devices, and chat history sent end-to-end
@@ -213,8 +236,10 @@ Not included: payments, business tools, live location and a sticker store.
 Each device (browser or client) makes its own P-256 key pair and keeps the
 private key to itself. A message is sealed with a fresh AES-256-GCM key, which
 is wrapped for every device of every member. Files are encrypted in 1 MiB
-chunks before upload. Call setup is sealed the same way, so the server can't
-put itself in the middle of a call. The full design is in
+chunks before upload. With the built-in calls, call setup is sealed the same
+way, so the server can't put itself in the middle of a call. Calls through
+peer-calls (the Docker default) set up through your own peer-calls container
+instead, on your tailnet only. The full design is in
 [PROTOCOL.md](PROTOCOL.md).
 
 Every device key the app sees is pinned to its owner. When someone you talk to
@@ -226,7 +251,7 @@ What the server can see: who is in which chat, when messages are sent and
 how big they are, reactions, poll vote positions, receipts, profile names and
 photos, and who called whom. It can't read messages, files, status updates or
 call audio and video. Calls go device to device over WebRTC inside your
-tailnet.
+tailnet, encrypted by WebRTC and again by WireGuard.
 
 Things to know:
 
