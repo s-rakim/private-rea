@@ -28,6 +28,8 @@ MIME = {
     ".png": "image/png",
     ".ico": "image/x-icon",
     ".mp3": "audio/mpeg",
+    ".woff2": "font/woff2",
+    ".txt": "text/plain; charset=utf-8",
 }
 
 SECURITY_HEADERS = {
@@ -56,7 +58,8 @@ SECURITY_HEADERS = {
 DEV_LOGIN_PAGE = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Tailchat dev login</title><body style="font-family:system-ui;max-width:420px;margin:15vh auto;padding:0 16px">
 <h1>Tailchat (dev mode)</h1><p>In production your identity comes from Tailscale. Pick a test user:</p>
-<form><input name="user" placeholder="alice" pattern="[a-z0-9._-]{1,32}" required autofocus> <button>Sign in</button></form>"""
+<form><input name="user" placeholder="alice" pattern="[a-z0-9._-]{1,32}" required autofocus>
+<input name="machine" placeholder="machine (optional)" pattern="[a-z0-9._-]{1,32}"> <button>Sign in</button></form>"""
 
 
 def error_response(err: Exception) -> web.Response:
@@ -79,10 +82,15 @@ def create_app(config: Config) -> web.Application:
     api = Api(db, hub, config)
     resolver = IdentityResolver(config)
     public_dir = config.public_dir.resolve()
+    # tailscale serve adds the secret in front of every path (see config.py).
+    prefix = f"/{config.serve_secret}" if config.serve_secret else ""
+
+    def local_path(request: web.Request) -> str:
+        return request.path[len(prefix) :]
 
     async def handle_api(request: web.Request) -> web.StreamResponse:
         try:
-            route, params = api.router.match(request.method, request.path)
+            route, params = api.router.match(request.method, local_path(request))
             if route is None:
                 return json_response({"error": "Not found"}, 404)
             if route == "method":
@@ -95,6 +103,7 @@ def create_app(config: Config) -> web.Application:
             auth = request.headers.get("Authorization", "")
             if route.device is not False and auth.startswith("Bearer "):
                 ctx.device = await api.authenticate_token(auth[7:], identity)
+                await api.find_machine(ctx)
             elif route.device is True:
                 raise HttpError(401, "Missing device token")
             result = await route.handler(ctx)
@@ -121,6 +130,13 @@ def create_app(config: Config) -> web.Application:
         if DEV_USER.match(user):
             res = web.HTTPFound("/")
             res.set_cookie("tailchat_dev_user", user, path="/", httponly=True, samesite="Strict")
+            # Which machine of the dev tailnet (TAILCHAT_DEV_TAILNET) this
+            # browser plays, so each can be a chat.
+            machine = request.query.get("machine", "").lower()
+            if DEV_USER.match(machine):
+                res.set_cookie("tailchat_dev_machine", machine, path="/", httponly=True, samesite="Strict")
+            else:
+                res.del_cookie("tailchat_dev_machine", path="/")
             return res
         return web.Response(
             text=DEV_LOGIN_PAGE,
@@ -129,7 +145,7 @@ def create_app(config: Config) -> web.Application:
         )
 
     async def handle_static(request: web.Request) -> web.StreamResponse:
-        path = request.path
+        path = local_path(request)
         try:
             # The app shell is only served to people on the tailnet, too.
             if path == "/" or path.startswith("/invite/"):
@@ -177,11 +193,11 @@ def create_app(config: Config) -> web.Application:
     app = web.Application(client_max_size=1024**2)
     app.on_response_prepare.append(security_headers)
     app["api"] = api
-    app.router.add_route("*", "/api/{tail:.*}", handle_api)
-    app.router.add_get("/ws", handle_ws)
+    app.router.add_route("*", prefix + "/api/{tail:.*}", handle_api)
+    app.router.add_get(prefix + "/ws", handle_ws)
     if config.auth == "dev":
         app.router.add_get("/dev/login", dev_login)
-    app.router.add_route("GET", "/{tail:.*}", handle_static)
+    app.router.add_route("GET", prefix + "/{tail:.*}", handle_static)
     app.cleanup_ctx.append(sweeper)
     return app
 

@@ -72,9 +72,10 @@ function freePort() {
 }
 
 // A test user with one registered device, talking to the dev-mode server.
-export async function connectUser(base, name) {
+// machine is the dev tailnet machine (TAILCHAT_DEV_TAILNET) it runs on.
+export async function connectUser(base, name, { machine } = {}) {
   const keys = await generateDeviceKeys();
-  const headers = { 'X-Dev-User': name };
+  const headers = { 'X-Dev-User': name, ...(machine ? { 'X-Dev-Machine': machine } : {}) };
   const call = async (method, url, body, extra = {}) => {
     const res = await fetch(base + url, {
       method,
@@ -95,7 +96,7 @@ export async function connectUser(base, name) {
     }
     return data;
   };
-  const client = { id: `${name}@dev`, token: null, call };
+  const client = { id: `${name}@dev`, token: null, call, headers };
   const reg = await call('POST', '/api/devices', { name: `${name}'s test device`, publicKey: keys.publicJwk });
   client.token = reg.token;
   client.deviceId = reg.device.id;

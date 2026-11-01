@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tailchat</title>
+<style>
+  :root { --bg: #f0f2f5; --panel: #fff; --text: #111b21; --muted: #667781; --out: #d9fdd3; --in: #fff; --accent: #00a884; --line: #e9edef; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0b141a; --panel: #111b21; --text: #e9edef; --muted: #8696a0; --out: #005c4b; --in: #202c33; --line: #222d34; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px system-ui, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; }
+  #side { width: 300px; background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; }
+  #side h1 { font-size: 18px; margin: 0; padding: 16px; border-bottom: 1px solid var(--line); }
+  #me { font-size: 12px; color: var(--muted); font-weight: normal; display: block; margin-top: 4px; }
+  .peer { padding: 12px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .peer.active { background: var(--bg); }
+  .peer small { display: block; color: var(--muted); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+  .dot.on { background: var(--accent); }
+  .badge { float: right; background: var(--accent); color: #fff; border-radius: 10px; padding: 0 7px; font-size: 12px; }
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #head { background: var(--panel); padding: 14px 16px; border-bottom: 1px solid var(--line); font-weight: 600; }
+  #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 6px; }
+  .msg { max-width: 70%; padding: 6px 10px; border-radius: 8px; background: var(--in); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.out { align-self: flex-end; background: var(--out); }
+  .msg small { display: block; text-align: right; color: var(--muted); font-size: 11px; }
+  form { display: flex; gap: 8px; padding: 10px; background: var(--panel); }
+  textarea { flex: 1; resize: none; height: 42px; padding: 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 0 18px; font: inherit; cursor: pointer; }
+  #empty { margin: auto; color: var(--muted); text-align: center; padding: 16px; }
+  #err { color: #d33; padding: 8px 16px; display: none; }
+  @media (max-width: 640px) { #side { width: 40%; } }
+</style>
+</head>
+<body>
+<div id="side"><h1>Tailchat<span id="me"></span></h1><div id="peers"></div></div>
+<div id="main">
+  <div id="head">Pick a device</div>
+  <div id="err"></div>
+  <div id="log"><div id="empty">Messages go straight to your other devices over Tailscale.<br>Each one needs Tailchat running to receive.</div></div>
+  <form id="form" hidden><textarea id="text" placeholder="Type a message" maxlength="10000"></textarea><button>Send</button></form>
+</div>
+<script>
+const params = new URLSearchParams(location.search);
+if (params.get("key")) { sessionStorage.setItem("key", params.get("key")); history.replaceState(null, "", "/"); }
+const key = sessionStorage.getItem("key") || "";
+let peers = [], messages = new Map(), seq = 0, current = null, loaded = false;
+const seen = JSON.parse(localStorage.getItem("seen") || "{}");
+const $ = (id) => document.getElementById(id);
+
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function time(ms) { return new Date(ms).toLocaleString([], { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" }); }
+
+async function api(path, body) {
+  const res = await fetch(path, body ? { method: "POST", headers: { "X-Key": key, "Content-Type": "application/json" }, body: JSON.stringify(body) } : { headers: { "X-Key": key } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function render() {
+  const list = $("peers"); list.replaceChildren();
+  for (const p of peers) {
+    const row = el("div", "peer" + (p.id === current ? " active" : ""));
+    const unread = [...messages.values()].filter((m) => m.peer === p.id && !m.outgoing && m.seq > (seen[p.id] || 0)).length;
+    if (unread && p.id !== current) row.append(el("span", "badge", unread));
+    row.append(el("span", "dot" + (p.online ? " on" : "")), p.name, el("small", null, (p.online ? "online" : "offline") + (p.os ? " · " + p.os : "")));
+    row.onclick = () => { current = p.id; render(); $("text").focus(); };
+    list.append(row);
+  }
+  const peer = peers.find((p) => p.id === current);
+  $("form").hidden = !peer;
+  $("head").textContent = peer ? peer.name + (peer.online ? "" : " (offline: messages wait until it's back)") : "Pick a device";
+  if (!peer) return;
+  const log = $("log"); const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  log.replaceChildren();
+  const mine = [...messages.values()].filter((m) => m.peer === current).sort((a, b) => a.sent_at - b.sent_at);
+  for (const m of mine) {
+    const bubble = el("div", "msg" + (m.outgoing ? " out" : ""), m.text);
+    bubble.append(el("small", null, time(m.sent_at) + (m.outgoing ? (m.status === "sent" ? " ✓" : " 🕓 waiting") : "")));
+    log.append(bubble);
+    if (!m.outgoing) seen[current] = Math.max(seen[current] || 0, m.seq);
+  }
+  if (!mine.length) { const e = el("div", null, "No messages yet. Say hi!"); e.id = "empty"; log.append(e); }
+  localStorage.setItem("seen", JSON.stringify(seen));
+  if (atBottom || mine.length) log.scrollTop = log.scrollHeight;
+}
+
+async function poll() {
+  try {
+    const s = await api("/api/state?since=" + seq);
+    $("me").textContent = "This device: " + s.me.name;
+    peers = s.peers;
+    let fresh = false;
+    for (const m of s.messages) {
+      for (const [k, old] of messages) if (old.id === m.id) messages.delete(k);
+      messages.set(m.seq, m); seq = Math.max(seq, m.seq);
+      if (!m.outgoing && loaded && (document.hidden || m.peer !== current)) fresh = true;
+    }
+    loaded = true; $("err").style.display = "none";
+    render();
+    if (fresh && "Notification" in window && Notification.permission === "granted") new Notification("Tailchat", { body: "New message" });
+  } catch (err) {
+    $("err").textContent = err.message; $("err").style.display = "block";
+  }
+  setTimeout(poll, 1500);
+}
+
+$("form").onsubmit = async (e) => {
+  e.preventDefault();
+  const text = $("text").value;
+  if (!text.trim()) return;
+  try { const m = await api("/api/send", { peer: current, text }); $("text").value = ""; m.seq = Infinity; messages.set("pending-" + m.id, m); render(); }
+  catch (err) { alert(err.message); }
+};
+$("text").onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("form").requestSubmit(); } };
+if ("Notification" in window && Notification.permission === "default") document.addEventListener("click", () => Notification.requestPermission(), { once: true });
+poll();
+</script>
+</body>
+</html>
