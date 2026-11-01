@@ -788,6 +788,9 @@ class Api:
                 "user": self.user_view(ctx.user, ctx.user["id"]),
                 "device": self.device_view(ctx.device) if ctx.device else None,
                 "authMode": cfg.auth,
+                # Where calls happen: a call room on this host's calls port
+                # (PROTOCOL.md §6), or null for calls built into Tailchat.
+                "calls": {"port": cfg.calls_port} if cfg.calls_port else None,
                 "limits": {
                     "maxUploadBytes": cfg.max_upload_bytes,
                     "editWindowSeconds": cfg.edit_window_s,
@@ -1965,20 +1968,40 @@ class Api:
             if chat["type"] in ADMIN_POSTS:
                 sock.send(json.dumps({"type": "call", "action": "error", "callId": call_id, "message": "Calls aren't available in channels and community announcements"}))
                 return
-            if chat["device_pair"]:
-                sock.send(json.dumps({"type": "call", "action": "error", "callId": call_id, "message": "You can't call your own device"}))
-                return
             others = [u for u in self.active_member_ids(chat_id) if u != user_id and not self.either_blocked(u, user_id)]
-            if chat["type"] == "group" and len(others) > 7:
-                sock.send(json.dumps({"type": "call", "action": "error", "callId": call_id, "message": "Group calls are limited to 8 people"}))
+            # Calling yourself rings your own devices: in a device chat the
+            # other device, in your own chat every other device you have.
+            own: list[str] = []
+            if not others and chat["type"] == "direct":
+                pair = self.device_pair(chat)
+                if pair:
+                    if sock.device_id not in pair or not self.visible_to_device(chat, sock.device_id):
+                        return
+                    own = [d for d in pair if d != sock.device_id]
+                else:
+                    own = [
+                        r["id"]
+                        for r in db.all("SELECT id FROM devices WHERE user_id = ? AND revoked_at IS NULL AND id != ?", user_id, sock.device_id)
+                    ]
+                if not own:
+                    sock.send(json.dumps({"type": "call", "action": "error", "callId": call_id, "message": "Link another device first, then you can call it"}))
+                    return
+            if len(others) + len(own) > 7:
+                sock.send(json.dumps({"type": "call", "action": "error", "callId": call_id, "message": "Calls are limited to 8 people or devices"}))
                 return
             video = bool(msg.get("video"))
-            self.calls[call_id] = {"chatId": chat_id, "video": video, "participants": {sock.device_id: user_id}, "invited": set(others)}
+            self.calls[call_id] = {
+                "chatId": chat_id, "video": video, "participants": {sock.device_id: user_id},
+                "invited": set(others), "invitedDevices": set(own), "own": bool(own),
+            }
             db.run(
                 "INSERT INTO calls (id, chat_id, caller_id, video, started_at, participants) VALUES (?, ?, ?, ?, ?, ?)",
                 call_id, chat_id, user_id, int(video), now(), json.dumps([user_id]),
             )
-            hub.send_to_users(others, {"type": "call", "action": "ring", "callId": call_id, "chatId": chat_id, "from": user_id, "video": video})
+            ring = {"type": "call", "action": "ring", "callId": call_id, "chatId": chat_id, "from": user_id, "fromDevice": sock.device_id, "video": video}
+            hub.send_to_users(others, ring)
+            for device_id in own:
+                hub.send_to_user(user_id, ring, only_device=device_id)
 
             # Unanswered calls stop ringing after 45 seconds.
             def timeout() -> None:
@@ -1996,8 +2019,13 @@ class Api:
             return
         participants: dict = call["participants"]
 
+        # A device of yours that was rung itself (a call between your own
+        # devices) answers for itself only: your other devices keep ringing.
+        own_device = sock.device_id in call["invitedDevices"]
         if action == "accept":
-            if user_id not in call["invited"] and user_id not in participants.values():
+            if sock.device_id in participants:
+                return
+            if not own_device and user_id not in call["invited"] and (user_id not in participants.values() or call["own"]):
                 return
             existing = [{"deviceId": d, "userId": u} for d, u in participants.items()]
             participants[sock.device_id] = user_id
@@ -2008,16 +2036,24 @@ class Api:
             sock.send(json.dumps({"type": "call", "action": "joined", "callId": call_id, "peers": existing, "video": call["video"]}))
             for p in existing:
                 hub.send_to_user(p["userId"], {"type": "call", "action": "peer-joined", "callId": call_id, "userId": user_id, "deviceId": sock.device_id}, only_device=p["deviceId"])
-            # Stop ringing on the user's other devices.
-            hub.send_to_user(user_id, {"type": "call", "action": "answered-elsewhere", "callId": call_id}, except_device=sock.device_id)
+            if own_device:
+                call["invitedDevices"].discard(sock.device_id)
+            else:
+                # Stop ringing on the user's other devices.
+                hub.send_to_user(user_id, {"type": "call", "action": "answered-elsewhere", "callId": call_id}, except_device=sock.device_id)
             return
 
         if action == "decline":
-            call["invited"].discard(user_id)
-            hub.send_to_user(user_id, {"type": "call", "action": "answered-elsewhere", "callId": call_id}, except_device=sock.device_id)
+            if own_device:
+                call["invitedDevices"].discard(sock.device_id)
+            elif user_id in call["invited"]:
+                call["invited"].discard(user_id)
+                hub.send_to_user(user_id, {"type": "call", "action": "answered-elsewhere", "callId": call_id}, except_device=sock.device_id)
+            else:
+                return
             for device_id, uid in participants.items():
-                hub.send_to_user(uid, {"type": "call", "action": "declined", "callId": call_id, "userId": user_id}, only_device=device_id)
-            if not call["invited"] and len(participants) <= 1:
+                hub.send_to_user(uid, {"type": "call", "action": "declined", "callId": call_id, "userId": user_id, "deviceId": sock.device_id}, only_device=device_id)
+            if not call["invited"] and not call["invitedDevices"] and len(participants) <= 1:
                 self.end_call(call_id, "declined")
             return
 

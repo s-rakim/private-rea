@@ -1,6 +1,6 @@
 // Dialogs and full-screen layers shared by the screens: pickers, message
 // info, media viewer, status viewer and composer, calls, group invites.
-import { S, api, calls, render, nameOf, isMe, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, isDeviceChat, tickState, ownDevice, shareHistory, declineHistory, renameDevice } from './app.js';
+import { S, api, calls, render, nameOf, isMe, callerName, callableDevices, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, isDeviceChat, tickState, ownDevice, shareHistory, declineHistory, renameDevice } from './app.js';
 import { h, icon, iconButton, avatar, dialog, promptDialog, toast, viewer, timeOf, listTime, dayLabel, fileSize, duration, reconcile } from './ui.js';
 import { securityCode } from './crypto.js';
 import { exportChat } from './export.js';
@@ -774,7 +774,7 @@ export function mediaStatusDialog(file) {
 
 // ---------- calls ----------
 
-const callUi = { el: null, incoming: new Map(), tiles: new Map(), self: null, clock: null };
+const callUi = { el: null, incoming: new Map(), tiles: new Map(), self: null, clock: null, frame: null };
 
 function callTitle(chatId) {
   const chat = S.chats.get(chatId);
@@ -794,7 +794,10 @@ export function renderCalls() {
   for (const ring of ringing) {
     if (callUi.incoming.has(ring.callId)) continue;
     const chat = S.chats.get(ring.chatId);
-    const caller = S.users.get(ring.from) || { id: ring.from, name: nameOf(ring.from) };
+    const fromDevice = isMe(ring.from) ? ownDevice(ring.fromDevice) : null;
+    const caller = fromDevice
+      ? { id: fromDevice.machine?.id || fromDevice.id, name: callerName(ring) }
+      : S.users.get(ring.from) || { id: ring.from, name: nameOf(ring.from) };
     const accept = () => calls.accept(ring.callId).catch((e) => toast(e.message));
     const el = h(
       'div',
@@ -818,6 +821,7 @@ export function renderCalls() {
       callUi.el = null;
       callUi.tiles.clear();
       callUi.self = null;
+      callUi.frame = null;
       clearInterval(callUi.clock);
     }
     return;
@@ -826,6 +830,10 @@ export function renderCalls() {
     callUi.el = h('div', { class: 'call-screen', role: 'dialog', 'aria-label': 'Call' });
     layer().append(callUi.el);
     callUi.clock = setInterval(render, 1000);
+  }
+  if (call.room) {
+    renderRoomCall(call);
+    return;
   }
   const chat = S.chats.get(call.chatId);
   const peers = [...call.peers.entries()];
@@ -894,10 +902,46 @@ export function renderCalls() {
   ]);
 }
 
+// A call on the call service: its room fills the screen, with Tailchat's
+// own bar above it. The room's page asks for your name and camera once per
+// device, then remembers them.
+function renderRoomCall(call) {
+  const chat = S.chats.get(call.chatId);
+  if (!callUi.frame) {
+    callUi.frame = h('iframe', {
+      class: 'room',
+      src: call.room,
+      title: 'Call',
+      allow: 'camera; microphone; display-capture; fullscreen; autoplay; clipboard-write',
+      referrerpolicy: 'no-referrer',
+    });
+  }
+  const others = call.joined.size;
+  const state = call.status === 'active'
+    ? `${duration((Date.now() - (call.startedAt || Date.now())) / 1000)}${others > 1 ? ` · ${others + 1} devices` : ''}`
+    : call.status === 'ringing'
+      ? call.declined && chat?.type === 'direct' && !isSelfChat(chat) ? 'Declined' : 'Ringing…'
+      : 'Joining…';
+  callUi.el.classList.add('room-call');
+  reconcile(callUi.el, [
+    h(
+      'div',
+      { class: 'room-bar' },
+      avatar(chat ? chatAvatar(chat) : { id: call.chatId, name: '?' }, 'sm'),
+      h('div', { class: 'grow' }, h('div', { class: 'who ellipsis' }, callTitle(call.chatId)), h('div', { class: 'state ellipsis' }, `${call.video ? 'Video' : 'Voice'} call · ${state}`)),
+      h('a', { class: 'pop', href: call.room, target: '_blank', rel: 'noopener noreferrer', title: 'Open the call in its own window' }, icon('link')),
+      h('button', { type: 'button', class: 'hang', title: 'End call', 'aria-label': 'End call', onclick: () => calls.hangup() }, icon('hangup')),
+    ),
+    callUi.frame,
+  ]);
+}
+
+const isSelfChat = (chat) => chat?.type === 'direct' && chat.members.every((m) => isMe(m.userId)) && !chat.devices;
+
 export async function startCall(chat, video) {
   if (!chat) return;
-  if (chat.type === 'direct' && chat.members.every((m) => isMe(m.userId))) {
-    toast("You can't call yourself");
+  if (chat.type === 'direct' && chat.members.every((m) => isMe(m.userId)) && !callableDevices().length) {
+    toast('Open Tailchat on another of your devices first, then you can call it');
     return;
   }
   try {
