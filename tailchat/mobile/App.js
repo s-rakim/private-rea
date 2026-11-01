@@ -167,9 +167,16 @@ function Chat({ server, onChangeServer }) {
     }
   }, []);
 
-  // Pages on the Tailchat server open in the app; any other link opens in the browser.
+  // Pages on the Tailchat machine open in the app, on any port so the call
+  // service works too; any other link opens in the browser.
   const onShouldStart = useCallback((req) => {
-    if (req.url.startsWith(`${server}/`) || req.url === server || /^(blob|data|about):/.test(req.url)) return true;
+    if (/^(blob|data|about):/.test(req.url)) return true;
+    try {
+      const url = new URL(req.url);
+      if (url.protocol === 'https:' && url.hostname.toLowerCase() === new URL(server).hostname.toLowerCase()) return true;
+    } catch {
+      // not a URL we can open in the app
+    }
     Linking.openURL(req.url).catch(() => {});
     return false;
   }, [server]);
