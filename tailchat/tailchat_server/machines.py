@@ -6,8 +6,6 @@ Where the server asks (TAILCHAT_TAILNET):
 
   localapi - tailscaled's LocalAPI socket, read-only calls only. With Docker
              the tailscale container shares it (see docker-compose.yml).
-  cli      - the tailscale command, when running next to the Tailscale app
-             (python -m tailchat_server --tailscale sets this up).
   dev      - a file in the format of `tailscale status --json`
              (TAILCHAT_DEV_TAILNET), for dev mode only.
   off      - no machine list. Devices that have opened Tailchat still get
@@ -16,7 +14,6 @@ Where the server asks (TAILCHAT_TAILNET):
 
 from __future__ import annotations
 
-import asyncio
 import ipaddress
 import json
 import logging
@@ -28,7 +25,7 @@ from pathlib import Path
 import aiohttp
 
 from .config import Config
-from .tailnet import _addr, is_tailnet_address, peer
+from .tailnet import _addr, is_tailnet_address
 
 log = logging.getLogger("tailchat.machines")
 
@@ -73,19 +70,6 @@ class Tailnet:
                     raise RuntimeError(f"tailscaled answered {res.status}")
                 return json.loads(await res.text())
 
-    async def _cli(self, *args: str) -> dict:
-        proc = await asyncio.create_subprocess_exec(
-            self.config.tailscale_cli, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
-        )
-        try:
-            out, _ = await asyncio.wait_for(proc.communicate(), 5)
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise
-        if proc.returncode != 0:
-            raise RuntimeError(f"tailscale {args[0]} failed ({proc.returncode})")
-        return json.loads(out)
-
     async def status(self) -> dict | None:
         """`tailscale status --json`, cached for a few seconds. None when
         tailscaled can't be asked."""
@@ -95,8 +79,6 @@ class Tailnet:
         try:
             if self.source == "localapi":
                 status = await self._localapi("status")
-            elif self.source == "cli":
-                status = await self._cli("status", "--json")
             elif self.source == "dev":
                 status = json.loads(Path(self.config.dev_tailnet).read_text())
             else:
@@ -116,8 +98,6 @@ class Tailnet:
         try:
             if self.source == "localapi":
                 info = await self._localapi(f"whois?addr={ip}")
-            elif self.source == "cli":
-                info = await self._cli("whois", "--json", ip)
             else:
                 return None
             if not isinstance(info, dict):
@@ -137,12 +117,9 @@ class Tailnet:
             if not name:
                 return None
             return next((m for m in await self.machines_of(login, include_self=True) or [] if m["name"] == name), None)
-        if self.config.auth == "serve":
-            # tailscale serve puts the visiting device's tailnet address here,
-            # replacing whatever the browser sent. Only tailscaled reaches us.
-            raw = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-        else:
-            raw = peer(request)[0] or ""
+        # tailscale serve puts the visiting device's tailnet address here,
+        # replacing whatever the browser sent. Only tailscaled reaches us.
+        raw = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
         if not is_tailnet_address(raw):
             return None
         ip = str(_addr(raw))

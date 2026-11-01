@@ -88,7 +88,7 @@ class MachinesOfTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await net.machines_of("nobody@example.com"), [])
 
     async def test_the_server_machine_when_it_is_yours(self):
-        net = FakeTailnet(load_config({"TAILCHAT_AUTH": "serve", "TAILCHAT_TAILNET": "cli"}))
+        net = FakeTailnet(load_config({"TAILCHAT_AUTH": "serve", "TAILCHAT_LIST_SELF": "1"}))
         found = await net.machines_of("mo@example.com")
         me = next(m for m in found if m["id"] == "nSELF")
         self.assertEqual((me["name"], me["online"]), ("tailchat", True))
@@ -96,7 +96,7 @@ class MachinesOfTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("nSELF", [m["id"] for m in await net.machines_of("mo@example.com", include_self=True)])
 
     async def test_nothing_when_tailscaled_cant_be_asked(self):
-        config = load_config({"TAILCHAT_AUTH": "serve", "TAILCHAT_TAILNET": "cli", "TAILCHAT_TAILSCALE_CLI": "/nonexistent/tailscale"})
+        config = load_config({"TAILCHAT_AUTH": "serve", "TAILSCALE_SOCKET": "/nonexistent/tailscaled.sock"})
         net = Tailnet(config)
         self.assertIsNone(await net.machines_of("mo@example.com"))
         # The failure is remembered for a few seconds rather than retried on every request.
@@ -153,12 +153,10 @@ class TailnetConfigTests(unittest.TestCase):
     def test_defaults(self):
         serve = load_config({"TAILCHAT_AUTH": "serve"})
         self.assertEqual((serve.tailnet, serve.list_self), ("localapi", False))
-        cli = load_config({"TAILCHAT_AUTH": "serve", "TAILCHAT_TAILNET": "cli"})
-        self.assertEqual((cli.tailnet, cli.list_self, cli.tailscale_cli), ("cli", True, "tailscale"))
+        self.assertTrue(load_config({"TAILCHAT_AUTH": "serve", "TAILCHAT_LIST_SELF": "1"}).list_self)
         self.assertEqual(load_config({"TAILCHAT_AUTH": "dev"}).tailnet, "off")
         self.assertEqual(load_config({"TAILCHAT_AUTH": "dev", "TAILCHAT_DEV_TAILNET": "x.json"}).tailnet, "dev")
         self.assertEqual(load_config({"TAILCHAT_AUTH": "dev", "TAILCHAT_DEV_TAILNET": "x.json", "TAILCHAT_TAILNET": "off"}).tailnet, "off")
-        self.assertFalse(load_config({"TAILCHAT_AUTH": "serve", "TAILCHAT_TAILNET": "cli", "TAILCHAT_LIST_SELF": "0"}).list_self)
 
     def test_refusals(self):
         for env in [
@@ -166,6 +164,7 @@ class TailnetConfigTests(unittest.TestCase):
             {"TAILCHAT_AUTH": "serve", "TAILCHAT_TAILNET": "dev"},
             {"TAILCHAT_AUTH": "dev", "TAILCHAT_TAILNET": "dev"},
             {"TAILCHAT_AUTH": "serve", "TAILCHAT_TAILNET": "everything"},
+            {"TAILCHAT_AUTH": "serve", "TAILCHAT_TAILNET": "cli"},
         ]:
             with self.assertRaises(ValueError, msg=env):
                 load_config(env)

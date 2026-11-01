@@ -11,15 +11,14 @@ The server is only reachable on your tailnet. There are no passwords:
 | Mode (`TAILCHAT_AUTH`) | How the server learns who you are |
 |---|---|
 | `serve` (default) | `tailscale serve` terminates HTTPS with the machine's `*.ts.net` certificate and forwards to the server on loopback with `Tailscale-User-Login` / `Tailscale-User-Name` / `Tailscale-User-Profile-Pic` headers. Requests that do not come from loopback are refused. |
-| `direct` | The server listens on its Tailscale IP and asks the local `tailscaled` (LocalAPI `whois`) which user owns the connecting address. Requests from outside `100.64.0.0/10` / `fd7a:115c:a1e0::/48` are refused. |
 | `dev` | Local testing only, loopback only. The user comes from the `tailchat_dev_user` cookie (set at `/dev/login`) or an `X-Dev-User` header. |
 
 In every mode the `Host` header must name this server: `localhost` or a
-loopback address, and in `serve` and `direct` mode also a `*.ts.net` name or a
+loopback address, and in `serve` mode also a `*.ts.net` name or a
 tailnet address (`TAILCHAT_ALLOWED_HOSTS` adds more). Anything else gets
 `421`, so a web page that points its own domain at the server (DNS rebinding)
 gets nowhere. `serve` mode also refuses requests that came in through Tailscale
-Funnel, and `direct` mode needs TLS (`TAILCHAT_TLS_CERT`/`_KEY`).
+Funnel.
 
 Your Tailscale login name (`alice@example.com`) is your user id (in dev mode,
 `NAME@dev`). The first request from a new tailnet user creates their account. Tagged
@@ -370,8 +369,8 @@ and calls aren't available in it, since the device at the other end is you.
 
 Each of your machines on the tailnet is listed as a chat, including machines
 that haven't opened Tailchat yet. The server asks tailscaled (read-only) which
-machine each request comes from (in `serve` mode, the address `tailscale
-serve` puts in `X-Forwarded-For`; in `direct` mode, the peer address) and
+machine each request comes from (the address `tailscale serve` puts in
+`X-Forwarded-For`) and
 remembers it with the device. A device view then carries
 `machine: {id, name}` (the node's stable ID and short MagicDNS name, or
 `null` when it isn't known) and `renamed` (whether the user picked the
