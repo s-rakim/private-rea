@@ -221,8 +221,10 @@ shares its key and its chats. The Android APK is a device of its own.
   to compare in person, linked devices you can rename or log out remotely, a
   chat with each of your other devices, and chat history sent end-to-end
   encrypted to a device you link later.
-* **Settings**: profile name, about and photo, enter is send, desktop
-  notifications.
+* **Settings**: profile name, about and photo, enter is send, and
+  notifications for new messages (on phones and the installed app too, where
+  the app icon also shows how many chats are unread). Turn them on in
+  Settings > Notifications or from the banner above the chat list.
 * **Themes**: Tailscale (the default), Ocean, Forest, Sunset, Grape, Rose and
   Graphite, each with light and dark colours that follow your system or stay
   fixed. Any theme can be edited: Tailchat makes your own copy, shows the

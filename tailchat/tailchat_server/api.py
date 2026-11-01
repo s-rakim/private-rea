@@ -218,14 +218,34 @@ class Api:
 
     def send_chat(self, chat: dict, uid: str, event: dict, **options) -> None:
         """An event about a chat, for one member: in a device chat or device
-        group only its devices hear about it."""
+        group only its devices hear about it, and each gets its own view of
+        the chat."""
         pair = self.device_pair(chat)
         if not pair:
             self.hub.send_to_user(uid, event, **options)
             return
         for d in pair:
             if d != options.get("except_device"):
+                if event.get("type") == "chat":
+                    event = {"type": "chat", "chat": self.chat_view(self.get_chat(chat["id"]), uid, d)}
                 self.hub.send_to_user(uid, event, only_device=d)
+
+    def device_reads(self, chat: dict, member: dict, device: str) -> dict:
+        """How far one device of a device chat or device group has received
+        and read it. A device with no row yet starts from the member's shared
+        pointers."""
+        row = self.db.get("SELECT * FROM device_reads WHERE chat_id = ? AND device_id = ?", chat["id"], device)
+        if row:
+            return {"delivered": row["delivered_seq"], "read": row["read_seq"]}
+        return {"delivered": member["delivered_seq"], "read": member["read_seq"]}
+
+    def set_device_reads(self, chat_id: str, device: str, delivered: int, read: int) -> None:
+        self.db.run(
+            """INSERT INTO device_reads (chat_id, device_id, delivered_seq, read_seq) VALUES (?, ?, ?, ?)
+               ON CONFLICT (chat_id, device_id) DO UPDATE SET
+                 delivered_seq = MAX(delivered_seq, excluded.delivered_seq), read_seq = MAX(read_seq, excluded.read_seq)""",
+            chat_id, device, delivered, read,
+        )
 
     def visible_to_device(self, chat: dict, device_id: str | None) -> bool:
         pair = self.device_pair(chat)
@@ -323,11 +343,37 @@ class Api:
                ORDER BY seq DESC LIMIT 1""",
             chat["id"], floor, ceiling, viewer,
         )
-        unread = db.get(
-            """SELECT COUNT(*) AS n FROM messages WHERE chat_id = ? AND kind = 'msg' AND sender_id != ?
-                 AND deleted_at IS NULL AND seq > ? AND seq <= ?""",
-            chat["id"], viewer, max(floor, me["read_seq"]), ceiling,
-        )["n"]
+        pair = self.device_pair(chat)
+        read_seq, peers = me["read_seq"], None
+        if pair and device in pair:
+            # In a device chat or device group "you" are the device asking:
+            # messages from your other devices are unread here until this
+            # device reads them, and the ticks follow the other devices that
+            # are still logged in.
+            read_seq = self.device_reads(chat, me, device)["read"]
+            others = [d for d in pair if d != device]
+            live = {
+                r["id"] for r in db.all(
+                    f"SELECT id FROM devices WHERE id IN ({', '.join('?' * len(others))}) AND revoked_at IS NULL", *others
+                )
+            } if others else set()
+            peers = []
+            for d in others:
+                if d in live:
+                    r = self.device_reads(chat, me, d)
+                    peers.append({"deviceId": d, "deliveredSeq": r["delivered"], "readSeq": r["read"]})
+            unread = db.get(
+                """SELECT COUNT(*) AS n FROM messages WHERE chat_id = ? AND kind = 'msg'
+                     AND (sender_device IS NULL OR sender_device != ?)
+                     AND deleted_at IS NULL AND seq > ? AND seq <= ?""",
+                chat["id"], device, max(floor, read_seq), ceiling,
+            )["n"]
+        else:
+            unread = db.get(
+                """SELECT COUNT(*) AS n FROM messages WHERE chat_id = ? AND kind = 'msg' AND sender_id != ?
+                     AND deleted_at IS NULL AND seq > ? AND seq <= ?""",
+                chat["id"], viewer, max(floor, me["read_seq"]), ceiling,
+            )["n"]
         active = me["left_at"] is None
         return {
             "id": chat["id"],
@@ -354,7 +400,7 @@ class Api:
                 "joinedSeq": me["joined_seq"],
                 "clearedSeq": me["cleared_seq"],
                 "leftSeq": me["left_seq"],
-                "readSeq": me["read_seq"],
+                "readSeq": read_seq,
                 "pinnedAt": me["pinned_at"],
                 "archived": bool(me["archived"]),
                 "mutedUntil": me["muted_until"],
@@ -362,8 +408,9 @@ class Api:
             },
             "unread": unread,
             "lastMessage": self.message_view(last, viewer, device) if last else None,
-            "devices": self.device_pair(chat),
+            "devices": pair,
             "deviceGroup": self.is_device_group(chat),
+            "peers": peers,
             "wallpaper": self.wallpaper_view(chat),
         }
 
@@ -538,11 +585,24 @@ class Api:
             for f in files:
                 db.run("INSERT INTO file_links (file_id, message_id) VALUES (?, ?)", f, id)
             if kind == "msg":
+                pair = self.device_pair(chat)
+                if pair:
+                    # Give each device its own pointers before the shared member
+                    # row moves on, so the other devices still see this message
+                    # as unread.
+                    for d in pair:
+                        db.run(
+                            """INSERT OR IGNORE INTO device_reads (chat_id, device_id, delivered_seq, read_seq)
+                               SELECT chat_id, ?, delivered_seq, read_seq FROM members WHERE chat_id = ? AND user_id = ?""",
+                            d, chat["id"], sender_id,
+                        )
                 # A sender has read everything up to their own message.
                 db.run(
                     "UPDATE members SET read_seq = ?, delivered_seq = ?, marked_unread = 0 WHERE chat_id = ? AND user_id = ?",
                     seq, seq, chat["id"], sender_id,
                 )
+                if pair and sender_device:
+                    self.set_device_reads(chat["id"], sender_device, seq, seq)
             db.run("UPDATE members SET removed = 0 WHERE chat_id = ?", chat["id"])
             return db.get("SELECT * FROM messages WHERE id = ?", id)
 
@@ -1064,7 +1124,7 @@ class Api:
                         db.run("INSERT INTO members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)", chat_id, uid, now())
                 chat = self.get_chat(chat_id)
             db.run("UPDATE members SET removed = 0 WHERE chat_id = ? AND user_id = ?", chat["id"], ctx.user["id"])
-            return {"chat": self.chat_view(chat, ctx.user["id"])}
+            return {"chat": self.chat_view(chat, ctx.user["id"], ctx.device["id"])}
 
         # A chat between two of your own devices: messages in it are sealed for
         # those two only. open=false finds or creates it without bringing back
@@ -1135,7 +1195,7 @@ class Api:
                 fail(400, "members must be a list of user ids")
             name, description, avatar, others = self.read_new_chat(body, ctx)
             chat = self.create_group(ctx.user["id"], name, description, avatar, others)
-            return {"chat": self.chat_view(chat, ctx.user["id"])}
+            return {"chat": self.chat_view(chat, ctx.user["id"], ctx.device["id"])}
 
         # A community is its announcements group (admins post, everyone reads)
         # plus the groups linked to it.
@@ -1144,7 +1204,7 @@ class Api:
             body = await read_json(ctx.request)
             name, description, avatar, others = self.read_new_chat(body, ctx)
             chat = self.create_group(ctx.user["id"], name, description, avatar, others, type="community")
-            return {"chat": self.chat_view(chat, ctx.user["id"])}
+            return {"chat": self.chat_view(chat, ctx.user["id"], ctx.device["id"])}
 
         # Channels are one-way broadcasts that anyone on the tailnet can follow.
         # Channel posts are not end-to-end encrypted: the client
@@ -1154,7 +1214,7 @@ class Api:
             body = await read_json(ctx.request)
             name, description, avatar, _ = self.read_new_chat({**body, "members": []}, ctx)
             chat = self.create_group(ctx.user["id"], name, description, avatar, [], type="channel")
-            return {"chat": self.chat_view(chat, ctx.user["id"])}
+            return {"chat": self.chat_view(chat, ctx.user["id"], ctx.device["id"])}
 
         @r.add("PATCH", "/api/chats/:id")
         async def update_chat(ctx: Context):
@@ -1227,7 +1287,7 @@ class Api:
             self.broadcast_chat(chat["id"])
             if chat["community_id"] and any(k in body for k in ("name", "description", "avatar")):
                 self.broadcast_chat(chat["community_id"])
-            return {"chat": self.chat_view(self.get_chat(chat["id"]), ctx.user["id"])}
+            return {"chat": self.chat_view(self.get_chat(chat["id"]), ctx.user["id"], ctx.device["id"])}
 
         # A chat's wallpaper (PROTOCOL.md §11): an envelope sealed for every
         # device in the chat, so the server never sees the colour or image.
@@ -1320,7 +1380,7 @@ class Api:
                 set_("muted_until", v_int(body["mutedUntil"], "mutedUntil"))
             if "markedUnread" in body:
                 set_("marked_unread", int(v_bool(body["markedUnread"], "markedUnread", optional=False)))
-            view = self.chat_view(chat, uid)
+            view = self.chat_view(chat, uid, ctx.device["id"])
             self.send_chat(chat, uid, {"type": "chat", "chat": view})
             return {"chat": view}
 
@@ -1332,7 +1392,7 @@ class Api:
                 "UPDATE members SET cleared_seq = ?, read_seq = MAX(read_seq, ?) WHERE chat_id = ? AND user_id = ?",
                 seq, seq, chat["id"], ctx.user["id"],
             )
-            view = self.chat_view(chat, ctx.user["id"])
+            view = self.chat_view(chat, ctx.user["id"], ctx.device["id"])
             self.send_chat(chat, ctx.user["id"], {"type": "chat", "chat": view})
             return {"chat": view}
 
@@ -1462,7 +1522,7 @@ class Api:
             self.add_members(chat, ctx.user["id"], [ctx.user["id"]])
             self.notify_device_change(ctx.user["id"])
             self.broadcast_chat(chat["id"])
-            return {"chat": self.chat_view(self.get_chat(chat["id"]), ctx.user["id"])}
+            return {"chat": self.chat_view(self.get_chat(chat["id"]), ctx.user["id"], ctx.device["id"])}
 
         # ---------- communities ----------
 
@@ -1835,6 +1895,22 @@ class Api:
             ceiling = min(chat["last_seq"], member["left_seq"] if member["left_seq"] is not None else BIG)
             delivered = min(v_int(body.get("delivered"), "delivered", optional=True) or 0, ceiling)
             read = min(v_int(body.get("read"), "read", optional=True) or 0, ceiling)
+            if self.device_pair(chat):
+                # Device chats and device groups keep receipts per device; the
+                # ticks on the other devices come from these (chat view "peers").
+                mine = self.device_reads(chat, member, ctx.device["id"])
+                if max(delivered, read) <= mine["delivered"] and read <= mine["read"] and not (read and member["marked_unread"]):
+                    return {"ok": True}
+                with db.tx():
+                    for d in self.device_pair(chat):
+                        if d != ctx.device["id"]:
+                            other = self.device_reads(chat, member, d)
+                            self.set_device_reads(chat["id"], d, other["delivered"], other["read"])
+                    self.set_device_reads(chat["id"], ctx.device["id"], max(delivered, read), read)
+                    if read:
+                        db.run("UPDATE members SET marked_unread = 0 WHERE chat_id = ? AND user_id = ?", chat["id"], uid)
+                self.send_chat(chat, uid, {"type": "chat"})
+                return {"ok": True}
             next_delivered = max(member["delivered_seq"], delivered, read)
             next_read = max(member["read_seq"], read)
             if next_delivered == member["delivered_seq"] and next_read == member["read_seq"] and not (read and member["marked_unread"]):

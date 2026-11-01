@@ -292,6 +292,11 @@ export const isDeviceChat = (chat) => Array.isArray(chat?.devices) && !chat.devi
 export const devicePeer = (chat) => (isDeviceChat(chat) ? chat.devices.find((id) => id !== S.device.id) || null : null);
 // The other devices in a device group that are still logged in.
 export const groupDevices = (chat) => (chat?.devices || []).filter((id) => id !== S.device.id).map(ownDevice).filter((d) => d && !d.revokedAt);
+// Whether this device sent a message, which puts it on the right. In a device
+// chat or device group every end is you, so it's the sending device that counts.
+export const sentHere = (m, chat) => (Array.isArray(chat?.devices) ? m.senderDevice === S.device.id : isMe(m.senderId));
+// Who sent a message: the person, or in a device group which of your devices.
+export const senderName = (m, chat) => (isDeviceGroup(chat) ? ownDevice(m.senderDevice)?.name || 'A logged-out device' : nameOf(m.senderId));
 
 export function chatTitle(chat) {
   if (!chat) return '';
@@ -486,6 +491,13 @@ export function tickState(m, chat) {
   if (m.pending) return 'pending';
   if (m.failed) return 'failed';
   if (isChannel(chat)) return 'sent';
+  if (Array.isArray(chat.devices)) {
+    // A device chat or device group: your other logged-in devices' receipts.
+    if (!chat.peers) return 'sent';
+    if (chat.peers.every((p) => p.readSeq >= m.seq)) return 'read';
+    if (chat.peers.every((p) => p.deliveredSeq >= m.seq)) return 'delivered';
+    return 'sent';
+  }
   const others = chat.members.filter((x) => !x.left && x.userId !== S.me.id && x.joinedSeq < m.seq);
   if (!others.length) return 'read';
   if (others.every((x) => x.readSeq >= m.seq)) return 'read';
@@ -1109,12 +1121,12 @@ function handleEvent(e) {
       upsertMessage(m);
       const chat = S.chats.get(m.chatId);
       if (!chat) chatOf(m.chatId).catch(() => {});
-      if (m.kind === 'msg' && !isMe(m.senderId)) {
+      if (m.kind === 'msg' && !sentHere(m, chat)) {
         S.typing.get(m.chatId)?.delete(m.senderId);
         if (S.active === m.chatId && document.visibilityState === 'visible') markRead(m.chatId);
         else markDelivered(m.chatId, m.seq);
         if (chat && (S.active !== m.chatId || document.visibilityState !== 'visible') && !(chat.me.mutedUntil > Date.now())) {
-          waitForContent(m).then(() => notify(chatTitle(chat), (showsSender(chat) ? `${nameOf(m.senderId)}: ` : '') + previewText(m), m.chatId));
+          waitForContent(m).then(() => notify(chatTitle(chat), (showsSender(chat) || isDeviceGroup(chat) ? `${senderName(m, chat)}: ` : '') + previewText(m), m.chatId));
         }
       }
       break;
@@ -1209,15 +1221,21 @@ export function notify(title, body, chatId) {
   updateTitle();
   if (!S.prefs.notifications || !('Notification' in window) || Notification.permission !== 'granted') return;
   if (document.visibilityState === 'visible' && S.active === chatId) return;
+  const options = { body: body.slice(0, 160), tag: chatId, renotify: true, icon: '/icon-192.png', data: { chatId } };
+  // Phones and the installed app only show notifications through the service
+  // worker; desktop browsers can show them from the page.
+  const viaWorker = () => navigator.serviceWorker?.getRegistration()
+    .then((reg) => reg?.showNotification(title, options))
+    .catch(() => {});
   try {
-    const n = new Notification(title, { body: body.slice(0, 160), tag: chatId, icon: '/icon.svg' });
+    const n = new Notification(title, options);
     n.onclick = () => {
       window.focus();
       openChat(chatId);
       n.close();
     };
   } catch {
-    // some browsers only allow notifications from a service worker
+    viaWorker();
   }
 }
 
@@ -1225,7 +1243,13 @@ export function updateTitle() {
   let unread = 0;
   for (const c of S.chats.values()) if (!c.me.archived && !(c.me.mutedUntil > Date.now()) && (c.unread || c.me.markedUnread)) unread++;
   document.title = unread ? `(${unread}) Tailchat` : 'Tailchat';
+  // The number on the installed app's icon, where the system supports it.
+  if (unread !== shownBadge && 'setAppBadge' in navigator) {
+    shownBadge = unread;
+    (unread ? navigator.setAppBadge(unread) : navigator.clearAppBadge()).catch(() => {});
+  }
 }
+let shownBadge = -1;
 
 // ---------- navigation ----------
 

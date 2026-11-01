@@ -160,3 +160,36 @@ test('a call in a device group rings its other logged-in devices only', async ()
   await quiet();
   assert.ok(!outside.events.some((e) => e.type === 'call' && e.callId === callId), 'a device outside the group is not rung');
 });
+
+test('each device in a device group has its own unread count, and ticks wait for all of them', async () => {
+  const pc = await connectUser(server.base, 'reads');
+  const phone = await connectUser(server.base, 'reads');
+  const tablet = await connectUser(server.base, 'reads');
+  await Promise.all([pc.socket(), phone.socket(), tablet.socket()]);
+  const { chat } = await pc.call('POST', '/api/chats/device-group', { name: 'Home', deviceIds: [phone.deviceId, tablet.deviceId] });
+  const view = async (user) => (await user.call('GET', `/api/chats/${chat.id}`)).chat;
+  const seqs = (v) => Object.fromEntries(v.peers.map((p) => [p.deviceId, [p.deliveredSeq, p.readSeq]]));
+
+  const { message } = await send(pc, chat.id, { type: 'text', text: 'to everyone' });
+  assert.equal((await view(phone)).unread, 1);
+  assert.equal((await view(tablet)).unread, 1);
+  assert.equal((await view(pc)).unread, 0, 'not unread on the device that sent it');
+  assert.deepEqual((await view(pc)).peers.map((p) => p.deviceId).sort(), [phone.deviceId, tablet.deviceId].sort());
+
+  await phone.call('POST', `/api/chats/${chat.id}/receipts`, { read: message.seq });
+  assert.equal((await view(phone)).unread, 0);
+  assert.equal((await view(tablet)).unread, 1, "reading on the phone doesn't read it on the tablet");
+  assert.deepEqual(seqs(await view(pc)), { [phone.deviceId]: [message.seq, message.seq], [tablet.deviceId]: [0, 0] });
+  await pc.waitFor((e) => e.type === 'chat' && e.chat.id === chat.id && e.chat.peers?.some((p) => p.deviceId === phone.deviceId && p.readSeq === message.seq));
+
+  // A reply from the tablet is unread on the two others.
+  const { message: reply } = await send(tablet, chat.id, { type: 'text', text: 'back' });
+  assert.equal(reply.senderDevice, tablet.deviceId);
+  assert.equal((await view(pc)).unread, 1);
+  assert.equal((await view(phone)).unread, 1);
+  assert.equal((await view(tablet)).unread, 0);
+
+  // A logged-out device no longer counts for the ticks.
+  await pc.call('DELETE', `/api/devices/${tablet.deviceId}`);
+  assert.deepEqual((await view(pc)).peers.map((p) => p.deviceId), [phone.deviceId]);
+});

@@ -115,7 +115,7 @@ function deleteDialog(m, chat) {
     render();
     return;
   }
-  const mine = A.isMe(m.senderId);
+  const mine = A.sentHere(m, chat);
   const asAdmin = A.isGroupish(chat) && chat.me.role === 'admin' && !chat.me.left;
   const forEveryone = m.kind === 'msg' && !m.deletedAt && !chat.me.left
     && ((mine && Date.now() - m.createdAt < (S.limits.deleteWindowSeconds || 0) * 1000) || (!mine && asAdmin));
@@ -142,7 +142,7 @@ export function messageMenu(m, chat, anchor) {
   m = latest(m);
   const res = A.contentOf(m);
   const c = res?.ok;
-  const mine = A.isMe(m.senderId);
+  const mine = A.sentHere(m, chat);
   const live = m.kind === 'msg' && !m.pending && !m.failed && !m.deletedAt && c && !['deleted', 'opened'].includes(c.type);
   const active = !chat.me.left;
   const mayPin = active && (!A.isGroupish(chat) || !chat.adminsOnlyEdit || chat.me.role === 'admin');
@@ -412,7 +412,7 @@ function mentionMap(c) {
 function messageRow(m, chat, flags) {
   const res = A.contentOf(m);
   if (m.kind === 'system') return h('div', { class: 'system-msg' }, A.systemText(m, res.ok));
-  const mine = A.isMe(m.senderId);
+  const mine = A.sentHere(m, chat);
   const c = res?.ok;
   const parts = [];
   let mediaOnly = false;
@@ -542,7 +542,7 @@ function rowSig(m, chat, flags) {
   return JSON.stringify([
     A.contentKey(m), res ? (res.ok ? 1 : res.error ? 2 : 0) : 0, m.kind === 'system' ? m.payload : 0, historyOffer(res),
     m.reactions, m.votes, m.starred, m.opened, m.pending, m.failed, m.deletedAt, m.payload === null,
-    A.isMe(m.senderId) ? A.tickState(m, chat) : 0,
+    A.sentHere(m, chat) ? A.tickState(m, chat) : 0,
     fs ? [!!fs.url, fs.progress === undefined ? -1 : Math.round(fs.progress * 40), fs.error || ''] : 0,
     up === undefined ? -1 : Math.round(up * 40),
     flags, chat.me.left, chat.me.role, canSend(chat)?.text || '',
@@ -620,18 +620,19 @@ function renderMessages(chat) {
       used.add(key);
       nodes.push(v.rows.get(key, dayLabel(m.createdAt), () => h('div', { class: 'day' }, dayLabel(m.createdAt))));
     }
-    if (unread && !unreadShown && m.seq > unread.seq && m.kind === 'msg' && !A.isMe(m.senderId) && !m.pending) {
+    if (unread && !unreadShown && m.seq > unread.seq && m.kind === 'msg' && !A.sentHere(m, chat) && !m.pending) {
       unreadShown = true;
       used.add('unread');
       const label = `${unread.count} unread message${unread.count === 1 ? '' : 's'}`;
       nodes.push(v.rows.get('unread', label, () => h('div', { class: 'day unread-marker' }, label)));
     }
-    const first = !prev || prev.kind === 'system' || prev.senderId !== m.senderId || new Date(prev.createdAt).toDateString() !== day;
-    const flags = { first, showName: first && A.showsSender(chat) && !A.isMe(m.senderId) && m.kind === 'msg', search: term };
+    // In a device chat or device group a message from another of your devices
+    // starts a new run even though the sender is you on both.
+    const sameSender = prev && prev.senderId === m.senderId && (!chat.devices || prev.senderDevice === m.senderDevice);
+    const first = !prev || prev.kind === 'system' || !sameSender || new Date(prev.createdAt).toDateString() !== day;
+    const flags = { first, showName: first && A.showsSender(chat) && !A.sentHere(m, chat) && m.kind === 'msg', search: term };
     // In a device group, say which of your devices sent it.
-    if (A.isDeviceGroup(chat) && m.kind === 'msg' && m.senderDevice && m.senderDevice !== S.device.id && (first || prev.senderDevice !== m.senderDevice)) {
-      flags.device = A.ownDevice(m.senderDevice)?.name || 'A logged-out device';
-    }
+    if (first && A.isDeviceGroup(chat) && m.kind === 'msg' && m.senderDevice && !A.sentHere(m, chat)) flags.device = A.senderName(m, chat);
     used.add(m.id);
     nodes.push(v.rows.get(m.id, rowSig(m, chat, flags), () => messageRow(m, chat, flags)));
     prev = m;
@@ -640,7 +641,7 @@ function renderMessages(chat) {
 
   const fromBottom = el.scrollHeight - el.scrollTop;
   const firstId = list.find((m) => !m.pending)?.id || null;
-  const newer = list.filter((m) => m.seq > v.lastSeq && m.kind === 'msg' && !A.isMe(m.senderId)).length;
+  const newer = list.filter((m) => m.seq > v.lastSeq && m.kind === 'msg' && !A.sentHere(m, chat)).length;
   v.lastSeq = Math.max(v.lastSeq, ...list.map((m) => m.seq || 0));
   if (!v.atBottom && newer) v.newCount += newer;
   reconcile(el, nodes);

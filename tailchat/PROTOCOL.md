@@ -423,6 +423,22 @@ neither do view once messages. A call in a device group rings its other
 logged-in devices (up to 7). History sharing (§9) never copies a
 device group to another device.
 
+#### Read state in device chats and device groups
+
+Every end of a device chat or device group is the same member, so these
+chats keep read state per device. Their view, as each device gets it, has
+`me.readSeq` and `unread` for that device (counting messages whose
+`senderDevice` is another device), and `peers`, one
+`{deviceId, deliveredSeq, readSeq}` for each of the chat's other devices that
+is still logged in. The ticks on your messages follow `peers`: read once all
+of them have read it, delivered once all of them have it. A device that gets
+its first pointers after the chat already had messages starts from the newest
+one, so it never sees old messages as unread. `POST /api/chats/:id/receipts`
+moves the calling device's pointers and sends each of the chat's devices its
+new view instead of a `receipt` event. Clients put a message on the right when
+its `senderDevice` is the device they run on and on the left when another
+device sent it. Every other chat's view has `peers: null`.
+
 ### Machines
 
 Each of your machines on the tailnet is listed as a chat, including machines

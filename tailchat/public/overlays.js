@@ -389,6 +389,7 @@ async function runExport(chat, media) {
 // ---------- message details ----------
 
 export function messageInfo(m, chat) {
+  if (Array.isArray(chat.devices)) return deviceMessageInfo(m, chat);
   const others = chat.members.filter((x) => !x.left && !isMe(x.userId) && x.joinedSeq < m.seq);
   const read = others.filter((x) => x.readSeq >= m.seq);
   const delivered = others.filter((x) => x.readSeq < m.seq && x.deliveredSeq >= m.seq);
@@ -410,6 +411,25 @@ export function messageInfo(m, chat) {
       section('Not delivered yet', 'check', waiting),
       !others.length ? h('p', { class: 'empty' }, 'Nobody else was in this chat when you sent it.') : null,
       chat.type === 'direct' && delivered.length && !read.length ? h('p', { class: 'muted card' }, 'If read receipts are turned off on either side, messages show as delivered only.') : null,
+    ],
+  });
+}
+
+// In a device chat or device group, the receipts are your other devices'.
+function deviceMessageInfo(m, chat) {
+  const peers = (chat.peers || []).map((p) => ({ ...p, name: ownDevice(p.deviceId)?.name || 'Your other device' }));
+  const section = (title, iconName, list) => (list.length
+    ? [h('div', { class: 'list-section' }, icon(iconName), ` ${title}`), list.map((p) => h('div', { class: 'menu-row' }, icon('devices'), h('div', { class: 'grow' }, p.name)))]
+    : null);
+  dialog({
+    title: 'Message info',
+    flush: true,
+    content: [
+      h('div', { class: 'card' }, h('div', { class: 'muted' }, `Sent ${dayLabel(m.createdAt)} at ${timeOf(m.createdAt)}`), h('div', null, previewText(m))),
+      section('Read on', 'checks', peers.filter((p) => p.readSeq >= m.seq)),
+      section('Delivered to', 'checks', peers.filter((p) => p.readSeq < m.seq && p.deliveredSeq >= m.seq)),
+      section('Not delivered yet', 'check', peers.filter((p) => p.deliveredSeq < m.seq)),
+      !peers.length ? h('p', { class: 'empty' }, 'None of your other devices in this chat are logged in.') : null,
     ],
   });
 }
