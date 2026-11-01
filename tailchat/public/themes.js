@@ -20,43 +20,43 @@ export const PRESETS = [
   {
     id: 'tailscale',
     name: 'Tailscale',
-    light: p('#4b70cc', '#3f5db3', '#ffffff', '#f7f5f4', '#faf9f8', '#dde7fb', '#ffffff', '#232222', '#706e6d'),
-    dark: p('#3f5db3', '#6c94ec', '#1f1e1e', '#232222', '#181717', '#2a3e75', '#2e2d2d', '#faf9f8', '#afacab'),
+    light: p('#4b70cc', '#3f5db3', '#ffffff', '#f7f5f4', '#f4f3f2', '#4b70cc', '#ffffff', '#232222', '#706e6d'),
+    dark: p('#3f5db3', '#6c94ec', '#1f1e1e', '#232222', '#181717', '#3f5db3', '#2e2d2d', '#faf9f8', '#afacab'),
   },
   {
     id: 'ocean',
     name: 'Ocean',
-    light: p('#0e7c86', '#0b6870', '#ffffff', '#f1f6f7', '#e9f2f3', '#cdeef0', '#ffffff', '#10272b', '#56696d'),
+    light: p('#0e7c86', '#0b6870', '#ffffff', '#f1f6f7', '#e9f2f3', '#0e7c86', '#ffffff', '#10272b', '#56696d'),
     dark: p('#1aa3ad', '#4fc3cc', '#0f1d21', '#16282d', '#0b171a', '#13505a', '#1d3238', '#e6f1f2', '#8fa7ab'),
   },
   {
     id: 'forest',
     name: 'Forest',
-    light: p('#2f7d4f', '#276b43', '#ffffff', '#f2f5f1', '#ecf1ea', '#d6ecd2', '#ffffff', '#1b261d', '#5a695c'),
+    light: p('#2f7d4f', '#276b43', '#ffffff', '#f2f5f1', '#ecf1ea', '#2f7d4f', '#ffffff', '#1b261d', '#5a695c'),
     dark: p('#3f9d63', '#6cc58f', '#141c16', '#1a251d', '#101712', '#24513a', '#222e25', '#e8efe8', '#9aab9d'),
   },
   {
     id: 'sunset',
     name: 'Sunset',
-    light: p('#c94f24', '#a8421d', '#ffffff', '#fbf4ef', '#f8eee6', '#fbd9c6', '#ffffff', '#2b1d17', '#735f55'),
+    light: p('#c94f24', '#a8421d', '#ffffff', '#fbf4ef', '#f8eee6', '#c94f24', '#ffffff', '#2b1d17', '#735f55'),
     dark: p('#e8703f', '#f39a6e', '#1e1714', '#261d19', '#181210', '#6a3320', '#2e2420', '#f6ece6', '#b39d92'),
   },
   {
     id: 'grape',
     name: 'Grape',
-    light: p('#7552c7', '#6545b0', '#ffffff', '#f6f3fb', '#f1edf8', '#e2d8f7', '#ffffff', '#221b2e', '#675f75'),
+    light: p('#7552c7', '#6545b0', '#ffffff', '#f6f3fb', '#f1edf8', '#7552c7', '#ffffff', '#221b2e', '#675f75'),
     dark: p('#8a67dc', '#b49cf0', '#1a1622', '#211c2b', '#14111a', '#43326e', '#2a2436', '#efeaf7', '#a79fb6'),
   },
   {
     id: 'rose',
     name: 'Rose',
-    light: p('#c43d6e', '#a8325d', '#ffffff', '#fbf2f5', '#f8ecf0', '#f8d4e1', '#ffffff', '#2c1a21', '#755c64'),
+    light: p('#c43d6e', '#a8325d', '#ffffff', '#fbf2f5', '#f8ecf0', '#c43d6e', '#ffffff', '#2c1a21', '#755c64'),
     dark: p('#d9578a', '#f08bb0', '#1f1519', '#281c21', '#181013', '#64263f', '#30232a', '#f7eaef', '#b69ba5'),
   },
   {
     id: 'graphite',
     name: 'Graphite',
-    light: p('#1f1f1f', '#1f1f1f', '#ffffff', '#f2f2f2', '#ebebeb', '#d9d9d9', '#ffffff', '#000000', '#555555'),
+    light: p('#1f1f1f', '#1f1f1f', '#ffffff', '#f2f2f2', '#ebebeb', '#1f1f1f', '#ffffff', '#000000', '#555555'),
     dark: p('#f2f2f2', '#ffffff', '#000000', '#141414', '#0a0a0a', '#333333', '#1c1c1c', '#ffffff', '#a6a6a6'),
   },
 ];
@@ -152,12 +152,15 @@ export function readability(palette) {
   const checks = [
     ['text', 'panel', 4.5, 'Text on the background'],
     ['muted', 'panel', 3, 'Secondary text on the background'],
-    ['text', 'out', 4.5, 'Text in your messages'],
     ['text', 'in', 4.5, 'Text in their messages'],
     ['primary', 'panel', 3, 'Links on the background'],
     ['text', 'header', 4.5, 'Text on the bars'],
   ];
-  return checks.filter(([a, b, min]) => contrast(palette[a], palette[b]) < min).map(([a, b, , label]) => ({ keys: [a, b], label }));
+  const problems = checks.filter(([a, b, min]) => contrast(palette[a], palette[b]) < min).map(([a, b, , label]) => ({ keys: [a, b], label }));
+  // Your messages get black or white text, whichever reads better, so only a
+  // mid-grey bubble can't be read.
+  if (contrast(palette.out, textOn(palette.out)) < 4.5) problems.push({ keys: ['out'], label: 'Text in your messages' });
+  return problems;
 }
 
 // Puts a palette on the page.
@@ -167,6 +170,10 @@ export function paint(palette, mode) {
   for (const [key, cssVar] of KEYS) root.style.setProperty(cssVar, palette[key]);
   root.style.setProperty('--on-accent', textOn(palette.accent));
   root.style.setProperty('--on-primary', textOn(palette.primary));
+  // Text and ticks in your own bubbles, which can be any colour.
+  const onOut = textOn(palette.out);
+  root.style.setProperty('--on-out', onOut);
+  root.style.setProperty('--tick-out', contrast(palette.primary, palette.out) >= 3 ? palette.primary : onOut);
   // The logo's bubble is white, so a very light accent gets a grey logo.
   root.style.setProperty('--logo', contrast(palette.accent, '#ffffff') >= 2 ? palette.accent : '#444342');
   const meta = document.querySelector('meta[name="theme-color"]');

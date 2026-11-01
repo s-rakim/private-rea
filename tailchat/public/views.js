@@ -12,6 +12,7 @@ import { renderDetails, starredRow, inviteDialog, addMembers, deactivateCommunit
 
 const slots = new Slots();
 let root;
+let railEl;
 let sidebarEl;
 let mainEl;
 let convEl;
@@ -39,6 +40,12 @@ function tickIcon(state) {
   const map = { pending: ['clock', ''], failed: ['info', 'danger'], read: ['checks', 'read'], delivered: ['checks', ''], sent: ['check', ''] };
   const [name, cls] = map[state] || map.sent;
   return h('span', { class: `tick ${cls}` }, icon(name));
+}
+
+// An avatar with a green dot when that person or device is online.
+function presenceAvatar(av, online) {
+  const el = avatar(av, 'md');
+  return online ? h('div', { class: 'av-wrap' }, el, h('span', { class: 'presence', title: 'Online' })) : el;
 }
 
 function ringAvatar(user, seen, size = 'md') {
@@ -81,6 +88,7 @@ function chatRowData(chat, title) {
     tick: last && last.kind === 'msg' && A.sentHere(last, chat) && !last.deletedAt ? A.tickState(last, chat) : null,
     prefix: last && (A.showsSender(chat) || A.isDeviceGroup(chat)) && last.kind === 'msg' && !last.deletedAt && !A.sentHere(last, chat) ? `${A.senderName(last, chat)}: ` : '',
     preview: last ? A.previewText(last) : A.isGroupish(chat) || A.isDeviceGroup(chat) ? 'No messages yet' : A.isDeviceChat(chat) ? 'Send messages and files to this device' : '',
+    online: chat.type === 'direct' && !A.isMe(A.otherMember(chat)) && !!S.users.get(A.otherMember(chat))?.online,
     unread: chat.unread,
     marked: chat.me.markedUnread,
     muted: chat.me.mutedUntil > Date.now(),
@@ -102,7 +110,7 @@ function chatRow(chat, title) {
     return h(
       'div',
       {
-        class: `row${d.selected ? ' selected' : ''}`,
+        class: `row chat-row${d.selected ? ' selected' : ''}${(d.unread || d.marked) && !d.muted ? ' unread' : ''}`,
         onclick: () => {
           S.panel = null;
           A.openChat(chat.id);
@@ -112,7 +120,7 @@ function chatRow(chat, title) {
           chatMenu(S.chats.get(chat.id) || chat, { x: e.clientX, y: e.clientY });
         },
       },
-      avatar(d.av, 'md'),
+      presenceAvatar(d.av, d.online),
       h(
         'div',
         { class: 'body' },
@@ -147,7 +155,7 @@ function machineRow(m) {
         A.openMachine(m.id);
       },
     },
-    avatar({ id: m.id, name: d.name }, 'md'),
+    presenceAvatar({ id: m.id, name: d.name }, d.seen === 'online'),
     h(
       'div',
       { class: 'body' },
@@ -330,7 +338,7 @@ function chatsTab() {
     waiting,
     banner,
     h('div', { class: 'list' }, list),
-    h('button', { type: 'button', class: 'fab', 'aria-label': 'New chat', title: 'New chat', onclick: () => openPanel('new-chat') }, icon('chat')),
+    h('button', { type: 'button', class: 'fab list-fab', 'aria-label': 'New chat', title: 'New chat', onclick: () => openPanel('new-chat') }, icon('edit')),
   ];
 }
 
@@ -745,18 +753,20 @@ async function logout() {
   location.reload();
 }
 
+const VIEW_TITLES = { chats: 'Chats', status: 'Updates', communities: 'Communities', calls: 'Calls' };
+const SETTINGS_PANELS = new Set(['settings', 'profile', 'privacy', 'chat-settings', 'themes', 'theme-editor', 'notifications', 'help']);
+
+// The heading over the list: the section's name and what you can start there.
 function topbar() {
-  const unseen = [...S.statuses.values()].some((s) => !s.seen && !A.isMe(s.userId));
-  const sig = JSON.stringify([S.me, S.online, unseen]);
+  const sig = JSON.stringify([S.view, S.online]);
   return slots.get('topbar', sig, () => {
     let more;
     return h(
       'header',
-      { class: 'topbar' },
-      h('button', { type: 'button', class: 'avatar-btn', 'aria-label': 'Profile', onclick: () => openPanel('profile') }, avatar(S.me)),
-      h('div', { class: 'title' }, h('div', { class: 'name' }, 'Tailchat'), h('div', { class: 'sub' }, S.online ? S.me.id : 'Connecting…')),
-      iconButton('group', 'New group', () => startNewGroup()),
-      iconButton('chat', 'New chat', () => openPanel('new-chat')),
+      { class: 'topbar list-head' },
+      h('div', { class: 'title' }, h('h1', { class: 'view-title' }, VIEW_TITLES[S.view] || 'Chats'), S.online ? null : h('div', { class: 'sub' }, 'Connecting…')),
+      S.view === 'chats' ? iconButton('group', 'New group', () => startNewGroup()) : null,
+      S.view === 'chats' ? iconButton('edit', 'New chat', () => openPanel('new-chat')) : null,
       (more = iconButton('more', 'Menu', () => menu(more, [
         { label: 'New group', icon: 'group', onClick: () => startNewGroup() },
         { label: 'New community', icon: 'community', onClick: newCommunity },
@@ -772,7 +782,8 @@ function topbar() {
   });
 }
 
-function tabs() {
+// Unread chats, unseen updates and missed calls, for the badges on the rail.
+function navCounts() {
   let unread = 0;
   let channelUnread = false;
   for (const c of S.chats.values()) {
@@ -782,23 +793,53 @@ function tabs() {
   }
   const unseen = channelUnread || [...S.statuses.values()].some((s) => !s.seen && !A.isMe(s.userId));
   const missed = S.calls.filter((c) => !c.answeredAt && !A.isMe(c.callerId) && c.startedAt > (S.prefs.callsSeenAt || 0)).length;
-  return slots.get('tabs', JSON.stringify([S.view, unread, unseen, missed]), () => {
-    const tab = (view, label, badge) => h('button', {
-      type: 'button',
-      class: `tab${S.view === view ? ' active' : ''}`,
-      onclick: () => {
-        if (view === 'calls') A.savePrefs({ callsSeenAt: Date.now() });
-        setView(view);
-      },
-    }, label, badge);
-    return h(
-      'nav',
-      { class: 'tabs' },
-      tab('chats', 'Chats', unread ? h('span', { class: 'badge' }, String(unread)) : null),
-      tab('status', 'Updates', unseen ? h('span', { class: 'badge dot' }) : null),
-      tab('communities', 'Communities'),
-      tab('calls', 'Calls', missed ? h('span', { class: 'badge' }, String(missed)) : null),
+  return { unread, unseen, missed };
+}
+
+function logoMark() {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 64 64');
+  svg.setAttribute('aria-hidden', 'true');
+  const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+  use.setAttribute('href', '/icon.svg#mark');
+  svg.append(use);
+  return svg;
+}
+
+// The navigation: a rail down the left on a computer, a tab bar along the
+// bottom on a phone.
+function rail() {
+  const { unread, unseen, missed } = navCounts();
+  const sig = JSON.stringify([S.view, S.panel, unread, unseen, missed, S.me, S.online]);
+  return slots.get('rail', sig, () => {
+    const item = (iconName, label, onClick, active, badge = null, extra = '') => h(
+      'button',
+      { type: 'button', class: `rail-item${active ? ' active' : ''}${extra}`, title: label, 'aria-current': active ? 'page' : null, onclick: onClick },
+      h('span', { class: 'rail-icon' }, icon(iconName), badge),
+      h('span', { class: 'rail-label' }, label),
     );
+    const view = (v, iconName, label, badge) => item(iconName, label, () => {
+      if (v === 'calls') A.savePrefs({ callsSeenAt: Date.now() });
+      setView(v);
+    }, !S.panel && S.view === v, badge);
+    const count = (n) => (n ? h('span', { class: 'badge' }, n > 99 ? '99+' : String(n)) : null);
+    return [
+      h('div', { class: 'rail-logo', title: 'Tailchat' }, logoMark()),
+      view('chats', 'chat', 'Chats', count(unread)),
+      view('status', 'status', 'Updates', unseen ? h('span', { class: 'badge dot' }) : null),
+      view('communities', 'community', 'Communities'),
+      view('calls', 'phone', 'Calls', count(missed)),
+      h('div', { class: 'rail-spacer' }),
+      item('star', 'Starred', () => openPanel('starred'), S.panel === 'starred', null, ' rail-extra'),
+      item('devices', 'Devices', () => openPanel('devices'), S.panel === 'devices', null, ' rail-extra'),
+      item('settings', 'Settings', () => openPanel('settings'), SETTINGS_PANELS.has(S.panel)),
+      h(
+        'button',
+        { type: 'button', class: 'rail-me rail-extra', 'aria-label': 'Profile', title: `${S.me.name} · ${S.online ? 'online' : 'connecting…'}`, onclick: () => openPanel('profile') },
+        avatar(S.me, 'sm'),
+        h('span', { class: `presence${S.online ? '' : ' away'}` }),
+      ),
+    ];
   });
 }
 
@@ -1098,7 +1139,7 @@ function themeSwatch(pal) {
     { class: 'theme-swatch', style: { background: pal.chat } },
     h('div', { class: 'bar', style: { background: pal.header } }, h('span', { class: 'dot', style: { background: pal.accent } })),
     h('div', { class: 'msg in', style: { background: pal.in } }, h('span', { style: { background: pal.text } })),
-    h('div', { class: 'msg out', style: { background: pal.out } }, h('span', { style: { background: pal.text } })),
+    h('div', { class: 'msg out', style: { background: pal.out } }, h('span', { style: { background: T.textOn(pal.out) } })),
   );
 }
 
@@ -1451,7 +1492,7 @@ function renderSidebar() {
     else if (S.view === 'communities') body = communitiesTab();
     else if (S.view === 'calls') body = callsTab();
     else body = chatsTab();
-    nodes = [topbar(), tabs(), body];
+    nodes = [topbar(), body];
   }
   reconcile(sidebarEl, nodes);
 }
@@ -1459,20 +1500,20 @@ function renderSidebar() {
 // ---------- shell ----------
 
 function welcome() {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', '0 0 64 64');
-  svg.setAttribute('width', '96');
-  svg.setAttribute('height', '96');
-  const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-  use.setAttribute('href', '/icon.svg#mark');
-  svg.append(use);
+  const tip = (iconName, title, text) => h('div', { class: 'tip' }, h('span', { class: 'tip-icon' }, icon(iconName)), h('div', null, h('div', { class: 'tip-title' }, title), h('div', { class: 'muted small' }, text)));
   return h(
     'div',
     { class: 'welcome' },
-    svg,
+    h('div', { class: 'welcome-logo' }, logoMark()),
     h('h1', null, 'Tailchat'),
     h('p', null, 'Message, call and share files with people on your tailnet.'),
-    h('p', null, 'Open Tailchat on your other devices to use it there too.'),
+    h(
+      'div',
+      { class: 'tips' },
+      tip('edit', 'Start a chat', 'Anyone signed in to your tailnet can be messaged.'),
+      tip('devices', 'Use it everywhere', 'Open Tailchat on your other devices to chat from them too.'),
+      tip('phone', 'Call over the tailnet', 'Voice and video go device to device.'),
+    ),
     h('div', { class: 'lock' }, icon('lock'), 'Your personal messages are end-to-end encrypted'),
   );
 }
@@ -1524,6 +1565,7 @@ function update() {
     }
   }
   root.classList.toggle('chat-open', !!chat || !!machine);
+  reconcile(railEl, [rail()]);
   renderSidebar();
   reconcile(mainEl, [chat ? convEl : machine ? machinePane(machine) : welcomeEl, chat && S.details ? detailsEl : null]);
   if (chat) renderConversation(convEl, chat);
@@ -1542,12 +1584,13 @@ function onKey(e) {
 
 export function mount() {
   root = document.getElementById('app');
+  railEl = h('nav', { class: 'rail', 'aria-label': 'Sections' });
   sidebarEl = h('aside', { class: 'sidebar' });
   mainEl = h('section', { class: 'main' });
   convEl = h('div', { class: 'conversation' });
   detailsEl = h('aside', { class: 'details' });
   welcomeEl = welcome();
-  root.replaceChildren(sidebarEl, mainEl);
+  root.replaceChildren(railEl, sidebarEl, mainEl);
   A.onRender(update);
   document.addEventListener('keydown', onKey);
   // Files dropped on the open chat go to the attach dialog.
