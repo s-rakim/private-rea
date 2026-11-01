@@ -14,7 +14,18 @@ const defaultState: Nicknames = {
 }
 
 export function getLocalNickname() {
-  return localStorage && localStorage.nickname || nickname
+  return nicknameFromLink() || localStorage && localStorage.nickname || nickname
+}
+
+// Tailchat: the app opens a call as /call/<room>#name=<this device's name>,
+// so the name box starts with it. The fragment never reaches the server.
+function nicknameFromLink(): string {
+  try {
+    const name = new URLSearchParams(window.location.hash.slice(1)).get('name')
+    return (name || '').trim().slice(0, 60)
+  } catch {
+    return ''
+  }
 }
 
 function removeNickname(

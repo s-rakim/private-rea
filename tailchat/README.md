@@ -15,9 +15,10 @@ The compose file runs three containers. A Tailscale container joins your
 tailnet as its own machine and serves `https://tailchat.<your-tailnet>.ts.net`
 with a real certificate. The Tailchat container shares its network, so
 `tailscale serve` reaches it on `127.0.0.1` and tells it who each visitor is.
-The calls container runs [peer-calls](https://github.com/peer-calls/peer-calls)
-for voice and video calls, served on port 3443 of the same name. Nothing is
-published on the Docker host, and Funnel stays off.
+The calls container runs voice and video calls, served on port 3443 of the
+same name. It is built on your machine from the
+[peer-calls](https://github.com/peer-calls/peer-calls) source kept in
+`calls/`. Nothing is published on the Docker host, and Funnel stays off.
 
 1. In the [Tailscale admin console](https://login.tailscale.com/admin/dns),
    turn on **MagicDNS** and **HTTPS certificates**.
@@ -60,14 +61,18 @@ setting. Set `TAILCHAT_TAILNET=off` in `.env` to turn the machine list off.
 ### Calls
 
 Calling a chat, or one of your devices from the Calls tab, rings the other
-side in Tailchat. Each device that picks up joins the call's room on
-peer-calls, which opens inside the app. The first time on each device the room
-asks for a name to show and which camera and microphone to use, then remembers
-them. The link button above the call opens the room in its own window.
+side in Tailchat. Each device that picks up joins the call's room in the calls
+container, which opens inside the app. The room fills in the device's name;
+the first time on each device it asks which camera and microphone to use, then
+remembers them. The link button above the call opens the room in its own
+window.
 
-peer-calls only passes call setup between the browsers. The audio and video go
-device to device over WebRTC on your tailnet addresses, and no public STUN or
-TURN server is used. The room runs on its own port, so it is a separate site
+Everything about a call stays on your server and tailnet. The calls container
+only passes call setup between the browsers, and the audio and video go device
+to device over WebRTC on your tailnet addresses. No STUN or TURN server is
+used, public or otherwise, and the container never contacts anything outside.
+It is built from the source in `calls/` by `docker compose up --build`, which
+downloads its open source libraries (npm and Go modules) once while building. The room runs on its own port, so it is a separate site
 from Tailchat and can't read Tailchat's keys or messages. Each call gets a
 random room that only the devices that were rung know.
 
@@ -221,8 +226,8 @@ private key to itself. A message is sealed with a fresh AES-256-GCM key, which
 is wrapped for every device of every member. Files are encrypted in 1 MiB
 chunks before upload. With the built-in calls, call setup is sealed the same
 way, so the server can't put itself in the middle of a call. Calls through
-peer-calls (the Docker default) set up through your own peer-calls container
-instead, on your tailnet only. The full design is in
+the calls container (the Docker default) set up through that container
+instead, on your own server and tailnet only. The full design is in
 [PROTOCOL.md](PROTOCOL.md).
 
 Every device key the app sees is pinned to its owner. When someone you talk to

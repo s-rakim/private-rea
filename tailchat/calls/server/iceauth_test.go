@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/peer-calls/peer-calls/v4/server"
@@ -31,4 +32,13 @@ func TestGetICEAuthServers(t *testing.T) {
 	assert.Equal(t, s2.URLs, r2.URLs)
 	assert.Regexp(t, "^[0-9]+:test$", r2.Username)
 	assert.NotEmpty(t, r2.Credential)
+}
+
+// Tailchat: no ICE servers must reach the browser as [], never null.
+func TestGetICEAuthServersEmpty(t *testing.T) {
+	result := server.GetICEAuthServers(nil)
+	assert.NotNil(t, result)
+	data, err := json.Marshal(result)
+	assert.NoError(t, err)
+	assert.Equal(t, "[]", string(data))
 }

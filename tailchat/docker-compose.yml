@@ -19,8 +19,8 @@
 # tailscale container, read-only, over the tailscaled socket the two
 # containers share (the tailscale-socket volume).
 #
-# Voice and video calls run on peer-calls (the calls container), served at
-# https://tailchat.<your-tailnet>.ts.net:3443. Tailchat rings your devices and
+# Voice and video calls run on the calls container, built from the peer-calls
+# source in ./calls and served at https://tailchat.<your-tailnet>.ts.net:3443. Tailchat rings your devices and
 # opens the call's room inside the app; the room connects the devices to each
 # other with WebRTC, directly across the tailnet. To keep calls built into
 # Tailchat instead, set TAILCHAT_CALLS_PORT=0 in .env.
@@ -88,13 +88,15 @@ services:
     pids_limit: 256
     restart: unless-stopped
 
-  # peer-calls (Apache-2.0, https://github.com/peer-calls/peer-calls), only
-  # reachable through tailscale serve on port 3443. It only passes call setup
-  # between browsers ("mesh"); the audio and video go device to device. No
-  # STUN or TURN servers: your devices reach each other on their tailnet
-  # addresses, so nothing about a call leaves the tailnet.
+  # The call service: peer-calls (Apache-2.0), built here from its source in
+  # ./calls, so no outside image is used. Only reachable through tailscale
+  # serve on port 3443. It only passes call setup between browsers ("mesh");
+  # the audio and video go device to device. No STUN or TURN servers: your
+  # devices reach each other on their tailnet addresses, so nothing about a
+  # call leaves the tailnet.
   calls:
-    image: ghcr.io/peer-calls/peer-calls:4.2.7
+    build: ./calls
+    image: tailchat-calls:latest
     network_mode: service:tailscale
     depends_on:
       tailscale:
@@ -105,10 +107,8 @@ services:
       PEERCALLS_BIND_PORT: "3000"
       PEERCALLS_NETWORK_TYPE: mesh
       PEERCALLS_STORE_TYPE: memory
-      # No public STUN servers (the default asks Google's). peer-calls breaks
-      # with an empty list, so this names one on loopback that goes nowhere;
-      # devices still find each other by their own tailnet addresses.
-      PEERCALLS_ICE_SERVER_URLS: stun:127.0.0.1:3478
+      # Empty: no STUN or TURN servers at all.
+      PEERCALLS_ICE_SERVER_URLS: ""
     user: "65534:65534"
     read_only: true
     security_opt:

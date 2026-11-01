@@ -9,6 +9,9 @@ import (
 )
 
 func GetICEAuthServers(servers []ICEServer) (result []ICEAuthServer) {
+	// Tailchat: an empty list must reach the browser as [], not null, which
+	// RTCPeerConnection rejects.
+	result = []ICEAuthServer{}
 	for _, server := range servers {
 		result = append(result, newICEServer(server))
 	}

@@ -744,11 +744,14 @@ export const ownDevice = (id) => S.ownDevices.find((d) => d.id === id);
 
 // A call's room on the call service: same host, the service's own port, so
 // the room is another origin and can't reach this page's keys. The call id
-// is random, so only the devices that were rung know the room.
+// is random, so only the devices that were rung know the room. The room's
+// name box starts with this device's name, passed in the fragment, which
+// never reaches the server.
 export function callRoom(callId) {
   const port = Number(S.callService?.port);
   if (!port) return null;
-  return `https://${location.hostname}:${port}/call/${encodeURIComponent(callId)}`;
+  const name = ownDevice(S.device?.id)?.name || '';
+  return `https://${location.hostname}:${port}/call/${encodeURIComponent(callId)}${name ? `#name=${encodeURIComponent(name)}` : ''}`;
 }
 
 // Who is calling: a person, or, when you call from one of your devices to

@@ -1,54 +1,28 @@
-FROM node:18.13-alpine as frontend
+# Tailchat's call service, built from the peer-calls source in this folder
+# (see README.md). docker compose builds it on your own machine; the running
+# container needs nothing from outside your tailnet.
 
-# Add dependency instructions and fetch node_modules
-COPY package.json package-lock.json /src/
+# The full Node image comes with git, which npm needs: one dependency
+# (simple-peer) is a git checkout.
+FROM node:22-bookworm AS frontend
 WORKDIR /src
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY . .
+RUN npm run build
 
-RUN set -ex \
- && apk add --no-cache \
-      git \
- && npm ci
-
-# Add the application itself
-COPY ./ /src/
-
-RUN set -ex \
- && npm run build
-
-
-FROM golang:1.19.5-alpine as server
-
+FROM golang:1.24-alpine AS server
 ENV CGO_ENABLED=0
-
-RUN set -ex \
- && apk add --no-cache \
-      git
-
-# Add dependencies into mod cache
-COPY go.mod go.sum /src/
 WORKDIR /src
-
-RUN set -ex \
- && go mod download
-
-# Add the application itself and build it
-COPY                  ./          /src/
-COPY --from=frontend  /src/build/ /src/build/
-
-ARG VERSION
-
-RUN set -ex \
- && go build \
-      -ldflags "-X main.GitDescribe=$(git describe --always --tags --dirty)" \
-      -mod=readonly \
-      -o peer-calls
-
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+COPY --from=frontend /src/build/ ./build/
+RUN go build -mod=readonly -trimpath -ldflags "-s -w -X main.GitDescribe=v4.2.7-tailchat" -o peer-calls .
 
 FROM scratch
-
-COPY --from=server /src/peer-calls /usr/local/bin/
-
+COPY --from=server /src/peer-calls /usr/local/bin/peer-calls
+USER 65534:65534
 EXPOSE 3000/tcp
 STOPSIGNAL SIGINT
-
 ENTRYPOINT ["/usr/local/bin/peer-calls"]

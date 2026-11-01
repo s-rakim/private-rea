@@ -47,6 +47,14 @@ describe('reducers/nicknames', () => {
 
     afterEach(() => {
       localStorage.removeItem('nickname')
+      window.location.hash = ''
+    })
+
+    it('prefers the name in the link fragment (Tailchat)', () => {
+      localStorage.setItem('nickname', 'test')
+      const name = 'holysukuns · Chrome'
+      window.location.hash = '#name=' + encodeURIComponent(name)
+      expect(getLocalNickname()).toBe(name)
     })
 
     it('reads data from local storage, when available', () => {
