@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module Tailchat
-  # A bot account: the tailnet equivalent of a WhatsApp business/bot account.
+  # A bot account: a program that chats on your tailnet like a person does.
   #
   #   bot = Tailchat::Bot.new(server: 'https://chat.example.ts.net', state: 'weather.json', name: 'Weather bot')
   #   bot.command('/weather', description: 'Forecast for a city') { |msg, args| msg.reply("Sunny in #{args}") }

@@ -3,9 +3,10 @@
 import * as A from './app.js';
 import { S, api, render } from './app.js';
 import { kvDelete } from './api.js';
-import { h, icon, iconButton, avatar, toast, menu, dialog, confirmDialog, promptDialog, listTime, duration, reconcile, Slots, toggle } from './ui.js';
+import { h, icon, iconButton, avatar, toast, menu, dialog, confirmDialog, promptDialog, listTime, duration, lastSeenText, reconcile, Slots, toggle } from './ui.js';
 import { resizePhoto, kindFor } from './media.js';
 import * as O from './overlays.js';
+import * as T from './themes.js';
 import { renderConversation, drafts, clearChat, deleteChat, exitGroup, exitLabel, attachDialog, canSend, followChannel, openCommunity } from './conversation.js';
 import { renderDetails, starredRow, inviteDialog, addMembers, deactivateCommunity } from './details.js';
 
@@ -79,7 +80,7 @@ function chatRowData(chat, title) {
     draft: draft.slice(0, 100),
     tick: last && last.kind === 'msg' && A.isMe(last.senderId) && !last.deletedAt ? A.tickState(last, chat) : null,
     prefix: last && A.showsSender(chat) && last.kind === 'msg' && !last.deletedAt && !A.isMe(last.senderId) ? `${A.nameOf(last.senderId)}: ` : '',
-    preview: last ? A.previewText(last) : A.isGroupish(chat) ? 'No messages yet' : '',
+    preview: last ? A.previewText(last) : A.isGroupish(chat) ? 'No messages yet' : A.isDeviceChat(chat) ? 'Send messages and files to this device' : '',
     unread: chat.unread,
     marked: chat.me.markedUnread,
     muted: chat.me.mutedUntil > Date.now(),
@@ -134,6 +135,28 @@ function chatRow(chat, title) {
   });
 }
 
+// One of your machines that hasn't opened Tailchat yet, listed like a chat.
+function machineRow(m) {
+  const d = { name: m.name, seen: lastSeenText(m), selected: S.machine === m.id };
+  return slots.get(`machine:${m.id}`, JSON.stringify(d), () => h(
+    'div',
+    {
+      class: `row machine-row${d.selected ? ' selected' : ''}`,
+      onclick: () => {
+        S.panel = null;
+        A.openMachine(m.id);
+      },
+    },
+    avatar({ id: m.id, name: d.name }, 'md'),
+    h(
+      'div',
+      { class: 'body' },
+      h('div', { class: 'line' }, h('div', { class: 'name ellipsis grow' }, d.name), h('span', { class: 'time' }, d.seen === 'online' ? 'online' : '')),
+      h('div', { class: 'line' }, h('div', { class: 'preview grow' }, h('span', { class: 'ellipsis' }, 'Your device · open Tailchat on it to chat'))),
+    ),
+  ));
+}
+
 function userRow(u, onClick, sub) {
   return h(
     'div',
@@ -162,8 +185,9 @@ async function startDirect(userId) {
 function searchResults(q) {
   const nodes = [];
   const chats = sortChats([...S.chats.values()].filter((c) => A.chatTitle(c).toLowerCase().includes(q)));
-  if (chats.length) nodes.push(h('div', { class: 'list-section' }, 'Chats'), chats.map(chatRow));
-  const direct = new Set(chats.filter((c) => c.type === 'direct').map((c) => A.otherMember(c)));
+  const machines = A.machineChats().filter((m) => m.name.toLowerCase().includes(q));
+  if (chats.length || machines.length) nodes.push(h('div', { class: 'list-section' }, 'Chats'), chats.map(chatRow), machines.map(machineRow));
+  const direct = new Set(chats.filter((c) => c.type === 'direct' && !A.isDeviceChat(c)).map((c) => A.otherMember(c)));
   const people = [...S.users.values()].filter((u) => !direct.has(u.id) && (u.name.toLowerCase().includes(q) || u.id.toLowerCase().includes(q)));
   if (people.length) nodes.push(h('div', { class: 'list-section' }, 'Contacts'), people.map((u) => userRow(u, () => startDirect(u.id))));
   const hits = [];
@@ -228,6 +252,40 @@ function chatsTab() {
     iconButton('close', 'Dismiss', () => A.dismissSecurityAlerts({ devices: true })),
   )) : null;
 
+  const sharing = S.history.sharing;
+  const historyBanners = A.historyAsks().map((r) => {
+    const d = A.ownDevice(r.deviceId);
+    const busy = sharing?.deviceId === r.deviceId;
+    return slots.get(`history:${r.deviceId}`, `${d.name}:${r.updatedAt}:${busy ? sharing.count : sharing ? 'other' : ''}`, () => h(
+      'div',
+      { class: 'banner' },
+      icon('history'),
+      h(
+        'div',
+        { class: 'grow' },
+        h('div', null, busy ? `Sharing chat history with ${d.name}… ${sharing.count} messages so far` : `${d.name} is asking for your chat history`),
+        busy ? null : h('div', { class: 'muted small' }, `Linked ${listTime(d.createdAt)}. Only share it if you linked that device yourself.`),
+        busy || sharing ? null : h('button', { type: 'button', class: 'link', onclick: () => O.shareHistoryDialog(r.deviceId) }, 'Review and share'),
+      ),
+      busy ? null : iconButton('close', 'Not now', () => O.declineHistoryAsk(r.deviceId)),
+    ));
+  });
+  const mine = S.history.requests.get(S.device.id);
+  const waiting = mine?.state === 'pending' && S.prefs.historyBannerHidden !== mine.updatedAt
+    ? slots.get('history-waiting', `${mine.updatedAt}:${S.deviceCodes.get(S.device.id)}`, () => h(
+      'div',
+      { class: 'banner' },
+      icon('history'),
+      h(
+        'div',
+        { class: 'grow' },
+        h('div', null, 'Waiting for your chat history'),
+        h('div', { class: 'muted small' }, `Open Tailchat on one of your other devices and tap Review and share. This device's code is ${S.deviceCodes.get(S.device.id) || '…'}.`),
+      ),
+      iconButton('close', 'Hide', () => A.savePrefs({ historyBannerHidden: mine.updatedAt })),
+    ))
+    : null;
+
   let list;
   const q = S.search.trim().toLowerCase();
   if (q) list = searchResults(q);
@@ -238,6 +296,7 @@ function chatsTab() {
       if (S.filter === 'groups') return c.type === 'group' || c.type === 'community';
       return true;
     }));
+    const machines = S.filter === 'all' ? A.machineChats() : [];
     list = [
       archived.length && S.filter === 'all'
         ? slots.get('archived-row', `${archived.length}:${unreadArchived}`, () => h(
@@ -248,10 +307,11 @@ function chatsTab() {
         ))
         : null,
       shown.map(chatRow),
-      !shown.length
+      machines.map(machineRow),
+      !shown.length && !machines.length
         ? h('div', { class: 'empty' }, S.filter === 'unread' ? 'No unread chats' : S.filter === 'groups' ? 'No groups yet' : 'No chats yet. Start one with the new chat button.')
         : null,
-      shown.length ? h('div', { class: 'empty small' }, icon('lock'), ' Your personal messages are end-to-end encrypted') : null,
+      shown.length || machines.length ? h('div', { class: 'empty small' }, icon('lock'), ' Your personal messages are end-to-end encrypted') : null,
     ];
   }
   return [
@@ -259,6 +319,8 @@ function chatsTab() {
     q ? null : filters,
     offline,
     linkedBanner,
+    historyBanners,
+    waiting,
     banner,
     h('div', { class: 'list' }, list),
     h('button', { type: 'button', class: 'fab', 'aria-label': 'New chat', title: 'New chat', onclick: () => openPanel('new-chat') }, icon('chat')),
@@ -347,7 +409,7 @@ function newChannel() {
     content: [
       h('label', { class: 'field' }, name),
       h('label', { class: 'field' }, description),
-      h('p', { class: 'muted small' }, icon('info'), " Anyone on your tailnet can find and follow your channel. Like WhatsApp channels, posts aren't end-to-end encrypted, and followers can't see each other."),
+      h('p', { class: 'muted small' }, icon('info'), " Anyone on your tailnet can find and follow your channel. Channel posts aren't end-to-end encrypted, and followers can't see each other."),
     ],
     actions: [
       { label: 'Cancel', onClick: (close) => close() },
@@ -719,12 +781,34 @@ function newChatPanel() {
     !q ? [
       action('group', 'New group', () => startNewGroup()),
       action('broadcast', 'New broadcast', () => newBroadcast()),
-      action('link', 'Invite someone to Tailchat', () => navigator.clipboard.writeText(location.origin).then(() => toast('Tailchat address copied. Anyone on your tailnet can open it.'))),
+      action('link', 'Invite people to Tailchat', () => O.inviteToTailnetDialog(), 'Friends and family need Tailscale to reach you'),
       userRow(S.me, () => startDirect(S.me.id), 'Message yourself'),
+    ] : null,
+    !q && (S.ownDevices.length > 1 || A.machineChats().length) ? [
+      h('div', { class: 'list-section' }, 'Your devices'),
+      S.ownDevices.filter((d) => d.id !== S.device.id).map((d) => h(
+        'div',
+        { class: 'row', onclick: () => A.openDeviceChat(d.id).then(() => { S.panel = null; render(); }).catch((e) => toast(e.message)) },
+        avatar({ id: d.id, name: d.name }, 'md'),
+        h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, d.name), h('div', { class: 'preview ellipsis' }, 'Only that device and this one can read it')),
+      )),
+      A.machineChats().map((m) => h(
+        'div',
+        { class: 'row', onclick: () => { S.panel = null; A.openMachine(m.id); } },
+        avatar({ id: m.id, name: m.name }, 'md'),
+        h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, m.name), h('div', { class: 'preview ellipsis' }, "Tailchat isn't open on it yet")),
+      )),
     ] : null,
     h('div', { class: 'list-section' }, 'Contacts on Tailchat'),
     users.map((u) => userRow(u, () => startDirect(u.id))),
-    !users.length ? h('div', { class: 'empty' }, q ? 'No contacts found' : 'Nobody else on your tailnet has opened Tailchat yet. Send them your Tailchat address.') : null,
+    !users.length
+      ? h(
+        'div',
+        { class: 'empty' },
+        q ? 'No contacts found' : 'Nobody else has opened Tailchat yet. People show up here once they have.',
+        q ? null : h('div', null, h('button', { type: 'button', class: 'link', onclick: () => O.inviteToTailnetDialog() }, 'How to invite people')),
+      )
+      : null,
   ]);
 }
 
@@ -834,7 +918,8 @@ function settingsPanel() {
   return panelShell('Settings', [
     h('div', { class: 'row tall', onclick: () => openPanel('profile') }, avatar(S.me, 'md'), h('div', { class: 'body' }, h('div', { class: 'name' }, S.me.name), h('div', { class: 'preview ellipsis' }, S.me.about || S.me.id))),
     settingsRow('lock', 'Privacy', 'Last seen, read receipts, blocked contacts', () => openPanel('privacy')),
-    settingsRow('chat', 'Chats', 'Theme, enter to send', () => openPanel('chat-settings')),
+    settingsRow('theme', 'Themes', `${A.activeTheme().name} · ${MODE_LABELS[S.prefs.theme] || MODE_LABELS.system}`, () => openPanel('themes')),
+    settingsRow('chat', 'Chats', 'Enter to send', () => openPanel('chat-settings')),
     settingsRow('bell', 'Notifications', S.prefs.notifications ? 'On' : 'Off', () => openPanel('notifications')),
     settingsRow('devices', 'Linked devices', null, () => openPanel('devices')),
     settingsRow('shield', 'Security', 'How Tailchat protects your messages', () => openPanel('help')),
@@ -873,7 +958,7 @@ function profilePanel() {
         S.me.avatar && S.me.avatar.startsWith('/api/avatars/') ? { label: 'Remove photo', icon: 'delete', onClick: () => api.patch('/api/me', { avatar: null }).catch((e) => toast(e.message)) } : null,
       ]),
     }, avatar(S.me, 'lg')))),
-    h('div', { class: 'card' }, h('h3', null, 'Your name'), h('div', { class: 'editable-line', onclick: () => edit('name', 'Your name', 60) }, h('span', { class: 'grow' }, S.me.name), icon('edit')), h('p', { class: 'muted small' }, 'Everyone on your tailnet who uses Tailchat sees this name.')),
+    h('div', { class: 'card' }, h('h3', null, 'Your name'), h('div', { class: 'editable-line', onclick: () => edit('name', 'Your name', 60) }, h('span', { class: 'grow' }, S.me.name), icon('edit')), h('p', { class: 'muted small' }, 'Everyone who uses this Tailchat sees this name, including people it is shared with.')),
     h('div', { class: 'card' }, h('h3', null, 'About'), h('div', { class: 'editable-line', onclick: () => edit('about', 'About', 140, true) }, h('span', { class: 'grow' }, S.me.about || 'Hey there! I am using Tailchat.'), icon('edit'))),
     h('div', { class: 'card' }, h('h3', null, 'Tailnet login'), h('div', null, S.me.id), h('p', { class: 'muted small' }, 'Tailchat knows who you are from your Tailscale identity. There are no passwords.')),
   ], 'settings');
@@ -897,15 +982,151 @@ function privacyPanel() {
 }
 
 function chatSettingsPanel() {
-  const theme = (value, label) => h('label', { class: 'radio-row pad' }, h('input', { type: 'radio', name: 'theme', checked: S.prefs.theme === value, onchange: () => A.savePrefs({ theme: value }) }), label);
   return panelShell('Chats', [
-    h('div', { class: 'list-section' }, 'Theme'),
-    theme('system', 'System default'),
-    theme('light', 'Light'),
-    theme('dark', 'Dark'),
+    settingsRow('theme', 'Themes', `${A.activeTheme().name} · ${MODE_LABELS[S.prefs.theme] || MODE_LABELS.system}`, () => openPanel('themes')),
     h('div', { class: 'list-section' }, 'Keyboard'),
     h('div', { class: 'menu-row' }, icon('send'), h('div', { class: 'grow' }, h('div', null, 'Enter is send'), h('div', { class: 'sub' }, 'Shift+Enter adds a new line')), toggle(S.prefs.enterToSend, (on) => A.savePrefs({ enterToSend: on }), 'Enter is send')),
   ], 'settings');
+}
+
+// ---------- themes ----------
+
+const MODE_LABELS = { system: 'System default', light: 'Light', dark: 'Dark' };
+const themeEdit = { id: null, mode: 'light' };
+
+// A small picture of a theme: a bar, two messages and its accent.
+function themeSwatch(pal) {
+  return h(
+    'div',
+    { class: 'theme-swatch', style: { background: pal.chat } },
+    h('div', { class: 'bar', style: { background: pal.header } }, h('span', { class: 'dot', style: { background: pal.accent } })),
+    h('div', { class: 'msg in', style: { background: pal.in } }, h('span', { style: { background: pal.text } })),
+    h('div', { class: 'msg out', style: { background: pal.out } }, h('span', { style: { background: pal.text } })),
+  );
+}
+
+function themeCard(t, mode, selected) {
+  return slots.get(`theme-card:${t.id}`, JSON.stringify([t, mode, selected]), () => h(
+    'button',
+    { type: 'button', class: `theme-card${selected ? ' selected' : ''}`, 'aria-pressed': String(selected), title: t.name, onclick: () => A.savePrefs({ palette: t.id }) },
+    themeSwatch(t[mode]),
+    h('span', { class: 'theme-name ellipsis' }, selected ? icon('check') : null, t.name),
+  ));
+}
+
+function saveThemes(themes) {
+  A.savePrefs({ themes });
+}
+
+// Built-in themes stay as they are: editing one makes your own copy.
+function editTheme(theme) {
+  let t = theme;
+  if (T.isPreset(theme.id)) {
+    const mine = T.customThemes(S.prefs);
+    if (mine.length >= 30) return toast('You have 30 themes. Delete one to make another.');
+    t = T.copyTheme(theme, S.prefs);
+    saveThemes([...mine, t]);
+    A.savePrefs({ palette: t.id });
+  }
+  themeEdit.id = t.id;
+  themeEdit.mode = A.themeMode();
+  openPanel('theme-editor');
+}
+
+async function importTheme() {
+  const code = await promptDialog('Add a theme', { label: 'Theme code', placeholder: 'Paste a theme code copied from Tailchat', multiline: true, max: 4000, okLabel: 'Add' });
+  if (code === null) return;
+  const t = T.parseThemeCode(code);
+  if (!t) return toast("That isn't a Tailchat theme code");
+  const mine = T.customThemes(S.prefs);
+  if (mine.length >= 30) return toast('You have 30 themes. Delete one to add another.');
+  saveThemes([...mine, t]);
+  A.savePrefs({ palette: t.id });
+  toast(`Added ${t.name}`);
+}
+
+function themesPanel() {
+  const active = A.activeTheme();
+  const mode = A.themeMode();
+  const mine = T.customThemes(S.prefs);
+  const modeChip = (value) => h('button', {
+    type: 'button',
+    class: `chip${(S.prefs.theme || 'system') === value ? ' active' : ''}`,
+    onclick: () => A.savePrefs({ theme: value }),
+  }, MODE_LABELS[value]);
+  return panelShell('Themes', [
+    h('div', { class: 'list-section' }, 'Mode'),
+    h('div', { class: 'filters pad-x' }, ['system', 'light', 'dark'].map(modeChip)),
+    h('div', { class: 'list-section' }, 'Built-in themes'),
+    h('div', { class: 'theme-grid' }, T.PRESETS.map((t) => themeCard(t, mode, t.id === active.id))),
+    h('div', { class: 'list-section' }, 'Your themes'),
+    mine.length
+      ? h('div', { class: 'theme-grid' }, mine.map((t) => themeCard(t, mode, t.id === active.id)))
+      : h('div', { class: 'empty small' }, 'Edit a theme to make your own version of it. Your themes appear here.'),
+    action('edit', T.isPreset(active.id) ? `Edit a copy of ${active.name}` : `Edit ${active.name}`, () => editTheme(active)),
+    action('add', 'Add a theme from a code', () => importTheme()),
+    h('div', { class: 'empty small' }, 'Themes are kept on this device. To use one on another device, copy its code in the editor and add it there.'),
+  ], 'settings');
+}
+
+function themeEditorPanel() {
+  const t = T.customThemes(S.prefs).find((x) => x.id === themeEdit.id);
+  if (!t) {
+    S.panel = 'themes';
+    return themesPanel();
+  }
+  const mode = themeEdit.mode;
+  const pal = t[mode];
+  const issues = T.readability(pal);
+  const weak = new Set(issues.flatMap((i) => i.keys));
+  const update = (fn) => saveThemes(T.customThemes(S.prefs).map((x) => (x.id === t.id ? T.cleanTheme(fn(structuredClone(x)), x.id) : x)));
+  const nameInput = slots.get(`theme-name:${t.id}`, t.name, () => {
+    const input = h('input', { maxlength: 40, value: t.name, 'aria-label': 'Theme name' });
+    input.addEventListener('change', () => {
+      const name = input.value.trim();
+      if (name) update((x) => ({ ...x, name }));
+      else input.value = t.name;
+    });
+    return input;
+  });
+  const colourRow = ([key, , label]) => slots.get(`theme-colour:${t.id}:${mode}:${key}`, JSON.stringify([pal[key], weak.has(key)]), () => {
+    const hex = h('span', { class: 'sub mono' }, pal[key]);
+    const input = h('input', { type: 'color', value: pal[key], 'aria-label': label });
+    // Dragging around the picker repaints the app; letting go saves it.
+    input.addEventListener('input', () => {
+      hex.textContent = input.value;
+      const now = T.customThemes(S.prefs).find((x) => x.id === t.id)?.[mode] || pal;
+      A.applyTheme({ ...now, [key]: input.value });
+    });
+    input.addEventListener('change', () => update((x) => ({ ...x, [mode]: { ...x[mode], [key]: input.value } })));
+    return h('label', { class: 'menu-row colour-row' }, h('div', { class: 'grow' }, h('div', null, label), hex, weak.has(key) ? h('div', { class: 'sub warn-text' }, 'Hard to read') : null), input);
+  });
+  const modeChip = (m) => h('button', {
+    type: 'button',
+    class: `chip${mode === m ? ' active' : ''}`,
+    onclick: () => {
+      themeEdit.mode = m;
+      S.themePreview = m;
+      A.applyTheme();
+      render();
+    },
+  }, m === 'light' ? 'Light colours' : 'Dark colours');
+  const base = T.PRESETS.find((x) => x.id === t.base) || T.PRESETS[0];
+  return panelShell('Edit theme', [
+    h('div', { class: 'card' }, h('label', { class: 'field' }, h('span', null, 'Name'), nameInput)),
+    h('div', { class: 'filters pad-x' }, ['light', 'dark'].map(modeChip)),
+    h('div', { class: 'empty small left' }, `You're editing the ${mode} colours. The app shows them while you edit.`),
+    T.KEYS.map(colourRow),
+    issues.length ? h('div', { class: 'banner warn' }, icon('info'), h('div', null, `Hard to read: ${issues.map((i) => i.label.toLowerCase()).join(', ')}.`)) : null,
+    action('history', `Reset the ${mode} colours to ${base.name}`, () => update((x) => ({ ...x, [mode]: { ...base[mode] } }))),
+    action('copy', 'Copy theme code', () => navigator.clipboard.writeText(T.themeCode(t)).then(() => toast('Theme code copied'), () => toast("Couldn't copy the code"))),
+    action('delete', 'Delete theme', async () => {
+      if (!(await confirmDialog(`Delete ${t.name}?`, 'This removes it from this device.', 'Delete', 'danger'))) return;
+      saveThemes(T.customThemes(S.prefs).filter((x) => x.id !== t.id));
+      if (S.prefs.palette === t.id) A.savePrefs({ palette: t.base });
+      openPanel('themes');
+    }),
+  ], 'themes');
 }
 
 function notificationsPanel() {
@@ -919,18 +1140,37 @@ function notificationsPanel() {
 let devicesCache = null;
 function devicesPanel() {
   if (!devicesCache) {
-    devicesCache = { list: null };
-    api.get('/api/devices').then(({ devices }) => { devicesCache.list = devices; render(); }).catch((e) => toast(e.message));
+    const cache = (devicesCache = { loaded: false });
+    A.loadHistory().then(() => { cache.loaded = true; render(); }).catch((e) => toast(e.message));
   }
-  const list = (devicesCache.list || []).filter((d) => !d.revokedAt);
+  const list = devicesCache.loaded ? S.ownDevices : [];
   return panelShell('Linked devices', [
-    h('div', { class: 'card' }, h('p', null, 'To use Tailchat on another device, open this address on it while it is connected to your tailnet:'), h('div', { class: 'invite-link' }, location.origin), h('button', { type: 'button', class: 'btn plain', onclick: () => navigator.clipboard.writeText(location.origin).then(() => toast('Address copied')) }, 'Copy address'), h('p', { class: 'muted small' }, 'Each device gets its own encryption key. Messages sent before a device was linked stay unreadable on it.')),
+    h(
+      'div',
+      { class: 'card' },
+      h('p', null, `Link a phone, tablet or computer anywhere in the world: install Tailscale on it, sign in with the same account you use here (${S.me.id}), then open this address:`),
+      h('div', { class: 'invite-link' }, location.origin),
+      h('button', { type: 'button', class: 'btn plain', onclick: () => navigator.clipboard.writeText(location.origin).then(() => toast('Address copied')) }, 'Copy address'),
+      h('p', { class: 'muted small' }, "Tailscale connects your devices over the internet wherever they are, with nothing to set up on your router. Each device gets its own encryption key, and its code below lets you check it's really yours."),
+    ),
+    h('div', { class: 'list-section' }, 'Chat history'),
+    historyCard(list),
     h('div', { class: 'list-section' }, `${list.length} active device${list.length === 1 ? '' : 's'}`),
     list.map((d) => h(
       'div',
       { class: 'row' },
       h('div', { class: 'row-icon' }, icon('devices')),
-      h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, d.name, d.id === S.device.id ? ' (this device)' : ''), h('div', { class: 'preview' }, `Linked ${listTime(d.createdAt)} · active ${listTime(d.lastActive)}`)),
+      h(
+        'div',
+        { class: 'body' },
+        h('div', { class: 'name ellipsis' }, d.name, d.id === S.device.id ? ' (this device)' : ''),
+        A.deviceWhere(d) ? h('div', { class: 'preview ellipsis' }, A.deviceWhere(d)) : null,
+        h('div', { class: 'preview' }, `Linked ${listTime(d.createdAt)} · active ${listTime(d.lastActive)}`),
+        S.badKeys.has(d.id)
+          ? h('div', { class: 'preview warn-text' }, "Its key isn't the one this device saw before")
+          : h('div', { class: 'preview mono' }, `Code ${S.deviceCodes.get(d.id) || '…'}`),
+      ),
+      iconButton('edit', 'Rename', () => O.renameDeviceDialog(d)),
       d.id !== S.device.id ? h('button', { type: 'button', class: 'btn plain small', onclick: async () => {
         if (!(await confirmDialog(`Log out ${d.name}?`, 'It will stop receiving messages and its key will no longer be used.', 'Log out', 'danger'))) return;
         await api.del(`/api/devices/${encodeURIComponent(d.id)}`).catch((e) => toast(e.message));
@@ -939,6 +1179,38 @@ function devicesPanel() {
       } }, 'Log out') : null,
     )),
   ], null);
+}
+
+// What this device knows about getting history from your other devices.
+function historyCard(list) {
+  const others = list.filter((d) => d.id !== S.device.id);
+  const mine = S.history.requests.get(S.device.id);
+  const by = A.ownDevice(mine?.byDevice)?.name || 'Your other device';
+  const ask = (label) => h('button', {
+    type: 'button',
+    class: 'btn primary',
+    onclick: () => A.requestHistory().then(() => toast('Asked your other devices. Approve it on one of them.')).catch((e) => toast(e.message)),
+  }, label);
+  if (!others.length) {
+    return h('div', { class: 'card' }, h('p', { class: 'muted small' }, "Messages sent before a device was linked can't be read on it until another of your devices shares them. Link a second device to use this."));
+  }
+  if (mine?.state === 'pending') {
+    return h(
+      'div',
+      { class: 'card' },
+      h('p', null, 'Waiting for one of your other devices to share your chat history. Open Tailchat on it and tap Review and share, then check it shows this code:'),
+      h('div', { class: 'code' }, (S.deviceCodes.get(S.device.id) || '…').split(' ').map((g) => h('span', null, g))),
+      h('button', { type: 'button', class: 'btn plain', onclick: () => A.declineHistory(S.device.id).catch((e) => toast(e.message)) }, 'Cancel'),
+    );
+  }
+  return h(
+    'div',
+    { class: 'card' },
+    h('p', null, "Messages sent before this device was linked can't be read here until one of your other devices shares them. Your history stays end-to-end encrypted on the way."),
+    mine?.state === 'done' ? h('p', { class: 'muted small' }, `${by} shared ${mine.shared} message${mine.shared === 1 ? '' : 's'} ${listTime(mine.updatedAt)}.`) : null,
+    mine?.state === 'declined' && mine.byDevice !== S.device.id ? h('p', { class: 'muted small' }, `${by} didn't share ${listTime(mine.updatedAt)}.`) : null,
+    ask(mine ? 'Ask again' : 'Get chat history from my other devices'),
+  );
 }
 
 function helpPanel() {
@@ -1043,6 +1315,10 @@ function panelNodes() {
       return privacyPanel();
     case 'chat-settings':
       return chatSettingsPanel();
+    case 'themes':
+      return themesPanel();
+    case 'theme-editor':
+      return themeEditorPanel();
     case 'notifications':
       return notificationsPanel();
     case 'devices':
@@ -1068,6 +1344,8 @@ function renderSidebar() {
     if (S.panel !== 'devices') devicesCache = null;
     if (S.panel !== 'new-group') ng = null;
     if (S.panel !== 'channels') directory = null;
+    S.themePreview = S.panel === 'theme-editor' ? themeEdit.mode : null;
+    A.applyTheme();
   }
   let nodes = S.panel ? panelNodes() : null;
   if (!nodes) {
@@ -1102,12 +1380,55 @@ function welcome() {
   );
 }
 
+// The main pane for a machine of yours that hasn't opened Tailchat yet.
+function machinePane(m) {
+  const seen = lastSeenText(m);
+  return slots.get('machine-pane', JSON.stringify([m.id, m.name, seen, location.origin]), () => h(
+    'div',
+    { class: 'conversation machine-pane' },
+    h(
+      'header',
+      { class: 'topbar' },
+      iconButton('back', 'Back', () => { S.machine = null; render(); }, { class: 'icon-btn back-btn' }),
+      avatar({ id: m.id, name: m.name }),
+      h('div', { class: 'title' }, h('div', { class: 'name ellipsis' }, m.name), h('div', { class: 'sub ellipsis' }, seen ? `${seen} on your tailnet` : 'Your device on the tailnet')),
+    ),
+    h(
+      'div',
+      { class: 'welcome' },
+      icon('devices'),
+      h('h1', null, `Chat with ${m.name}`),
+      h('p', null, `${m.name} is one of your devices on the tailnet. To send it messages and files, open this address on it once, in any browser:`),
+      h('div', { class: 'invite-link' }, location.origin),
+      h('button', {
+        type: 'button',
+        class: 'btn plain',
+        onclick: () => navigator.clipboard.writeText(location.origin).then(() => toast('Address copied'), () => toast("Couldn't copy the address")),
+      }, 'Copy address'),
+      h('p', { class: 'muted small' }, 'Its chat then takes the place of this one. Only that device and this one can read what you send in it.'),
+      h('div', { class: 'lock' }, icon('lock'), 'End-to-end encrypted between your devices'),
+    ),
+  ));
+}
+
 function update() {
-  const chat = S.active ? S.chats.get(S.active) : null;
+  let chat = S.active ? S.chats.get(S.active) : null;
   if (S.active && !chat) S.active = null;
-  root.classList.toggle('chat-open', !!chat);
+  let machine = null;
+  if (!chat && S.machine) {
+    // It opened Tailchat while you were looking: show its chat instead,
+    // once that's there.
+    const opened = [...S.chats.values()].find((c) => A.isDeviceChat(c) && A.ownDevice(A.devicePeer(c))?.machine?.id === S.machine);
+    machine = opened ? null : S.machines.list.find((m) => m.id === S.machine) || null;
+    if (!machine) S.machine = null;
+    if (opened) {
+      A.openChat(opened.id);
+      chat = S.chats.get(opened.id);
+    }
+  }
+  root.classList.toggle('chat-open', !!chat || !!machine);
   renderSidebar();
-  reconcile(mainEl, [chat ? convEl : welcomeEl, chat && S.details ? detailsEl : null]);
+  reconcile(mainEl, [chat ? convEl : machine ? machinePane(machine) : welcomeEl, chat && S.details ? detailsEl : null]);
   if (chat) renderConversation(convEl, chat);
   if (chat && S.details) renderDetails(detailsEl, chat);
   O.renderCalls();

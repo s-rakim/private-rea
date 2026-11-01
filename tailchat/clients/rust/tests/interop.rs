@@ -147,7 +147,7 @@ fn interop_both_ways_with_reference_crypto() {
     assert_eq!(fs::read_to_string(got.join("note.txt")).unwrap(), "my own note!!!\n");
     assert_eq!(fs::read_to_string(got.join("note (2).txt")).unwrap(), "a note from js\n");
 
-    // A device that was registered later can't read older messages (like WhatsApp).
+    // A device that was registered later can't read older messages.
     let late = Cli { state: tmp.join("rusty-second.state.json"), ..Cli::new(&server, &tmp, "rusty") };
     let late_got = tmp.join("late-got");
     let out = late.run(&["receive", &chat_id, late_got.to_str().unwrap()]);

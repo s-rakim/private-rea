@@ -1,7 +1,7 @@
 # Tailchat for Ruby
 
-A Tailchat client and bot framework (the tailnet's answer to WhatsApp bot
-accounts) in plain Ruby 3.3: only the standard library (`openssl`, `net/http`,
+A Tailchat client and bot framework (bot accounts for your tailnet) in plain
+Ruby 3.3: only the standard library (`openssl`, `net/http`,
 `json`, `socket`), including its own small WebSocket client. No gems.
 
 It implements [`PROTOCOL.md`](../../PROTOCOL.md) and interoperates with the web
