@@ -1,6 +1,6 @@
 // Dialogs and full-screen layers shared by the screens: pickers, message
 // info, media viewer, status viewer and composer, calls, group invites.
-import { S, api, calls, render, nameOf, isMe, callerName, callableDevices, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, ownDevice, shareHistory, declineHistory, renameDevice } from './app.js';
+import { S, api, calls, render, nameOf, isMe, callerName, callableDevices, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, ownDevice, shareHistory, declineHistory, renameDevice, canChangeWallpaper, setWallpaper, removeWallpaper, wallpaperChoice, wallpaperOf } from './app.js';
 import { h, icon, iconButton, avatar, dialog, promptDialog, toast, viewer, timeOf, listTime, dayLabel, fileSize, duration, reconcile } from './ui.js';
 import { securityCode } from './crypto.js';
 import { exportChat } from './export.js';
@@ -504,6 +504,97 @@ export function statusGroups() {
     byUser.get(s.userId).push(s);
   }
   return byUser;
+}
+
+// ---------- chat wallpaper ----------
+
+export const WALLPAPER_COLORS = ['#e8ddd0', '#d5e8d4', '#cfe1f0', '#e6d7ef', '#f3d9d5', '#f2e6b8', '#2f3b46', '#1e3a2f', '#3b2f4a', '#4a2f2f', '#24242a', '#0f4c5c'];
+
+// Paints a chat's wallpaper on el (the message list or a preview), or
+// clears it so the theme's chat background shows.
+export function paintWallpaper(el, wp) {
+  if (!wp) {
+    el.classList.remove('has-wallpaper');
+    el.style.removeProperty('background-color');
+    el.style.removeProperty('background-image');
+    return;
+  }
+  el.classList.add('has-wallpaper');
+  el.style.backgroundColor = safeColor(wp.color);
+  const shade = `linear-gradient(rgba(0,0,0,${(wp.dim || 0) / 100}), rgba(0,0,0,${(wp.dim || 0) / 100}))`;
+  el.style.backgroundImage = wp.url ? `${shade}, url("${wp.url}")` : shade;
+}
+
+export function wallpaperDialog(chat) {
+  if (!canChangeWallpaper(chat)) {
+    toast(isChannel(chat) ? "Channels don't have a wallpaper" : 'Only admins can change this');
+    return;
+  }
+  const current = wallpaperChoice(chat);
+  const shown = wallpaperOf(chat);
+  let color = current?.color || WALLPAPER_COLORS[0];
+  let dim = current?.dim || 0;
+  let image = null; // a newly picked File
+  let keepImage = !!current?.file;
+  let imageUrl = keepImage ? shown?.url || null : null;
+  let pickedUrl = null; // an object URL this dialog made, revoked when it closes
+  const preview = h('div', { class: 'wallpaper-preview' },
+    h('div', { class: 'msg in' }, 'The wallpaper shows behind messages'),
+    h('div', { class: 'msg out' }, 'Everyone in this chat sees it'));
+  const paint = () => paintWallpaper(preview, { color, dim, url: imageUrl });
+  const swatches = h('div', { class: 'swatches' }, WALLPAPER_COLORS.map((c) => {
+    const b = h('button', { type: 'button', class: c === color && !imageUrl ? 'active' : '', 'aria-label': `Colour ${c}`, onclick: () => {
+      color = c;
+      image = null;
+      keepImage = false;
+      imageUrl = null;
+      for (const x of swatches.children) x.classList.toggle('active', x === b);
+      paint();
+    } });
+    b.style.background = c;
+    return b;
+  }));
+  const picker = h('input', { type: 'file', accept: 'image/jpeg,image/png,image/webp', hidden: true, onchange: () => {
+    const f = picker.files?.[0];
+    if (!f) return;
+    image = f;
+    keepImage = false;
+    if (pickedUrl) URL.revokeObjectURL(pickedUrl);
+    imageUrl = pickedUrl = URL.createObjectURL(f);
+    for (const x of swatches.children) x.classList.remove('active');
+    paint();
+  } });
+  const slider = h('input', { type: 'range', min: 0, max: 80, step: 5, value: dim, 'aria-label': 'Dim the wallpaper', oninput: () => { dim = Number(slider.value); paint(); } });
+  paint();
+  dialog({
+    title: 'Chat wallpaper',
+    content: [
+      preview,
+      swatches,
+      h('div', { class: 'wallpaper-tools' },
+        h('button', { type: 'button', class: 'btn plain', onclick: () => picker.click() }, icon('image'), ' Choose a photo'),
+        picker,
+        h('label', { class: 'grow wallpaper-dim' }, h('span', { class: 'muted' }, 'Dim'), slider)),
+      h('p', { class: 'muted' }, `Everyone in this ${isGroupish(chat) ? 'group' : 'chat'} sees this wallpaper on all their devices, in place of the theme's chat background. It's end-to-end encrypted, like your messages.`),
+    ],
+    actions: [
+      chat.wallpaper ? { label: 'Remove', kind: 'danger', onClick: (close) => { close(); removeWallpaper(chat).catch((e) => toast(e.message)); } } : null,
+      { label: 'Cancel', onClick: (close) => close() },
+      {
+        label: 'Set wallpaper',
+        kind: 'primary',
+        onClick: async (close) => {
+          close();
+          try {
+            await setWallpaper(chat, { color, dim, image, keepImage });
+          } catch (err) {
+            toast(err.message);
+          }
+        },
+      },
+    ].filter(Boolean),
+    onClose: () => pickedUrl && URL.revokeObjectURL(pickedUrl),
+  });
 }
 
 export const STATUS_COLORS = ['#3f5db3', '#1e8b63', '#0e7c86', '#7552c7', '#c43d6e', '#c94f24', '#4b70cc', '#2f7d4f', '#8a6d3b', '#444342'];
