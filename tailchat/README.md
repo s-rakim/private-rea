@@ -174,7 +174,8 @@ Good to know:
 2. **Download the app.** On the phone, open the repository's **Releases**
    page in Chrome (sign in to GitHub), open the newest **Tailchat for
    Android** release and tap **tailchat-mobile-v<version>.apk** under
-   *Assets*.
+   *Assets*. The current one is
+   [tailchat-mobile-v0.2.0.apk](https://github.com/s-rakim/private-rea/releases/download/mobile-v0.2.0/tailchat-mobile-v0.2.0.apk).
 3. **Install it.** Open the downloaded file. If Android says installing from
    this source isn't allowed, tap **Settings**, turn on **Allow from this
    source** for Chrome, and go back. Tap **Install**. If Play Protect warns
@@ -190,7 +191,7 @@ installed from Chrome instead (see step 7), or alongside it.
 
 The Android app is a device of its own: when it first opens, your other
 devices can share your chat history with it (see the next section). To update,
-install the newer APK over the old one.
+install the newer APK over the old one; it keeps your server address.
 
 ### Step 7: Other devices and people
 
