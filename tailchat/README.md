@@ -196,6 +196,10 @@ shares its key and its chats. The Android APK is a device of its own.
   notifications for new messages (on phones and the installed app too, where
   the app icon also shows how many chats are unread). Turn them on in
   Settings > Notifications or from the banner above the chat list.
+* **Layout**: on a computer, a rail down the left (Chats, Updates,
+  Communities, Calls, Starred, Devices, Settings and your profile) beside the
+  chat list and the open chat; on a phone, one screen at a time with those
+  sections in a tab bar along the bottom. Green dots show who is online.
 * **Themes**: Tailscale (the default), Ocean, Forest, Sunset, Grape, Rose and
   Graphite, each with light and dark colours that follow your system or stay
   fixed. Any theme can be edited: Tailchat makes your own copy, shows the
