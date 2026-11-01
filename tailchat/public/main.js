@@ -25,4 +25,5 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', (e) => {
     if (e.data?.type === 'open-chat' && typeof e.data.chatId === 'string') openChat(e.data.chatId);
   });
+  navigator.serviceWorker.startMessages?.();
 }

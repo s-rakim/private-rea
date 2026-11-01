@@ -1169,7 +1169,7 @@ export function notify(title, body, chatId) {
   updateTitle();
   if (!S.prefs.notifications || !('Notification' in window) || Notification.permission !== 'granted') return;
   if (document.visibilityState === 'visible' && S.active === chatId) return;
-  const options = { body: body.slice(0, 160), tag: chatId, renotify: true, icon: '/icon-192.png', badge: '/icon-192.png', data: { chatId } };
+  const options = { body: body.slice(0, 160), tag: chatId, renotify: true, icon: '/icon-192.png', data: { chatId } };
   // Phones and the installed app only show notifications through the service
   // worker; desktop browsers can show them from the page.
   const viaWorker = () => navigator.serviceWorker?.getRegistration()

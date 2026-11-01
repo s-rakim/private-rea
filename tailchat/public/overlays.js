@@ -1,6 +1,6 @@
 // Dialogs and full-screen layers shared by the screens: pickers, message
 // info, media viewer, status viewer and composer, calls, group invites.
-import { S, api, calls, render, nameOf, isMe, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, ownDevice, shareHistory, declineHistory, renameDevice } from './app.js';
+import { S, api, calls, render, nameOf, isMe, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, isDeviceChat, tickState, ownDevice, shareHistory, declineHistory, renameDevice } from './app.js';
 import { h, icon, iconButton, avatar, dialog, promptDialog, toast, viewer, timeOf, listTime, dayLabel, fileSize, duration, reconcile } from './ui.js';
 import { securityCode } from './crypto.js';
 import { exportChat } from './export.js';
@@ -389,6 +389,7 @@ async function runExport(chat, media) {
 // ---------- message details ----------
 
 export function messageInfo(m, chat) {
+  if (isDeviceChat(chat)) return deviceMessageInfo(m, chat);
   const others = chat.members.filter((x) => !x.left && !isMe(x.userId) && x.joinedSeq < m.seq);
   const read = others.filter((x) => x.readSeq >= m.seq);
   const delivered = others.filter((x) => x.readSeq < m.seq && x.deliveredSeq >= m.seq);
@@ -410,6 +411,23 @@ export function messageInfo(m, chat) {
       section('Not delivered yet', 'check', waiting),
       !others.length ? h('p', { class: 'empty' }, 'Nobody else was in this chat when you sent it.') : null,
       chat.type === 'direct' && delivered.length && !read.length ? h('p', { class: 'muted card' }, 'If read receipts are turned off on either side, messages show as delivered only.') : null,
+    ],
+  });
+}
+
+// In a chat with your other device, the receipts are that device's.
+function deviceMessageInfo(m, chat) {
+  const state = tickState(m, chat);
+  const device = chatTitle(chat);
+  const [iconName, text] = state === 'read'
+    ? ['checks', `Read on ${device}`]
+    : state === 'delivered' ? ['checks', `Delivered to ${device}`] : ['check', `Not delivered to ${device} yet`];
+  dialog({
+    title: 'Message info',
+    flush: true,
+    content: [
+      h('div', { class: 'card' }, h('div', { class: 'muted' }, `Sent ${dayLabel(m.createdAt)} at ${timeOf(m.createdAt)}`), h('div', null, previewText(m))),
+      h('div', { class: 'list-section' }, icon(iconName), ` ${text}`),
     ],
   });
 }
