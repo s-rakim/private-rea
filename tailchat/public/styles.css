@@ -395,6 +395,14 @@ mark { background: #ffe066; color: #111; border-radius: 2px; }
 .call-screen .controls button.hang { background: var(--danger); color: #fff; }
 .call-screen .controls button.answer { background: var(--accent); color: var(--on-accent); }
 .call-screen .controls svg { width: 26px; height: 26px; fill: currentColor; }
+.call-screen .room-bar { display: flex; align-items: center; gap: 12px; padding: 10px 12px; padding-top: max(10px, env(safe-area-inset-top)); min-width: 0; }
+.call-screen .room-bar .grow { flex: 1; min-width: 0; }
+.call-screen .room-bar .who { font-size: 16px; }
+.call-screen .room-bar .state { color: #afacab; font-size: 13px; margin-top: 2px; }
+.call-screen .room-bar .pop, .call-screen .room-bar .hang { flex: none; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; background: #2e2d2d; color: #faf9f8; }
+.call-screen .room-bar .hang { background: var(--danger); color: #fff; }
+.call-screen .room-bar svg { width: 22px; height: 22px; fill: currentColor; }
+.call-screen iframe.room { flex: 1; width: 100%; min-height: 0; border: 0; background: #181717; }
 .incoming { position: fixed; right: 20px; top: 20px; z-index: 59; background: var(--panel); border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.35); padding: 16px; width: 300px; display: flex; flex-direction: column; gap: 12px; }
 .incoming .who { display: flex; gap: 12px; align-items: center; }
 .incoming .btns { display: flex; gap: 10px; }
