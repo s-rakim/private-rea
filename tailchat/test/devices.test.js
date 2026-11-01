@@ -129,3 +129,34 @@ test('device chats only take up pins on their own two devices', async () => {
   await phone.call('DELETE', `/api/devices/${tablet.deviceId}`);
   await phone.call('PATCH', `/api/chats/${chats[2].id}/prefs`, { pinned: true });
 });
+
+test('each end of a device chat has its own unread count and receipts', async () => {
+  const phone = await connectUser(server.base, 'ud');
+  const laptop = await connectUser(server.base, 'ud');
+  await Promise.all([phone.socket(), laptop.socket()]);
+  const { chat } = await phone.call('POST', '/api/chats/devices', { deviceId: laptop.deviceId });
+  const view = async (user) => (await user.call('GET', `/api/chats/${chat.id}`)).chat;
+
+  await send(phone, chat.id, { type: 'text', text: 'one' });
+  const { message } = await send(phone, chat.id, { type: 'text', text: 'two' });
+  // The laptop didn't send them, so they are unread there, and only there.
+  assert.equal((await view(laptop)).unread, 2);
+  assert.equal((await view(phone)).unread, 0);
+  const pushed = await laptop.waitFor((e) => e.type === 'chat' && e.chat.id === chat.id && e.chat.unread === 2);
+  assert.ok(pushed.chat.me.readSeq < message.seq);
+  assert.ok((await laptop.call('GET', '/api/chats')).chats.find((c) => c.id === chat.id).unread === 2);
+  assert.deepEqual((await view(phone)).peer, { deliveredSeq: 0, readSeq: 0 }, 'the phone sees single ticks');
+
+  await laptop.call('POST', `/api/chats/${chat.id}/receipts`, { delivered: message.seq });
+  assert.deepEqual((await view(phone)).peer, { deliveredSeq: message.seq, readSeq: 0 });
+  await laptop.call('POST', `/api/chats/${chat.id}/receipts`, { read: message.seq });
+  assert.equal((await view(laptop)).unread, 0);
+  assert.deepEqual((await view(phone)).peer, { deliveredSeq: message.seq, readSeq: message.seq });
+  await phone.waitFor((e) => e.type === 'chat' && e.chat.id === chat.id && e.chat.peer?.readSeq === message.seq);
+
+  // A reply from the laptop is unread on the phone, not on the laptop.
+  const { message: reply } = await send(laptop, chat.id, { type: 'text', text: 'back' });
+  assert.equal(reply.senderDevice, laptop.deviceId);
+  assert.equal((await view(phone)).unread, 1);
+  assert.equal((await view(laptop)).unread, 0);
+});

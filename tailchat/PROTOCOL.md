@@ -363,6 +363,16 @@ for them alone. It disappears once either device is logged out, and history
 sharing (§9) never copies it to a third device. View once messages (`400`)
 and calls aren't available in it, since the device at the other end is you.
 
+Since both ends are the same member, a device chat keeps read state per
+device. Its view, as each device gets it, has `me.readSeq` and `unread` for
+that device (counting messages whose `senderDevice` is the other one), and
+`peer: {deliveredSeq, readSeq}` for the other device, which is what the ticks
+on your messages follow. `POST /api/chats/:id/receipts` moves the calling
+device's pointers and sends both devices their new view instead of a `receipt`
+event. Clients put a message on the right when `senderDevice` is the device
+they run on, and on the left when it came from the other one. Every other
+chat's view has `peer: null`.
+
 `PATCH /api/devices/:id {name}` renames one of your devices; your devices get a
 `devices` event.
 

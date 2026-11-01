@@ -160,6 +160,16 @@ CREATE TABLE IF NOT EXISTS history_requests (
   shared INTEGER NOT NULL DEFAULT 0
 );
 
+-- How far each device of a device chat (PROTOCOL.md §10) has received and
+-- read it. Both devices belong to one member, so members can't tell them apart.
+CREATE TABLE IF NOT EXISTS device_reads (
+  chat_id TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  delivered_seq INTEGER NOT NULL DEFAULT 0,
+  read_seq INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (chat_id, device_id)
+);
+
 CREATE TABLE IF NOT EXISTS blocks (user_id TEXT NOT NULL, blocked_id TEXT NOT NULL, PRIMARY KEY (user_id, blocked_id));
 
 CREATE TABLE IF NOT EXISTS calls (
