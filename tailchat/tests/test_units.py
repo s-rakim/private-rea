@@ -80,15 +80,11 @@ class ConfigTests(unittest.TestCase):
             load_config({"TAILCHAT_AUTH": "dev", "TAILCHAT_HOST": "0.0.0.0"})
         self.assertEqual(load_config({"TAILCHAT_AUTH": "dev"}).host, "127.0.0.1")
 
-    def test_direct_mode_needs_host_and_tls(self):
+    def test_only_serve_and_dev_modes(self):
         with self.assertRaises(ValueError):
-            load_config({"TAILCHAT_AUTH": "direct", "TAILCHAT_TLS_CERT": "c", "TAILCHAT_TLS_KEY": "k"})
-        with self.assertRaises(ValueError):
-            load_config({"TAILCHAT_AUTH": "direct", "TAILCHAT_HOST": "100.64.0.1"})
+            load_config({"TAILCHAT_AUTH": "direct"})
         with self.assertRaises(ValueError):
             load_config({"TAILCHAT_TLS_CERT": "c"})
-        direct = {"TAILCHAT_AUTH": "direct", "TAILCHAT_HOST": "100.64.0.1", "TAILCHAT_TLS_CERT": "c", "TAILCHAT_TLS_KEY": "k"}
-        self.assertEqual(load_config(direct).host, "100.64.0.1")
 
     def test_serve_mode_defaults_to_loopback(self):
         self.assertEqual(load_config({}).host, "127.0.0.1")

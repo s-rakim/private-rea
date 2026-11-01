@@ -5,23 +5,16 @@ Tailscale.
   serve  - run behind `tailscale serve`. tailscaled terminates HTTPS with the
            machine's ts.net certificate and adds Tailscale-User-* headers.
            Only connections from loopback (tailscaled itself) are accepted.
-  direct - listen on the Tailscale IP and ask the local tailscaled who owns
-           the connecting address (LocalAPI whois).
   dev    - local testing only: pick a user at /dev/login. Loopback only.
 """
 
 from __future__ import annotations
 
 import ipaddress
-import json
 import re
-import time
 from dataclasses import dataclass
 from email.errors import HeaderParseError
 from email.header import decode_header, make_header
-from urllib.parse import quote
-
-import aiohttp
 
 from .config import Config
 
@@ -123,30 +116,6 @@ def peer(request) -> tuple[str | None, int | None]:
 class IdentityResolver:
     def __init__(self, config: Config):
         self.config = config
-        self._whois_cache: dict[str, tuple[float, dict]] = {}
-
-    async def _whois(self, addr: str, port: int) -> dict:
-        host = f"[{addr}]" if ":" in addr else addr
-        key = f"{host}:{port}"
-        hit = self._whois_cache.get(key)
-        if hit and hit[0] > time.monotonic():
-            return hit[1]
-        connector = aiohttp.UnixConnector(path=self.config.tailscale_socket)
-        try:
-            async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=3)) as session:
-                async with session.get(
-                    f"http://local-tailscaled.sock/localapi/v0/whois?addr={quote(key)}",
-                    headers={"Host": "local-tailscaled.sock"},
-                ) as res:
-                    if res.status != 200:
-                        raise IdentityError(f"tailscaled whois failed ({res.status})")
-                    info = json.loads(await res.text())
-        except IdentityError:
-            raise
-        except Exception as err:  # socket missing, timeout, bad JSON
-            raise IdentityError(f"cannot reach tailscaled: {err}", 503) from err
-        self._whois_cache[key] = (time.monotonic() + 60, info)
-        return info
 
     async def identify(self, request) -> Identity:
         addr, port = peer(request)
@@ -178,23 +147,6 @@ class IdentityResolver:
                 login=login,
                 name=(decode_header_word(request.headers.get("Tailscale-User-Name")) or login.split("@")[0])[:60],
                 avatar_url=https_url(request.headers.get("Tailscale-User-Profile-Pic")),
-            )
-        if mode == "direct":
-            if not is_tailnet_address(addr):
-                raise IdentityError("Tailchat only accepts connections from your tailnet.")
-            info = await self._whois(str(_addr(addr)), port)
-            profile = info.get("UserProfile") or {}
-            node = info.get("Node") or {}
-            login_name = profile.get("LoginName")
-            if node.get("Tags") or not login_name or login_name == "tagged-devices":
-                raise IdentityError("Tagged devices have no user identity, so they cannot use Tailchat.")
-            if not isinstance(login_name, str) or not LOGIN.match(login_name.lower()):
-                raise IdentityError("Unexpected Tailscale login name.", 400)
-            name = profile.get("DisplayName")
-            return Identity(
-                login=login_name.lower(),
-                name=(name if isinstance(name, str) and name.strip() else login_name.split("@")[0])[:60],
-                avatar_url=https_url(profile.get("ProfilePicURL") if isinstance(profile.get("ProfilePicURL"), str) else None),
             )
         # dev
         if not is_loopback(addr):

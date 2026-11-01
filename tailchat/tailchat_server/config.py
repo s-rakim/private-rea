@@ -1,16 +1,14 @@
-"""Runtime settings, all from environment variables so the server can run as a
-systemd unit next to tailscaled without a config file."""
+"""Runtime settings, all from environment variables, which docker-compose.yml
+sets for the Tailchat container."""
 
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
-SECRET = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 
 
 @dataclass(frozen=True)
@@ -23,10 +21,8 @@ class Config:
     tls_cert: str
     tls_key: str
     allowed_hosts: tuple[str, ...]
-    serve_secret: str
     tailscale_socket: str
     tailnet: str
-    tailscale_cli: str
     dev_tailnet: str
     list_self: bool
     max_upload_bytes: int
@@ -50,45 +46,34 @@ def _int(env: dict, name: str, fallback: int) -> int:
 def load_config(env: dict | None = None) -> Config:
     env = dict(os.environ if env is None else env)
     auth = env.get("TAILCHAT_AUTH") or "serve"
-    if auth not in ("serve", "direct", "dev"):
-        raise ValueError(f'TAILCHAT_AUTH must be serve, direct or dev, got "{auth}"')
+    if auth not in ("serve", "dev"):
+        raise ValueError(f'TAILCHAT_AUTH must be serve or dev, got "{auth}"')
     # serve and dev only ever accept connections from this machine: in serve
-    # mode tailscaled is the only client, and dev mode must never be reachable
-    # from the network because anyone could pick any identity.
-    host = env.get("TAILCHAT_HOST", "" if auth == "direct" else "127.0.0.1")
+    # mode tailscaled (the tailscale container) is the only client, and dev
+    # mode must never be reachable from the network because anyone could pick
+    # any identity.
+    host = env.get("TAILCHAT_HOST", "127.0.0.1")
     if auth == "dev" and host not in LOOPBACK_HOSTS:
         raise ValueError("TAILCHAT_AUTH=dev only listens on loopback (set TAILCHAT_HOST=127.0.0.1)")
-    if auth == "direct" and not host:
-        raise ValueError("TAILCHAT_AUTH=direct needs TAILCHAT_HOST set to this machine's Tailscale IP (tailscale ip -4)")
     tls_cert, tls_key = env.get("TAILCHAT_TLS_CERT", ""), env.get("TAILCHAT_TLS_KEY", "")
     if bool(tls_cert) != bool(tls_key):
         raise ValueError("Set both TAILCHAT_TLS_CERT and TAILCHAT_TLS_KEY, or neither")
-    # Browsers only allow the web app's crypto over HTTPS, and plain HTTP on
-    # the tailnet IP would let a web page rebind its own name to it.
-    if auth == "direct" and not tls_cert:
-        raise ValueError("TAILCHAT_AUTH=direct needs TAILCHAT_TLS_CERT and TAILCHAT_TLS_KEY (from `tailscale cert`)")
-    # Without Docker, any program on the machine can reach 127.0.0.1 and send
-    # its own Tailscale-User-* headers. A secret path that only tailscale
-    # serve knows (it proxies to http://127.0.0.1:8443/<secret>) shuts them out.
-    serve_secret = env.get("TAILCHAT_SERVE_SECRET", "")
-    if serve_secret and (auth != "serve" or not SECRET.match(serve_secret)):
-        raise ValueError("TAILCHAT_SERVE_SECRET only works with TAILCHAT_AUTH=serve and must be 32+ letters, digits, - or _")
     allowed = tuple(h.strip().lower().rstrip(".") for h in env.get("TAILCHAT_ALLOWED_HOSTS", "").split(",") if h.strip())
     # Where the list of your machines comes from (see machines.py).
     dev_tailnet = env.get("TAILCHAT_DEV_TAILNET", "")
     if dev_tailnet and auth != "dev":
         raise ValueError("TAILCHAT_DEV_TAILNET only works with TAILCHAT_AUTH=dev")
     tailnet = env.get("TAILCHAT_TAILNET") or ("localapi" if auth != "dev" else "dev" if dev_tailnet else "off")
-    if tailnet not in ("localapi", "cli", "dev", "off") or (tailnet == "dev" and not (auth == "dev" and dev_tailnet)):
-        raise ValueError("TAILCHAT_TAILNET must be localapi, cli or off (dev needs TAILCHAT_AUTH=dev and TAILCHAT_DEV_TAILNET)")
-    # The server's own machine is one of yours when it runs on your computer
-    # (the cli setup), not when it is its own node in Docker.
+    if tailnet not in ("localapi", "dev", "off") or (tailnet == "dev" and not (auth == "dev" and dev_tailnet)):
+        raise ValueError("TAILCHAT_TAILNET must be localapi or off (dev needs TAILCHAT_AUTH=dev and TAILCHAT_DEV_TAILNET)")
     # The HTTPS port on this same host where the call service (peer-calls)
     # is served; 0 keeps calls built in.
     calls_port = _int(env, "TAILCHAT_CALLS_PORT", 0)
     if not 0 <= calls_port <= 65535:
         raise ValueError("TAILCHAT_CALLS_PORT must be a port number, or 0 for built-in calls")
-    list_self = env.get("TAILCHAT_LIST_SELF", "1" if tailnet == "cli" else "0").lower() in ("1", "true", "yes")
+    # The server is its own node in Docker, so by default its machine is not
+    # one of yours.
+    list_self = env.get("TAILCHAT_LIST_SELF", "0").lower() in ("1", "true", "yes")
     return Config(
         auth=auth,
         host=host,
@@ -98,10 +83,8 @@ def load_config(env: dict | None = None) -> Config:
         tls_cert=tls_cert,
         tls_key=tls_key,
         allowed_hosts=allowed,
-        serve_secret=serve_secret,
         tailscale_socket=env.get("TAILSCALE_SOCKET", "/var/run/tailscale/tailscaled.sock"),
         tailnet=tailnet,
-        tailscale_cli=env.get("TAILCHAT_TAILSCALE_CLI", "tailscale"),
         dev_tailnet=dev_tailnet,
         list_self=list_self,
         max_upload_bytes=_int(env, "TAILCHAT_MAX_UPLOAD_MB", 2048) * 1024 * 1024,

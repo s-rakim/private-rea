@@ -7,7 +7,7 @@ the server who everyone is, so there are no phone numbers or passwords.
 
 The server is Python (aiohttp and SQLite). The main client is the browser app
 in `public/`, and `clients/` has command-line clients, a file-drop tool, a bot
-framework and a tailnet gateway in other languages.
+framework in other languages.
 
 ## Run it with Docker
 
@@ -84,56 +84,27 @@ To harden it further:
 * Pin the images to digests (`image: tailscale/tailscale@sha256:…`) so an
   update only happens when you choose it.
 
-### Without Docker
+### Settings
 
-For text messages sent device to device with no server at all, see the setup
-steps in the [main README](../README.md). The full app can also run as an ordinary program on a computer that has the
-Tailscale app installed and signed in, such as your own PC. Turn on **MagicDNS**
-and **HTTPS certificates** in the [admin
-console](https://login.tailscale.com/admin/dns) first, and install
-[Python](https://www.python.org/downloads/) 3.10 or newer.
-
-* **Windows**: double-click `start-tailchat.cmd`, or run `.\start-tailchat.cmd`
-  in PowerShell.
-* **Linux and macOS**: run `./start-tailchat.sh`.
-
-The first run sets up Python packages in `.venv`. It then checks that Tailscale
-is connected, runs `tailscale serve` for you and prints the address to open,
-`https://<this-computer>.<your-tailnet>.ts.net`. Leave the window open while
-you use Tailchat; closing it or pressing Ctrl+C stops the server and turns
-`tailscale serve` off again. Messages and files are kept in `data/`. The first
-time, Tailscale may print a link to allow Serve on your tailnet; open it,
-approve, and the start carries on.
-
-Without Docker, any program on the same computer could connect to the server
-on `127.0.0.1` and claim to be anyone. To stop that, the start script makes a
-random secret (kept in `data/serve-secret`) and has `tailscale serve` add it to
-the front of every request's path. The server answers nothing else, and it
-never reaches a browser. Someone who can run `tailscale serve status` or read
-your files on that computer could still find it, so run Tailchat under an
-account no one else uses.
-
-To run the steps yourself, use `python -m tailchat_server --tailscale`, or set
-`TAILCHAT_SERVE_SECRET` and point `tailscale serve --bg --https=443` at
-`http://127.0.0.1:8443/<secret>` (never use `tailscale funnel`). With
-`--tailscale` the server lists your machines with the `tailscale` command, and
-the computer it runs on counts as one of them. If you'd
-rather not install the Tailscale app, the Go gateway in `clients/go` joins the
-tailnet by itself (tsnet) and does the same job as `tailscale serve`.
+Put these in `.env` next to `docker-compose.yml`:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `TAILCHAT_AUTH` | `serve` | `serve` (behind `tailscale serve`), `direct` (listen on the Tailscale IP and ask tailscaled who connects; needs `TAILCHAT_TLS_CERT`/`_KEY` from `tailscale cert`), or `dev` (local testing, loopback only) |
-| `TAILCHAT_HOST`, `TAILCHAT_PORT` | `127.0.0.1`, `8443` | where the server listens |
-| `TAILCHAT_SERVE_SECRET` | | `serve` mode only: answer only paths that start with `/<secret>/`, which `tailscale serve` adds (the start scripts set this) |
-| `TAILCHAT_ALLOWED_HOSTS` | | extra host names people may use to reach it; `*.ts.net`, tailnet addresses and `localhost` always work |
-| `TAILCHAT_DATA` | `./data` | database and encrypted files |
+| `TS_AUTHKEY` | | auth key for the first start (see above) |
+| `TAILCHAT_HOSTNAME` | `tailchat` | the node's machine name on your tailnet |
 | `TAILCHAT_MAX_UPLOAD_MB` | `2048` | largest file |
+| `TAILCHAT_TAILNET` | `localapi` | `off` turns the list of your machines off |
+| `TS_EXTRA_ARGS` | | extra flags for `tailscale up` in the tailscale container |
+
+The Tailchat server itself also reads these, which you can add under
+`environment:` for the `tailchat` service in `docker-compose.yml`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `TAILCHAT_ALLOWED_HOSTS` | | extra host names people may use to reach it; `*.ts.net`, tailnet addresses and `localhost` always work |
 | `TAILCHAT_STATUS_HOURS` | `24` | how long status updates last |
 | `TAILCHAT_EDIT_WINDOW_S`, `TAILCHAT_DELETE_WINDOW_S` | 15 minutes, 2 days | edit and "delete for everyone" windows |
-| `TAILCHAT_TAILNET` | `localapi` (`cli` with `--tailscale`) | where the list of your machines comes from: `localapi` (tailscaled's socket, read-only), `cli` (the `tailscale` command) or `off` |
-| `TAILSCALE_SOCKET` | `/var/run/tailscale/tailscaled.sock` | tailscaled's socket, for `localapi` |
-| `TAILCHAT_LIST_SELF` | on for `cli`, off otherwise | list the server's own machine as one of yours |
+| `TAILCHAT_LIST_SELF` | off | list the Tailchat node itself as one of your machines |
 
 ## Adding people and devices
 
@@ -305,7 +276,7 @@ communities. Channels and community management are in the web app.
 | `clients/java` | Java 21 library and command line, JDK only |
 | `clients/csharp` | .NET 8 library and command line |
 | `clients/cpp` | C++20 streaming file transfer with flat memory use |
-| `clients/go` | `tailchat-gateway` (tsnet) and a command-line client |
+| `clients/go` | command-line client |
 | `clients/rust` | `tailchat-drop`: send, receive and watch folders of files |
 | `clients/ruby` | bot framework with example bots |
 
