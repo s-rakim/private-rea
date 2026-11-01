@@ -179,9 +179,14 @@ Good to know:
    this source isn't allowed, tap **Settings**, turn on **Allow from this
    source** for Chrome, and go back. Tap **Install**. If Play Protect warns
    that it doesn't recognise the app, tap **More details > Install anyway**.
-4. **Connect.** Open Tailchat, enter `https://tailchat.<your tailnet name>`
-   and tap **Connect**. Allow the camera, microphone or location the first
-   time you use them in a call or a message.
+4. **Connect.** Open Tailchat, enter `tailchat.<your tailnet name>` (the
+   `https://` is added for you) and tap **Connect**. Android asks for the
+   camera and microphone the first time you start a call, and for location
+   the first time you share one.
+
+The Android app can't show notifications, because Android's in-app browser
+doesn't support them. If you want notifications on the phone, use Tailchat
+installed from Chrome instead (see step 7), or alongside it.
 
 The Android app is a device of its own: when it first opens, your other
 devices can share your chat history with it (see the next section). To update,
