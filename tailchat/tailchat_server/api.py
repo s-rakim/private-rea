@@ -39,6 +39,7 @@ MAX_HISTORY_BATCH = 500
 HISTORY_REQUEST_EVERY_MS = 10_000
 HISTORY_KEY = re.compile(r"[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22,1000}")
 MAX_GROUP = 1024
+MAX_DEVICE_GROUP = 32
 BIG = 2**53 - 1
 # Chats with admins, a name and members: groups, community announcement
 # groups and channels.
@@ -204,13 +205,21 @@ class Api:
 
     @staticmethod
     def device_pair(chat: dict) -> list[str] | None:
-        """The two devices of a device chat (one person's chat between two of
-        their devices), or None for every other chat."""
+        """The devices of a device chat (one person's chat between two of
+        their devices) or of a device group, or None for every other chat."""
         return chat["device_pair"].split("|") if chat.get("device_pair") else None
 
+    @staticmethod
+    def is_device_group(chat: dict) -> bool:
+        """A named chat between several devices of one person (PROTOCOL.md
+        §10). Unlike a device chat it has no direct_key, carries on when one
+        of its devices is logged out, and can gain or lose devices."""
+        return bool(chat.get("device_pair")) and not chat.get("direct_key")
+
     def send_chat(self, chat: dict, uid: str, event: dict, **options) -> None:
-        """An event about a chat, for one member: in a device chat only its
-        two devices hear about it, and each gets its own view of the chat."""
+        """An event about a chat, for one member: in a device chat or device
+        group only its devices hear about it, and each gets its own view of
+        the chat."""
         pair = self.device_pair(chat)
         if not pair:
             self.hub.send_to_user(uid, event, **options)
@@ -222,8 +231,9 @@ class Api:
                 self.hub.send_to_user(uid, event, only_device=d)
 
     def device_reads(self, chat: dict, member: dict, device: str) -> dict:
-        """How far one device of a device chat has received and read it. A
-        device with no row yet starts from the member's shared pointers."""
+        """How far one device of a device chat or device group has received
+        and read it. A device with no row yet starts from the member's shared
+        pointers."""
         row = self.db.get("SELECT * FROM device_reads WHERE chat_id = ? AND device_id = ?", chat["id"], device)
         if row:
             return {"delivered": row["delivered_seq"], "read": row["read_seq"]}
@@ -243,9 +253,21 @@ class Api:
             return True
         if device_id not in pair:
             return False
+        if self.is_device_group(chat):
+            return True
         return len(pair) == 2 and self.db.get(
             "SELECT COUNT(*) AS n FROM devices WHERE id IN (?, ?) AND revoked_at IS NULL", pair[0], pair[1]
         )["n"] == 2
+
+    def own_devices(self, user_id: str, ids) -> list[str]:
+        """ids, checked to be logged-in devices of user_id, deduplicated."""
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            fail(400, "deviceIds must be a list of device ids")
+        ids = list(dict.fromkeys(ids))
+        for d in ids:
+            if not self.db.get("SELECT 1 FROM devices WHERE id = ? AND user_id = ? AND revoked_at IS NULL", d, user_id):
+                fail(404, "No such device")
+        return ids
 
     def active_member(self, chat_id: str, user_id: str) -> dict | None:
         m = self.db.get("SELECT * FROM members WHERE chat_id = ? AND user_id = ?", chat_id, user_id)
@@ -322,13 +344,24 @@ class Api:
             chat["id"], floor, ceiling, viewer,
         )
         pair = self.device_pair(chat)
-        read_seq, peer = me["read_seq"], None
+        read_seq, peers = me["read_seq"], None
         if pair and device in pair:
-            # In a device chat "you" are the device asking: messages from the
-            # other device are unread here until this device reads them.
+            # In a device chat or device group "you" are the device asking:
+            # messages from your other devices are unread here until this
+            # device reads them, and the ticks follow the other devices that
+            # are still logged in.
             read_seq = self.device_reads(chat, me, device)["read"]
-            other = self.device_reads(chat, me, next(d for d in pair if d != device))
-            peer = {"deliveredSeq": other["delivered"], "readSeq": other["read"]}
+            others = [d for d in pair if d != device]
+            live = {
+                r["id"] for r in db.all(
+                    f"SELECT id FROM devices WHERE id IN ({', '.join('?' * len(others))}) AND revoked_at IS NULL", *others
+                )
+            } if others else set()
+            peers = []
+            for d in others:
+                if d in live:
+                    r = self.device_reads(chat, me, d)
+                    peers.append({"deviceId": d, "deliveredSeq": r["delivered"], "readSeq": r["read"]})
             unread = db.get(
                 """SELECT COUNT(*) AS n FROM messages WHERE chat_id = ? AND kind = 'msg'
                      AND (sender_device IS NULL OR sender_device != ?)
@@ -376,7 +409,8 @@ class Api:
             "unread": unread,
             "lastMessage": self.message_view(last, viewer, device) if last else None,
             "devices": pair,
-            "peer": peer,
+            "deviceGroup": self.is_device_group(chat),
+            "peers": peers,
             "wallpaper": self.wallpaper_view(chat),
         }
 
@@ -553,9 +587,9 @@ class Api:
             if kind == "msg":
                 pair = self.device_pair(chat)
                 if pair:
-                    # Give both devices their own pointers before the shared
-                    # member row moves on, so the other device still sees this
-                    # message as unread.
+                    # Give each device its own pointers before the shared member
+                    # row moves on, so the other devices still see this message
+                    # as unread.
                     for d in pair:
                         db.run(
                             """INSERT OR IGNORE INTO device_reads (chat_id, device_id, delivered_seq, read_seq)
@@ -1123,6 +1157,37 @@ class Api:
             self.send_chat(chat, uid, {"type": "chat", "chat": view}, except_device=me)
             return {"chat": view}
 
+        # A device group: a named chat between this device and several other
+        # devices of yours. Messages in it are sealed for those devices only.
+        @r.add("POST", "/api/chats/device-group")
+        async def device_group(ctx: Context):
+            body = await read_json(ctx.request)
+            uid, me = ctx.user["id"], ctx.device["id"]
+            name = v_str(body.get("name"), "name", min=1, max=100).strip()
+            if not name:
+                fail(400, "name can't be blank")
+            others = [d for d in self.own_devices(uid, body.get("deviceIds")) if d != me]
+            if len(others) < 2:
+                fail(400, "Pick at least two other devices (or chat with one device directly)")
+            if len(others) + 1 > MAX_DEVICE_GROUP:
+                fail(400, f"Device groups are limited to {MAX_DEVICE_GROUP} devices")
+            avatar = None
+            if body.get("avatar"):
+                row = db.get("SELECT id FROM files WHERE id = ? AND public = 1", body["avatar"])
+                avatar = row["id"] if row else None
+            chat_id = new_id()
+            with db.tx():
+                db.run(
+                    """INSERT INTO chats (id, type, name, avatar, created_by, created_at, device_pair)
+                       VALUES (?, 'direct', ?, ?, ?, ?, ?)""",
+                    chat_id, name, avatar, uid, now(), "|".join(sorted([me, *others])),
+                )
+                db.run("INSERT INTO members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'admin', ?)", chat_id, uid, now())
+            chat = self.get_chat(chat_id)
+            self.system_message(chat, uid, {"event": "created", "name": name})
+            self.broadcast_chat(chat_id)
+            return {"chat": self.chat_view(self.get_chat(chat_id), uid, me)}
+
         @r.add("POST", "/api/chats/group")
         async def group(ctx: Context):
             body = await read_json(ctx.request)
@@ -1157,8 +1222,29 @@ class Api:
             chat, member = self.require_member(ctx.params["id"], ctx.user["id"], device=ctx.device["id"])
             is_admin = member["role"] == "admin"
             changes: list[dict] = []
+            device_group = self.is_device_group(chat)
+            removed_devices: list[str] = []
+            if "devices" in body:
+                if not device_group:
+                    fail(400, "Only device groups have devices to change")
+                me = ctx.device["id"]
+                wanted = [d for d in self.own_devices(ctx.user["id"], body["devices"]) if d != me]
+                current = self.device_pair(chat)
+                if len(wanted) + 1 > MAX_DEVICE_GROUP:
+                    fail(400, f"Device groups are limited to {MAX_DEVICE_GROUP} devices")
+                # Devices that were logged out stay listed, so a logged-out
+                # device's messages keep their sender.
+                gone = {r["id"] for r in db.all(
+                    f"SELECT id FROM devices WHERE id IN ({', '.join('?' * len(current))}) AND revoked_at IS NOT NULL", *current
+                )}
+                keep = sorted({me, *wanted, *gone})
+                added = [d for d in keep if d not in current]
+                removed_devices = [d for d in current if d not in keep]
+                if added or removed_devices:
+                    db.run("UPDATE chats SET device_pair = ? WHERE id = ?", "|".join(keep), chat["id"])
+                    changes.append({"event": "devices", "added": added, "removed": removed_devices, "by": me})
             if any(k in body for k in ("name", "description", "avatar")):
-                if chat["type"] not in GROUPISH:
+                if chat["type"] not in GROUPISH and not device_group:
                     fail(400, "Only groups have a name, description and photo")
                 if chat["admins_only_edit"] and not is_admin:
                     fail(403, "Only admins can edit this group's info")
@@ -1194,6 +1280,8 @@ class Api:
                 value = v_bool(body[field], field, optional=False)
                 db.run(f"UPDATE chats SET {column} = ? WHERE id = ?", int(value), chat["id"])
                 changes.append({"event": "settings", field: value})
+            for d in removed_devices:
+                hub.send_to_user(ctx.user["id"], {"type": "chat-removed", "chatId": chat["id"]}, only_device=d)
             for event in changes:
                 self.system_message(self.get_chat(chat["id"]), ctx.user["id"], event)
             self.broadcast_chat(chat["id"])
@@ -1313,6 +1401,23 @@ class Api:
         @r.add("DELETE", "/api/chats/:id")
         async def delete_chat(ctx: Context):
             chat, member = self.require_member(ctx.params["id"], ctx.user["id"], allow_former=True, device=ctx.device["id"])
+            if self.is_device_group(chat):
+                # Deleting a device group takes this device out of it; the
+                # others carry on. The last device to leave deletes it.
+                me = ctx.device["id"]
+                left = [d for d in self.device_pair(chat) if d != me]
+                live = db.get(
+                    f"SELECT COUNT(*) AS n FROM devices WHERE id IN ({', '.join('?' * len(left)) or 'NULL'}) AND revoked_at IS NULL", *left
+                )["n"]
+                hub.send_to_user(ctx.user["id"], {"type": "chat-removed", "chatId": chat["id"]}, only_device=me)
+                if not live:
+                    db.run("DELETE FROM members WHERE chat_id = ? AND user_id = ?", chat["id"], ctx.user["id"])
+                    return {"ok": True}
+                db.run("UPDATE chats SET device_pair = ? WHERE id = ?", "|".join(left), chat["id"])
+                chat = self.get_chat(chat["id"])
+                self.system_message(chat, ctx.user["id"], {"event": "devices", "added": [], "removed": [me], "by": me})
+                self.broadcast_chat(chat["id"])
+                return {"ok": True}
             if chat["type"] in GROUPISH and member["left_at"] is None:
                 fail(400, "Exit the group before deleting it")
             seq = chat["last_seq"]
@@ -1561,7 +1666,10 @@ class Api:
                 fail(400, "Channel posts aren't encrypted to devices")
             pair = self.device_pair(chat)
             if pair:
-                rows = db.all("SELECT * FROM devices WHERE id IN (?, ?) AND revoked_at IS NULL", pair[0], pair[1])
+                rows = db.all(
+                    f"SELECT * FROM devices WHERE id IN ({', '.join('?' * len(pair))}) AND user_id = ? AND revoked_at IS NULL",
+                    *pair, ctx.user["id"],
+                )
                 return {"devices": [self.device_view(d) for d in rows]}
             rows = db.all(
                 """SELECT d.* FROM devices d JOIN members m ON m.user_id = d.user_id
@@ -1788,8 +1896,8 @@ class Api:
             delivered = min(v_int(body.get("delivered"), "delivered", optional=True) or 0, ceiling)
             read = min(v_int(body.get("read"), "read", optional=True) or 0, ceiling)
             if self.device_pair(chat):
-                # A device chat keeps receipts per device; the other device's
-                # ticks come from these (chat view "peer").
+                # Device chats and device groups keep receipts per device; the
+                # ticks on the other devices come from these (chat view "peers").
                 mine = self.device_reads(chat, member, ctx.device["id"])
                 if max(delivered, read) <= mine["delivered"] and read <= mine["read"] and not (read and member["marked_unread"]):
                     return {"ok": True}
@@ -2047,14 +2155,21 @@ class Api:
                 return
             others = [u for u in self.active_member_ids(chat_id) if u != user_id and not self.either_blocked(u, user_id)]
             # Calling yourself rings your own devices: in a device chat the
-            # other device, in your own chat every other device you have.
+            # other device, in a device group its other logged-in devices, in
+            # your own chat every other device you have.
             own: list[str] = []
             if not others and chat["type"] == "direct":
                 pair = self.device_pair(chat)
                 if pair:
                     if sock.device_id not in pair or not self.visible_to_device(chat, sock.device_id):
                         return
-                    own = [d for d in pair if d != sock.device_id]
+                    own = [
+                        r["id"]
+                        for r in db.all(
+                            f"SELECT id FROM devices WHERE id IN ({', '.join('?' * len(pair))}) AND user_id = ? AND revoked_at IS NULL AND id != ?",
+                            *pair, user_id, sock.device_id,
+                        )
+                    ]
                 else:
                     own = [
                         r["id"]

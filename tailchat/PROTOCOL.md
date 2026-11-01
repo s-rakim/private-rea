@@ -228,7 +228,7 @@ putting itself in the middle of a call.
 Group calls are a mesh of up to 8 people.
 
 Calling yourself rings your own devices. In a device chat (§10) the other
-device gets the `ring`; in your own chat (the direct chat whose only member is
+device gets the `ring`, in a device group its other logged-in devices; in your own chat (the direct chat whose only member is
 you) every other device you have gets it. A `ring` also carries `fromDevice`.
 Each device answers for itself: one of them picking up or declining doesn't
 stop the others ringing, `declined` says which `deviceId` declined, and the
@@ -277,6 +277,7 @@ bits, so only the devices that were rung know the room.
 | `POST /api/history/request`, `GET /api/history/requests`, `DELETE /api/history/requests/:deviceId` | ask your other devices for chat history, list requests, decline or cancel (§9) |
 | `POST /api/history/keys {deviceId, keys: [{messageId, key}], done}` | share message keys with another device of yours (§9) |
 | `POST /api/chats/devices {deviceId, open?}`, `PATCH /api/devices/:id {name}` | chat with one of your other devices (§10), rename a device |
+| `POST /api/chats/device-group {name, deviceIds, avatar?}` | a group of several of your devices (§10) |
 | `GET /api/machines` | your machines on the tailnet, to list each as a chat (§10) |
 | `POST /api/chats/community {name, description?, avatar?, members?}` | new community (§8) |
 | `POST /api/communities/:id/groups {name, members?}` or `{groupId}`, `DELETE /api/communities/:id/groups/:groupId` | add a new or existing group, remove a group |
@@ -384,20 +385,59 @@ it or change it or its messages, and get its events. Any other device gets
 pins. `GET /api/chats/:id/devices` lists just the two, so messages are sealed
 for them alone. It disappears once either device is logged out, and history
 sharing (§9) never copies it to a third device. View once messages (`400`)
-and calls aren't available in it, since the device at the other end is you.
-
-Since both ends are the same member, a device chat keeps read state per
-device. Its view, as each device gets it, has `me.readSeq` and `unread` for
-that device (counting messages whose `senderDevice` is the other one), and
-`peer: {deliveredSeq, readSeq}` for the other device, which is what the ticks
-on your messages follow. `POST /api/chats/:id/receipts` moves the calling
-device's pointers and sends both devices their new view instead of a `receipt`
-event. Clients put a message on the right when `senderDevice` is the device
-they run on, and on the left when it came from the other one. Every other
-chat's view has `peer: null`.
+aren't available in it, since the device at the other end is you.
 
 `PATCH /api/devices/:id {name}` renames one of your devices; your devices get a
 `devices` event.
+
+### Device groups
+
+A device group is a named chat between several devices of the same person,
+for sending something to all of them at once.
+`POST /api/chats/device-group {name, deviceIds, avatar?}` creates one between
+the calling device and `deviceIds` (at least two other logged-in devices of
+the same user, up to 32 devices in all). Like a device chat it is a `direct`
+chat whose only member is that user, but its view carries `deviceGroup: true`,
+its `name` and `avatar`, and `devices` (sorted) lists every device in it.
+Several groups may have the same devices.
+
+The server treats it as belonging to those devices, as for a device chat:
+only they see it and its messages, can post or change it, and get its events,
+and `GET /api/chats/:id/devices` lists those of them that are still logged in,
+so messages are sealed for them alone. Clients seal only for devices that are
+in the chat's `devices` and belong to the user. Unlike a device chat it
+carries on when one of its devices is logged out.
+
+* `PATCH /api/chats/:id {name}` or `{avatar}` renames it or changes its photo.
+* `PATCH /api/chats/:id {devices}` sets which of your other logged-in devices
+  are in it (the calling device stays). A removed device gets `chat-removed`,
+  can't open the chat any more and gets no new messages; it keeps what it has
+  already decrypted. The change is a system message
+  `{"event": "devices", "added": [...], "removed": [...], "by": deviceId}`.
+* `DELETE /api/chats/:id` takes the calling device out of it (the same
+  `devices` event with `removed: [by]`). Once no logged-in device is left the
+  chat is gone.
+
+Group features (members, admins, invite links, communities) don't apply, and
+neither do view once messages. A call in a device group rings its other
+logged-in devices (up to 7). History sharing (§9) never copies a
+device group to another device.
+
+#### Read state in device chats and device groups
+
+Every end of a device chat or device group is the same member, so these
+chats keep read state per device. Their view, as each device gets it, has
+`me.readSeq` and `unread` for that device (counting messages whose
+`senderDevice` is another device), and `peers`, one
+`{deviceId, deliveredSeq, readSeq}` for each of the chat's other devices that
+is still logged in. The ticks on your messages follow `peers`: read once all
+of them have read it, delivered once all of them have it. A device that gets
+its first pointers after the chat already had messages starts from the newest
+one, so it never sees old messages as unread. `POST /api/chats/:id/receipts`
+moves the calling device's pointers and sends each of the chat's devices its
+new view instead of a `receipt` event. Clients put a message on the right when
+its `senderDevice` is the device they run on and on the left when another
+device sent it. Every other chat's view has `peers: null`.
 
 ### Machines
 

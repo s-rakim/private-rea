@@ -1,6 +1,6 @@
 // Dialogs and full-screen layers shared by the screens: pickers, message
 // info, media viewer, status viewer and composer, calls, group invites.
-import { S, api, calls, render, nameOf, isMe, callerName, callableDevices, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, isDeviceChat, tickState, ownDevice, shareHistory, declineHistory, renameDevice, canChangeWallpaper, setWallpaper, removeWallpaper, wallpaperChoice, wallpaperOf } from './app.js';
+import { S, api, calls, render, nameOf, isMe, callerName, callableDevices, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, ownDevice, shareHistory, declineHistory, renameDevice, canChangeWallpaper, setWallpaper, removeWallpaper, wallpaperChoice, wallpaperOf } from './app.js';
 import { h, icon, iconButton, avatar, dialog, promptDialog, toast, viewer, timeOf, listTime, dayLabel, fileSize, duration, reconcile } from './ui.js';
 import { securityCode } from './crypto.js';
 import { exportChat } from './export.js';
@@ -115,7 +115,7 @@ export function pickChats({ title, okLabel = 'Send', max = 5 }) {
       ...chats.map((c) => ({
         key: c.id,
         title: chatTitle(c),
-        sub: isChannel(c) ? `Channel · ${c.followers} followers` : isGroupish(c) ? `${c.members.filter((m) => !m.left).length} members` : c.devices ? 'Your device' : c.members.find((m) => !isMe(m.userId))?.userId || 'Message yourself',
+        sub: isChannel(c) ? `Channel · ${c.followers} followers` : isGroupish(c) ? `${c.members.filter((m) => !m.left).length} members` : c.deviceGroup ? `${c.devices.length} of your devices` : c.devices ? 'Your device' : c.members.find((m) => !isMe(m.userId))?.userId || 'Message yourself',
         av: chatAvatar(c),
         chatId: async () => c.id,
       })),
@@ -389,7 +389,7 @@ async function runExport(chat, media) {
 // ---------- message details ----------
 
 export function messageInfo(m, chat) {
-  if (isDeviceChat(chat)) return deviceMessageInfo(m, chat);
+  if (Array.isArray(chat.devices)) return deviceMessageInfo(m, chat);
   const others = chat.members.filter((x) => !x.left && !isMe(x.userId) && x.joinedSeq < m.seq);
   const read = others.filter((x) => x.readSeq >= m.seq);
   const delivered = others.filter((x) => x.readSeq < m.seq && x.deliveredSeq >= m.seq);
@@ -415,19 +415,21 @@ export function messageInfo(m, chat) {
   });
 }
 
-// In a chat with your other device, the receipts are that device's.
+// In a device chat or device group, the receipts are your other devices'.
 function deviceMessageInfo(m, chat) {
-  const state = tickState(m, chat);
-  const device = chatTitle(chat);
-  const [iconName, text] = state === 'read'
-    ? ['checks', `Read on ${device}`]
-    : state === 'delivered' ? ['checks', `Delivered to ${device}`] : ['check', `Not delivered to ${device} yet`];
+  const peers = (chat.peers || []).map((p) => ({ ...p, name: ownDevice(p.deviceId)?.name || 'Your other device' }));
+  const section = (title, iconName, list) => (list.length
+    ? [h('div', { class: 'list-section' }, icon(iconName), ` ${title}`), list.map((p) => h('div', { class: 'menu-row' }, icon('devices'), h('div', { class: 'grow' }, p.name)))]
+    : null);
   dialog({
     title: 'Message info',
     flush: true,
     content: [
       h('div', { class: 'card' }, h('div', { class: 'muted' }, `Sent ${dayLabel(m.createdAt)} at ${timeOf(m.createdAt)}`), h('div', null, previewText(m))),
-      h('div', { class: 'list-section' }, icon(iconName), ` ${text}`),
+      section('Read on', 'checks', peers.filter((p) => p.readSeq >= m.seq)),
+      section('Delivered to', 'checks', peers.filter((p) => p.readSeq < m.seq && p.deliveredSeq >= m.seq)),
+      section('Not delivered yet', 'check', peers.filter((p) => p.deliveredSeq < m.seq)),
+      !peers.length ? h('p', { class: 'empty' }, 'None of your other devices in this chat are logged in.') : null,
     ],
   });
 }

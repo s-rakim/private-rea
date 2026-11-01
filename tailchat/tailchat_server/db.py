@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS chats (
   pinned_message TEXT,
   last_seq INTEGER NOT NULL DEFAULT 0,
   community_id TEXT,                 -- a group that belongs to a community
-  device_pair TEXT,                  -- "a|b": a chat between two devices of one person
+  device_pair TEXT,                  -- "a|b": a chat between two devices of one person, or
+                                     -- "a|b|c...": a device group (direct_key NULL)
   wallpaper TEXT,                    -- JSON {id, payload, by, at}: the chat's encrypted wallpaper
   wallpaper_file TEXT                -- the encrypted image that wallpaper uses, if any
 );

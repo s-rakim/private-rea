@@ -145,14 +145,15 @@ test('each end of a device chat has its own unread count and receipts', async ()
   const pushed = await laptop.waitFor((e) => e.type === 'chat' && e.chat.id === chat.id && e.chat.unread === 2);
   assert.ok(pushed.chat.me.readSeq < message.seq);
   assert.ok((await laptop.call('GET', '/api/chats')).chats.find((c) => c.id === chat.id).unread === 2);
-  assert.deepEqual((await view(phone)).peer, { deliveredSeq: 0, readSeq: 0 }, 'the phone sees single ticks');
+  const peers = (seqs) => [{ deviceId: laptop.deviceId, ...seqs }];
+  assert.deepEqual((await view(phone)).peers, peers({ deliveredSeq: 0, readSeq: 0 }), 'the phone sees single ticks');
 
   await laptop.call('POST', `/api/chats/${chat.id}/receipts`, { delivered: message.seq });
-  assert.deepEqual((await view(phone)).peer, { deliveredSeq: message.seq, readSeq: 0 });
+  assert.deepEqual((await view(phone)).peers, peers({ deliveredSeq: message.seq, readSeq: 0 }));
   await laptop.call('POST', `/api/chats/${chat.id}/receipts`, { read: message.seq });
   assert.equal((await view(laptop)).unread, 0);
-  assert.deepEqual((await view(phone)).peer, { deliveredSeq: message.seq, readSeq: message.seq });
-  await phone.waitFor((e) => e.type === 'chat' && e.chat.id === chat.id && e.chat.peer?.readSeq === message.seq);
+  assert.deepEqual((await view(phone)).peers, peers({ deliveredSeq: message.seq, readSeq: message.seq }));
+  await phone.waitFor((e) => e.type === 'chat' && e.chat.id === chat.id && e.chat.peers?.[0]?.readSeq === message.seq);
 
   // A reply from the laptop is unread on the phone, not on the laptop.
   const { message: reply } = await send(laptop, chat.id, { type: 'text', text: 'back' });
