@@ -173,6 +173,14 @@ a { color: var(--primary); }
   background-image: radial-gradient(var(--pattern) 1.5px, transparent 1.6px);
   background-size: 22px 22px; }
 .messages .spacer { flex: 1; }
+.messages.has-wallpaper, .wallpaper-preview.has-wallpaper { background-size: cover; background-position: center; background-repeat: no-repeat; }
+.wallpaper-preview { height: 220px; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; border: 1px solid var(--border); }
+.wallpaper-preview .msg { max-width: 75%; padding: 6px 9px; border-radius: 7.5px; font-size: 13.5px; background: var(--bubble-in); color: var(--text); box-shadow: 0 1px .5px var(--bubble-shadow); }
+.wallpaper-preview .msg.out { align-self: flex-end; background: var(--bubble-out); }
+.wallpaper-tools { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+.wallpaper-tools .btn { display: inline-flex; align-items: center; gap: 6px; }
+.wallpaper-dim { display: flex; align-items: center; gap: 8px; min-width: 160px; }
+.wallpaper-dim input { flex: 1; accent-color: var(--accent); }
 .day { align-self: center; background: var(--system); color: var(--muted); font-size: 12.5px; padding: 5px 12px; border-radius: 8px; margin: 10px 0; box-shadow: 0 1px .5px var(--bubble-shadow); text-transform: uppercase; }
 .system-msg { align-self: center; background: var(--system); color: var(--muted); font-size: 12.5px; padding: 5px 12px; border-radius: 8px; margin: 4px 0; max-width: 80%; text-align: center; box-shadow: 0 1px .5px var(--bubble-shadow); }
 .e2e-note { align-self: center; background: color-mix(in srgb, #ffeecd 85%, var(--chat-bg)); color: #54656f; font-size: 12.5px; padding: 6px 12px; border-radius: 8px; margin: 6px 0 10px; max-width: 520px; text-align: center; }

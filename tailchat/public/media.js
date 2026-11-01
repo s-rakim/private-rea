@@ -92,6 +92,24 @@ export async function resizePhoto(file, size = 640) {
   }
 }
 
+// Chat wallpapers: at most 2560 px on the long side, as JPEG.
+export async function resizeWallpaper(file, max = 2560) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await loadImage(url);
+    const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+    if (!blob) throw new Error("This image can't be used as a wallpaper");
+    return blob;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 // Voice notes: MediaRecorder plus a simple level meter for the waveform.
 export class VoiceRecorder {
   async start() {

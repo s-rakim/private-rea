@@ -228,6 +228,12 @@ shares its key and its chats. The Android APK is a device of its own.
   fixed. Any theme can be edited: Tailchat makes your own copy, shows the
   colours live as you pick them, warns about text that would be hard to read,
   and gives each theme a code you can paste on another device.
+* **Chat wallpapers**: give any chat a photo or a colour, dimmed as much as you
+  like. Everyone in the chat sees the same wallpaper on every device (both
+  devices of a device chat, every member of a group), in place of their
+  theme's chat background. It's end-to-end encrypted like the messages, so
+  the server never sees the photo. In groups where only admins edit the
+  group info, only admins change it.
 
 Not included: payments, business tools, live location and a sticker store.
 
@@ -300,6 +306,19 @@ communities. Channels and community management are in the web app.
 | `clients/go` | `tailchat-gateway` (tsnet) and a command-line client |
 | `clients/rust` | `tailchat-drop`: send, receive and watch folders of files |
 | `clients/ruby` | bot framework with example bots |
+
+### Android app
+
+`mobile/` is an Expo app that opens your server's web app in a full-screen
+WebView, with camera, microphone and location for calls and sharing, and the
+share sheet for saving files. Install Tailscale on the phone, open Tailchat and
+enter your server address. APKs are on the repository's Releases page.
+
+The **Android APK** workflow builds it on [EAS](https://expo.dev) and publishes
+a release with the APK. Add an `EXPO_TOKEN` repository secret (an access token
+from expo.dev account settings), then run the workflow from the Actions tab or
+push a `mobile-v*` tag. To build by hand: `cd mobile && npm ci && npx eas-cli
+build --platform android --profile apk`.
 
 ## Development
 

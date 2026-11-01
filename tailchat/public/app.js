@@ -3,8 +3,8 @@
 import { PRESETS, findTheme, paint } from './themes.js';
 import { Api, ApiError, Realtime, kvGet, kvSet } from './api.js';
 import { CallManager } from './calls.js';
-import { KeyRing, callAad, chatAad, codeFromFingerprint, decryptFile, deviceCode, encryptFile, generateDeviceKeys, keyFingerprint, newMessageId, statusAad } from './crypto.js';
-import { describeMedia, kindFor } from './media.js';
+import { KeyRing, callAad, chatAad, codeFromFingerprint, decryptFile, deviceCode, encryptFile, generateDeviceKeys, keyFingerprint, newMessageId, statusAad, wallpaperAad } from './crypto.js';
+import { describeMedia, kindFor, resizeWallpaper } from './media.js';
 import { toast } from './ui.js';
 
 export const api = new Api();
@@ -24,6 +24,7 @@ export const S = {
   typing: new Map(), // chatId -> Map userId -> { kind, until }
   statuses: new Map(),
   statusContent: new Map(),
+  wallpapers: new Map(), // `${chatId}:${wallpaperId}:${at}` -> { ok } | { error } | { pending }
   calls: [],
   starred: null,
   view: 'chats',
@@ -441,6 +442,8 @@ export function systemText(m, c) {
       return `${who} changed the ${kind} description`;
     case 'photo':
       return `${who} changed this ${kind}'s icon`;
+    case 'wallpaper':
+      return c.removed ? `${who} removed the chat wallpaper` : `${who} changed the chat wallpaper`;
     case 'disappearing':
       return c.seconds ? `${who} turned on disappearing messages. New messages will disappear ${disappearAfter(c.seconds)} after they're sent.` : `${who} turned off disappearing messages.`;
     case 'settings':
@@ -1137,7 +1140,10 @@ function handleEvent(e) {
       const prev = S.chats.get(e.chat.id);
       S.chats.set(e.chat.id, e.chat);
       if (e.chat.lastMessage) decryptMessage(e.chat.lastMessage);
-      if (prev && (prev.members.length !== e.chat.members.length || String(prev.devices) !== String(e.chat.devices))) S.chatDevices.delete(e.chat.id);
+      if (prev && (prev.members.length !== e.chat.members.length || String(prev.devices) !== String(e.chat.devices))) {
+        S.chatDevices.delete(e.chat.id);
+        wallpaperDevicesChanged(e.chat.id);
+      }
       if (S.active === e.chat.id) markRead(e.chat.id);
       break;
     }
@@ -1166,7 +1172,11 @@ function handleEvent(e) {
     case 'devices':
       if (S.knownDevices.has(e.userId)) checkDevicesOf(e.userId).catch(() => {});
       if (isMe(e.userId)) loadHistory().catch(() => {});
-      for (const [chatId, chat] of S.chats) if (chat.members.some((m) => m.userId === e.userId)) S.chatDevices.delete(chatId);
+      for (const [chatId, chat] of S.chats) {
+        if (!chat.members.some((m) => m.userId === e.userId)) continue;
+        S.chatDevices.delete(chatId);
+        wallpaperDevicesChanged(chatId);
+      }
       break;
     case 'status':
       S.statuses.set(e.status.id, e.status);
@@ -1286,4 +1296,115 @@ export async function loadStarred() {
   S.starred = messages;
   for (const m of messages) decryptMessage(m);
   render();
+}
+
+// ---------- chat wallpapers (PROTOCOL.md §11) ----------
+
+const WALLPAPER_COLOR = /^#[0-9a-f]{6}$/i;
+const resealed = new Set();
+const rawWallpapers = new Map(); // tag -> the decrypted wallpaper, to seal again
+
+export function canChangeWallpaper(chat) {
+  return !!chat && !isChannel(chat) && !chat.me.left && (!isGroupish(chat) || !chat.adminsOnlyEdit || chat.me.role === 'admin');
+}
+
+// The chat's wallpaper as { color, dim, url }, or null while there is none
+// or it can't be read here. Decrypts and downloads in the background.
+export function wallpaperOf(chat) {
+  const wp = chat?.wallpaper;
+  if (!wp) return null;
+  const key = `${chat.id}:${wp.id}:${wp.at}`;
+  const hit = S.wallpapers.get(key);
+  if (!hit) {
+    S.wallpapers.set(key, { pending: true });
+    openWallpaper(chat, wp).then(
+      (ok) => S.wallpapers.set(key, { ok }),
+      (err) => S.wallpapers.set(key, { error: err.message }),
+    ).finally(render);
+    return null;
+  }
+  const c = hit.ok;
+  if (!c) return null;
+  const file = c.file ? S.files.get(c.file.id) : null;
+  if (c.file && !file) ensureFile(c.file).catch(() => {});
+  return { color: c.color, dim: c.dim, url: file?.url || null };
+}
+
+async function openWallpaper(chat, wp) {
+  const raw = await S.ring.open(wp.payload, wallpaperAad(chat.id, wp.id), wp.by);
+  if (raw?.type !== 'wallpaper') throw new Error('Not a wallpaper');
+  const content = {
+    color: WALLPAPER_COLOR.test(raw.color) ? raw.color : null,
+    dim: Math.max(0, Math.min(80, Number(raw.dim) || 0)),
+    // Only images, and only the file the server says this wallpaper uses.
+    file: raw.file?.id && raw.file.id === wp.file ? { ...raw.file, mime: /^image\/(jpeg|png|webp)$/.test(raw.file.mime) ? raw.file.mime : 'image/jpeg' } : null,
+  };
+  rawWallpapers.set(`${chat.id}:${wp.id}:${wp.at}`, raw);
+  resealIfNeeded(chat, wp, raw).catch(() => {});
+  return content;
+}
+
+// Someone in the chat linked or logged out a device, or the members changed:
+// check that the wallpaper is still sealed for all of them.
+function wallpaperDevicesChanged(chatId) {
+  const chat = S.chats.get(chatId);
+  const wp = chat?.wallpaper;
+  if (!wp) return;
+  const tag = `${chat.id}:${wp.id}:${wp.at}`;
+  const raw = rawWallpapers.get(tag);
+  if (!raw) return;
+  resealed.delete(tag);
+  resealIfNeeded(chat, wp, raw).catch(() => {});
+}
+
+// Devices linked, or people added, since the wallpaper was set have no key
+// for it: seal it again for everyone in the chat now.
+async function resealIfNeeded(chat, wp, content) {
+  const tag = `${chat.id}:${wp.id}:${wp.at}`;
+  if (resealed.has(tag) || !canChangeWallpaper(chat)) return;
+  resealed.add(tag);
+  const keys = JSON.parse(wp.payload).keys || {};
+  const devices = await devicesFor(chat.id);
+  if (devices.every((d) => keys[d.id])) return;
+  const payload = await S.ring.seal(content, wallpaperAad(chat.id, wp.id), devices);
+  await api.put(`/api/chats/${encodeURIComponent(chat.id)}/wallpaper`, { id: wp.id, payload, file: wp.file || null, reseal: true });
+}
+
+// choice: { color, dim, image?: File | Blob, keepImage?: true }. keepImage
+// reuses the current image (to change only the colour or dimming).
+export async function setWallpaper(chat, { color, dim = 0, image, keepImage }) {
+  let file = null;
+  if (image) {
+    const small = await resizeWallpaper(image);
+    const { blob, file: keys } = await encryptFile(small);
+    const up = await api.upload(blob);
+    file = { ...keys, id: up.id, name: 'wallpaper.jpg', mime: small.type || 'image/jpeg', size: small.size };
+    S.files.set(up.id, { url: URL.createObjectURL(small), blob: small });
+  } else if (keepImage) {
+    const current = S.wallpapers.get(`${chat.id}:${chat.wallpaper?.id}:${chat.wallpaper?.at}`)?.ok;
+    file = current?.file || null;
+  }
+  const content = { type: 'wallpaper', color: WALLPAPER_COLOR.test(color) ? color : '#808080', dim: Math.max(0, Math.min(80, Math.round(dim))), file: file || undefined };
+  const id = newMessageId();
+  const payload = await S.ring.seal(content, wallpaperAad(chat.id, id), await devicesFor(chat.id));
+  const res = await api.put(`/api/chats/${encodeURIComponent(chat.id)}/wallpaper`, { id, payload, file: file?.id || null });
+  const wp = res.chat.wallpaper;
+  if (wp) {
+    S.wallpapers.set(`${chat.id}:${wp.id}:${wp.at}`, { ok: { color: content.color, dim: content.dim, file } });
+    resealed.add(`${chat.id}:${wp.id}:${wp.at}`);
+  }
+  S.chats.set(res.chat.id, { ...S.chats.get(res.chat.id), ...res.chat });
+  render();
+}
+
+export async function removeWallpaper(chat) {
+  const res = await api.del(`/api/chats/${encodeURIComponent(chat.id)}/wallpaper`);
+  S.chats.set(res.chat.id, { ...S.chats.get(res.chat.id), ...res.chat });
+  render();
+}
+
+// The current wallpaper's decrypted content, for the picker.
+export function wallpaperChoice(chat) {
+  const wp = chat?.wallpaper;
+  return wp ? S.wallpapers.get(`${chat.id}:${wp.id}:${wp.at}`)?.ok || null : null;
 }
