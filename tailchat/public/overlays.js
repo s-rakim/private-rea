@@ -1,6 +1,6 @@
 // Dialogs and full-screen layers shared by the screens: pickers, message
 // info, media viewer, status viewer and composer, calls, group invites.
-import { S, api, calls, render, nameOf, isMe, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, ownDevice, shareHistory, declineHistory, renameDevice } from './app.js';
+import { S, api, calls, render, nameOf, isMe, callerName, callableDevices, chatTitle, chatAvatar, contentOf, previewText, ensureFile, forwardMessage, openChat, statusContentOf, postStatus, sendText, isGroupish, isChannel, ownDevice, shareHistory, declineHistory, renameDevice, canChangeWallpaper, setWallpaper, removeWallpaper, wallpaperChoice, wallpaperOf } from './app.js';
 import { h, icon, iconButton, avatar, dialog, promptDialog, toast, viewer, timeOf, listTime, dayLabel, fileSize, duration, reconcile } from './ui.js';
 import { securityCode } from './crypto.js';
 import { exportChat } from './export.js';
@@ -115,7 +115,7 @@ export function pickChats({ title, okLabel = 'Send', max = 5 }) {
       ...chats.map((c) => ({
         key: c.id,
         title: chatTitle(c),
-        sub: isChannel(c) ? `Channel · ${c.followers} followers` : isGroupish(c) ? `${c.members.filter((m) => !m.left).length} members` : c.devices ? 'Your device' : c.members.find((m) => !isMe(m.userId))?.userId || 'Message yourself',
+        sub: isChannel(c) ? `Channel · ${c.followers} followers` : isGroupish(c) ? `${c.members.filter((m) => !m.left).length} members` : c.deviceGroup ? `${c.devices.length} of your devices` : c.devices ? 'Your device' : c.members.find((m) => !isMe(m.userId))?.userId || 'Message yourself',
         av: chatAvatar(c),
         chatId: async () => c.id,
       })),
@@ -389,6 +389,7 @@ async function runExport(chat, media) {
 // ---------- message details ----------
 
 export function messageInfo(m, chat) {
+  if (Array.isArray(chat.devices)) return deviceMessageInfo(m, chat);
   const others = chat.members.filter((x) => !x.left && !isMe(x.userId) && x.joinedSeq < m.seq);
   const read = others.filter((x) => x.readSeq >= m.seq);
   const delivered = others.filter((x) => x.readSeq < m.seq && x.deliveredSeq >= m.seq);
@@ -410,6 +411,25 @@ export function messageInfo(m, chat) {
       section('Not delivered yet', 'check', waiting),
       !others.length ? h('p', { class: 'empty' }, 'Nobody else was in this chat when you sent it.') : null,
       chat.type === 'direct' && delivered.length && !read.length ? h('p', { class: 'muted card' }, 'If read receipts are turned off on either side, messages show as delivered only.') : null,
+    ],
+  });
+}
+
+// In a device chat or device group, the receipts are your other devices'.
+function deviceMessageInfo(m, chat) {
+  const peers = (chat.peers || []).map((p) => ({ ...p, name: ownDevice(p.deviceId)?.name || 'Your other device' }));
+  const section = (title, iconName, list) => (list.length
+    ? [h('div', { class: 'list-section' }, icon(iconName), ` ${title}`), list.map((p) => h('div', { class: 'menu-row' }, icon('devices'), h('div', { class: 'grow' }, p.name)))]
+    : null);
+  dialog({
+    title: 'Message info',
+    flush: true,
+    content: [
+      h('div', { class: 'card' }, h('div', { class: 'muted' }, `Sent ${dayLabel(m.createdAt)} at ${timeOf(m.createdAt)}`), h('div', null, previewText(m))),
+      section('Read on', 'checks', peers.filter((p) => p.readSeq >= m.seq)),
+      section('Delivered to', 'checks', peers.filter((p) => p.readSeq < m.seq && p.deliveredSeq >= m.seq)),
+      section('Not delivered yet', 'check', peers.filter((p) => p.deliveredSeq < m.seq)),
+      !peers.length ? h('p', { class: 'empty' }, 'None of your other devices in this chat are logged in.') : null,
     ],
   });
 }
@@ -504,6 +524,97 @@ export function statusGroups() {
     byUser.get(s.userId).push(s);
   }
   return byUser;
+}
+
+// ---------- chat wallpaper ----------
+
+export const WALLPAPER_COLORS = ['#e8ddd0', '#d5e8d4', '#cfe1f0', '#e6d7ef', '#f3d9d5', '#f2e6b8', '#2f3b46', '#1e3a2f', '#3b2f4a', '#4a2f2f', '#24242a', '#0f4c5c'];
+
+// Paints a chat's wallpaper on el (the message list or a preview), or
+// clears it so the theme's chat background shows.
+export function paintWallpaper(el, wp) {
+  if (!wp) {
+    el.classList.remove('has-wallpaper');
+    el.style.removeProperty('background-color');
+    el.style.removeProperty('background-image');
+    return;
+  }
+  el.classList.add('has-wallpaper');
+  el.style.backgroundColor = safeColor(wp.color);
+  const shade = `linear-gradient(rgba(0,0,0,${(wp.dim || 0) / 100}), rgba(0,0,0,${(wp.dim || 0) / 100}))`;
+  el.style.backgroundImage = wp.url ? `${shade}, url("${wp.url}")` : shade;
+}
+
+export function wallpaperDialog(chat) {
+  if (!canChangeWallpaper(chat)) {
+    toast(isChannel(chat) ? "Channels don't have a wallpaper" : 'Only admins can change this');
+    return;
+  }
+  const current = wallpaperChoice(chat);
+  const shown = wallpaperOf(chat);
+  let color = current?.color || WALLPAPER_COLORS[0];
+  let dim = current?.dim || 0;
+  let image = null; // a newly picked File
+  let keepImage = !!current?.file;
+  let imageUrl = keepImage ? shown?.url || null : null;
+  let pickedUrl = null; // an object URL this dialog made, revoked when it closes
+  const preview = h('div', { class: 'wallpaper-preview' },
+    h('div', { class: 'msg in' }, 'The wallpaper shows behind messages'),
+    h('div', { class: 'msg out' }, 'Everyone in this chat sees it'));
+  const paint = () => paintWallpaper(preview, { color, dim, url: imageUrl });
+  const swatches = h('div', { class: 'swatches' }, WALLPAPER_COLORS.map((c) => {
+    const b = h('button', { type: 'button', class: c === color && !imageUrl ? 'active' : '', 'aria-label': `Colour ${c}`, onclick: () => {
+      color = c;
+      image = null;
+      keepImage = false;
+      imageUrl = null;
+      for (const x of swatches.children) x.classList.toggle('active', x === b);
+      paint();
+    } });
+    b.style.background = c;
+    return b;
+  }));
+  const picker = h('input', { type: 'file', accept: 'image/jpeg,image/png,image/webp', hidden: true, onchange: () => {
+    const f = picker.files?.[0];
+    if (!f) return;
+    image = f;
+    keepImage = false;
+    if (pickedUrl) URL.revokeObjectURL(pickedUrl);
+    imageUrl = pickedUrl = URL.createObjectURL(f);
+    for (const x of swatches.children) x.classList.remove('active');
+    paint();
+  } });
+  const slider = h('input', { type: 'range', min: 0, max: 80, step: 5, value: dim, 'aria-label': 'Dim the wallpaper', oninput: () => { dim = Number(slider.value); paint(); } });
+  paint();
+  dialog({
+    title: 'Chat wallpaper',
+    content: [
+      preview,
+      swatches,
+      h('div', { class: 'wallpaper-tools' },
+        h('button', { type: 'button', class: 'btn plain', onclick: () => picker.click() }, icon('image'), ' Choose a photo'),
+        picker,
+        h('label', { class: 'grow wallpaper-dim' }, h('span', { class: 'muted' }, 'Dim'), slider)),
+      h('p', { class: 'muted' }, `Everyone in this ${isGroupish(chat) ? 'group' : 'chat'} sees this wallpaper on all their devices, in place of the theme's chat background. It's end-to-end encrypted, like your messages.`),
+    ],
+    actions: [
+      chat.wallpaper ? { label: 'Remove', kind: 'danger', onClick: (close) => { close(); removeWallpaper(chat).catch((e) => toast(e.message)); } } : null,
+      { label: 'Cancel', onClick: (close) => close() },
+      {
+        label: 'Set wallpaper',
+        kind: 'primary',
+        onClick: async (close) => {
+          close();
+          try {
+            await setWallpaper(chat, { color, dim, image, keepImage });
+          } catch (err) {
+            toast(err.message);
+          }
+        },
+      },
+    ].filter(Boolean),
+    onClose: () => pickedUrl && URL.revokeObjectURL(pickedUrl),
+  });
 }
 
 export const STATUS_COLORS = ['#3f5db3', '#1e8b63', '#0e7c86', '#7552c7', '#c43d6e', '#c94f24', '#4b70cc', '#2f7d4f', '#8a6d3b', '#444342'];
@@ -756,7 +867,7 @@ export function mediaStatusDialog(file) {
 
 // ---------- calls ----------
 
-const callUi = { el: null, incoming: new Map(), tiles: new Map(), self: null, clock: null };
+const callUi = { el: null, incoming: new Map(), tiles: new Map(), self: null, clock: null, frame: null };
 
 function callTitle(chatId) {
   const chat = S.chats.get(chatId);
@@ -776,7 +887,10 @@ export function renderCalls() {
   for (const ring of ringing) {
     if (callUi.incoming.has(ring.callId)) continue;
     const chat = S.chats.get(ring.chatId);
-    const caller = S.users.get(ring.from) || { id: ring.from, name: nameOf(ring.from) };
+    const fromDevice = isMe(ring.from) ? ownDevice(ring.fromDevice) : null;
+    const caller = fromDevice
+      ? { id: fromDevice.machine?.id || fromDevice.id, name: callerName(ring) }
+      : S.users.get(ring.from) || { id: ring.from, name: nameOf(ring.from) };
     const accept = () => calls.accept(ring.callId).catch((e) => toast(e.message));
     const el = h(
       'div',
@@ -800,6 +914,7 @@ export function renderCalls() {
       callUi.el = null;
       callUi.tiles.clear();
       callUi.self = null;
+      callUi.frame = null;
       clearInterval(callUi.clock);
     }
     return;
@@ -808,6 +923,10 @@ export function renderCalls() {
     callUi.el = h('div', { class: 'call-screen', role: 'dialog', 'aria-label': 'Call' });
     layer().append(callUi.el);
     callUi.clock = setInterval(render, 1000);
+  }
+  if (call.room) {
+    renderRoomCall(call);
+    return;
   }
   const chat = S.chats.get(call.chatId);
   const peers = [...call.peers.entries()];
@@ -876,10 +995,46 @@ export function renderCalls() {
   ]);
 }
 
+// A call on the call service: its room fills the screen, with Tailchat's
+// own bar above it. The room's page asks for your name and camera once per
+// device, then remembers them.
+function renderRoomCall(call) {
+  const chat = S.chats.get(call.chatId);
+  if (!callUi.frame) {
+    callUi.frame = h('iframe', {
+      class: 'room',
+      src: call.room,
+      title: 'Call',
+      allow: 'camera; microphone; display-capture; fullscreen; autoplay; clipboard-write',
+      referrerpolicy: 'no-referrer',
+    });
+  }
+  const others = call.joined.size;
+  const state = call.status === 'active'
+    ? `${duration((Date.now() - (call.startedAt || Date.now())) / 1000)}${others > 1 ? ` · ${others + 1} devices` : ''}`
+    : call.status === 'ringing'
+      ? call.declined && chat?.type === 'direct' && !isSelfChat(chat) ? 'Declined' : 'Ringing…'
+      : 'Joining…';
+  callUi.el.classList.add('room-call');
+  reconcile(callUi.el, [
+    h(
+      'div',
+      { class: 'room-bar' },
+      avatar(chat ? chatAvatar(chat) : { id: call.chatId, name: '?' }, 'sm'),
+      h('div', { class: 'grow' }, h('div', { class: 'who ellipsis' }, callTitle(call.chatId)), h('div', { class: 'state ellipsis' }, `${call.video ? 'Video' : 'Voice'} call · ${state}`)),
+      h('a', { class: 'pop', href: call.room, target: '_blank', rel: 'noopener noreferrer', title: 'Open the call in its own window' }, icon('link')),
+      h('button', { type: 'button', class: 'hang', title: 'End call', 'aria-label': 'End call', onclick: () => calls.hangup() }, icon('hangup')),
+    ),
+    callUi.frame,
+  ]);
+}
+
+const isSelfChat = (chat) => chat?.type === 'direct' && chat.members.every((m) => isMe(m.userId)) && !chat.devices;
+
 export async function startCall(chat, video) {
   if (!chat) return;
-  if (chat.type === 'direct' && chat.members.every((m) => isMe(m.userId))) {
-    toast("You can't call yourself");
+  if (chat.type === 'direct' && chat.members.every((m) => isMe(m.userId)) && !callableDevices().length) {
+    toast('Open Tailchat on another of your devices first, then you can call it');
     return;
   }
   try {

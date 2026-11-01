@@ -77,6 +77,7 @@ channels, see §8):
     picks `messageId` (16-32 base64url characters) and sends it as `id` when posting.
   * status update: `tailchat/v1|status:<userId>`
   * call signalling: `tailchat/v1|call:<callId>|<from device id>|<to device id>` (§6)
+  * chat wallpaper: `tailchat/v1|wallpaper:<chatId>|<wallpaperId>` (§11)
 * `keys` holds one wrapped content key for every device that may read it:
   `GET /api/chats/:id/devices` (all logged-in devices of all current members,
   including the sender's own) or `GET /api/status/devices` for a status.
@@ -135,7 +136,8 @@ plain JSON such as `{"event": "added", "users": [...]}` or
 are never decrypted. `senderId` is the person who caused the event. Events:
 `created`, `added`, `joined` (`via: "community"` when joined from a community),
 `left`, `removed`, `promoted`, `demoted`, `renamed`, `description`, `photo`,
-`disappearing`, `settings`, `pinned`, `unpinned`, and for communities
+`disappearing`, `settings`, `pinned`, `unpinned`, `wallpaper` (`removed: true`
+when it was taken away, §11), and for communities
 `community` / `community-left` (in a group: added to or removed from the
 community `name`), `community-group` / `community-group-removed` (in the
 announcements: group `name` added or removed) and `deactivated`.
@@ -224,6 +226,26 @@ putting itself in the middle of a call.
 
 Group calls are a mesh of up to 8 people.
 
+Calling yourself rings your own devices. In a device chat (§10) the other
+device gets the `ring`, in a device group its other logged-in devices; in your own chat (the direct chat whose only member is
+you) every other device you have gets it. A `ring` also carries `fromDevice`.
+Each device answers for itself: one of them picking up or declining doesn't
+stop the others ringing, `declined` says which `deviceId` declined, and the
+call ends once all of them have declined. No other device can join. Calls are
+limited to 8 people or devices.
+
+#### Call service
+
+`GET /api/me` returns `calls: {port}` when the server is set up with a call
+service (`TAILCHAT_CALLS_PORT`, peer-calls in the Docker setup), or `null`.
+With one, clients still ring, accept, decline and hang up as above, but skip
+`signal`: each device in the call opens the room
+`https://<this host>:<port>/call/<callId>`, and the room sets up WebRTC
+between them. The room is on another origin, so it can't reach the client's
+keys; pages allow framing it (`frame-src`) and give it the camera, microphone
+and screen (`Permissions-Policy`), and nothing else. Call ids are 128 random
+bits, so only the devices that were rung know the room.
+
 ## 7. REST summary
 
 | Method & path | Purpose |
@@ -236,6 +258,7 @@ Group calls are a mesh of up to 8 people.
 | `GET /api/chats`, `GET /api/chats/:id` | chat list with unread counts and last message |
 | `POST /api/chats/direct {userId}`, `POST /api/chats/group {name, members, description?, avatar?}` | start chats |
 | `PATCH /api/chats/:id` | group name/description/photo, `disappearing` seconds, `adminsOnlySend`, `adminsOnlyEdit` |
+| `PUT /api/chats/:id/wallpaper {id, payload, file?, reseal?}`, `DELETE /api/chats/:id/wallpaper` | the chat's wallpaper, seen by everyone in it (§11) |
 | `PATCH /api/chats/:id/prefs` | `pinned`, `archived`, `mutedUntil`, `markedUnread` |
 | `POST /api/chats/:id/clear`, `DELETE /api/chats/:id` | clear / delete chat |
 | `POST /api/chats/:id/members`, `DELETE /api/chats/:id/members/:userId`, `POST /api/chats/:id/admins` | membership |
@@ -253,6 +276,7 @@ Group calls are a mesh of up to 8 people.
 | `POST /api/history/request`, `GET /api/history/requests`, `DELETE /api/history/requests/:deviceId` | ask your other devices for chat history, list requests, decline or cancel (§9) |
 | `POST /api/history/keys {deviceId, keys: [{messageId, key}], done}` | share message keys with another device of yours (§9) |
 | `POST /api/chats/devices {deviceId, open?}`, `PATCH /api/devices/:id {name}` | chat with one of your other devices (§10), rename a device |
+| `POST /api/chats/device-group {name, deviceIds, avatar?}` | a group of several of your devices (§10) |
 | `GET /api/machines` | your machines on the tailnet, to list each as a chat (§10) |
 | `POST /api/chats/community {name, description?, avatar?, members?}` | new community (§8) |
 | `POST /api/communities/:id/groups {name, members?}` or `{groupId}`, `DELETE /api/communities/:id/groups/:groupId` | add a new or existing group, remove a group |
@@ -360,10 +384,59 @@ it or change it or its messages, and get its events. Any other device gets
 pins. `GET /api/chats/:id/devices` lists just the two, so messages are sealed
 for them alone. It disappears once either device is logged out, and history
 sharing (§9) never copies it to a third device. View once messages (`400`)
-and calls aren't available in it, since the device at the other end is you.
+aren't available in it, since the device at the other end is you.
 
 `PATCH /api/devices/:id {name}` renames one of your devices; your devices get a
 `devices` event.
+
+### Device groups
+
+A device group is a named chat between several devices of the same person,
+for sending something to all of them at once.
+`POST /api/chats/device-group {name, deviceIds, avatar?}` creates one between
+the calling device and `deviceIds` (at least two other logged-in devices of
+the same user, up to 32 devices in all). Like a device chat it is a `direct`
+chat whose only member is that user, but its view carries `deviceGroup: true`,
+its `name` and `avatar`, and `devices` (sorted) lists every device in it.
+Several groups may have the same devices.
+
+The server treats it as belonging to those devices, as for a device chat:
+only they see it and its messages, can post or change it, and get its events,
+and `GET /api/chats/:id/devices` lists those of them that are still logged in,
+so messages are sealed for them alone. Clients seal only for devices that are
+in the chat's `devices` and belong to the user. Unlike a device chat it
+carries on when one of its devices is logged out.
+
+* `PATCH /api/chats/:id {name}` or `{avatar}` renames it or changes its photo.
+* `PATCH /api/chats/:id {devices}` sets which of your other logged-in devices
+  are in it (the calling device stays). A removed device gets `chat-removed`,
+  can't open the chat any more and gets no new messages; it keeps what it has
+  already decrypted. The change is a system message
+  `{"event": "devices", "added": [...], "removed": [...], "by": deviceId}`.
+* `DELETE /api/chats/:id` takes the calling device out of it (the same
+  `devices` event with `removed: [by]`). Once no logged-in device is left the
+  chat is gone.
+
+Group features (members, admins, invite links, communities) don't apply, and
+neither do view once messages. A call in a device group rings its other
+logged-in devices (up to 7). History sharing (§9) never copies a
+device group to another device.
+
+#### Read state in device chats and device groups
+
+Every end of a device chat or device group is the same member, so these
+chats keep read state per device. Their view, as each device gets it, has
+`me.readSeq` and `unread` for that device (counting messages whose
+`senderDevice` is another device), and `peers`, one
+`{deviceId, deliveredSeq, readSeq}` for each of the chat's other devices that
+is still logged in. The ticks on your messages follow `peers`: read once all
+of them have read it, delivered once all of them have it. A device that gets
+its first pointers after the chat already had messages starts from the newest
+one, so it never sees old messages as unread. `POST /api/chats/:id/receipts`
+moves the calling device's pointers and sends each of the chat's devices its
+new view instead of a `receipt` event. Clients put a message on the right when
+its `senderDevice` is the device they run on and on the left when another
+device sent it. Every other chat's view has `peers: null`.
 
 ### Machines
 
@@ -392,3 +465,49 @@ device's machine unless the device was renamed, adding the device's own name
 when two devices share a machine, and list each machine with no device as a
 chat that tells you to open Tailchat on it. They only do this once the
 calling device's own machine is known, so it never lists itself.
+
+## 11. Chat wallpapers
+
+A chat can have a wallpaper that everyone in it sees, on every device: both
+devices of a device chat, both people in a direct chat, every member of a
+group. It is end-to-end encrypted like a message, so the server never learns
+the colour or sees the image. Channels have none. In a group with
+`adminsOnlyEdit` only admins can change it; in any other chat every member
+can.
+
+The wallpaper is this content, sealed in an envelope (§3) for
+`GET /api/chats/:id/devices` with the aad
+`tailchat/v1|wallpaper:<chatId>|<wallpaperId>`:
+
+```json
+{"type": "wallpaper", "color": "#rrggbb", "file": { ... }, "dim": 0}
+```
+
+`color` is a 6-digit hex colour, shown when there is no image or while the
+image loads. `file` (optional) is an encrypted image uploaded with
+`POST /api/files` exactly like an attachment (§5); clients should shrink it
+first (the web app keeps the long side at 2560 px or less). `dim` (0-80) is
+how many percent of black to lay over it so messages stay readable.
+
+```
+PUT /api/chats/:id/wallpaper {"id": "<16-32 base64url>", "payload": "<envelope>", "file": "<file id>" | null}
+-> {"chat": {...}}
+DELETE /api/chats/:id/wallpaper
+```
+
+Each new wallpaper gets a new `id` (`409` if it repeats the current one), and
+`file` must be an upload of yours or the current wallpaper's image. The
+server stores it, posts a `wallpaper` system message (`{"event":
+"wallpaper"}`, or `"removed": true` on `DELETE`) and sends everyone a `chat`
+event. A chat view carries `wallpaper: {id, payload, by, at, file}` or
+`null`, where `by` is who set it. Anyone in the chat can download the image
+with `GET /api/files/:id`. The old image is deleted once nothing else uses it.
+
+To read it, open the envelope with `senderId = by`, so the server can't
+pass one person's wallpaper off as another's.
+
+A device or member that joins later has no key for it. Any device that can
+change the wallpaper and finds that a device in the chat's device list has no
+entry in `keys` seals the same content again for the current list and sends
+it with `reseal: true`, the same `id` and the same `file` (`409` if the
+wallpaper changed in the meantime). That posts no system message.

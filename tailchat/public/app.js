@@ -3,8 +3,8 @@
 import { PRESETS, findTheme, paint } from './themes.js';
 import { Api, ApiError, Realtime, kvGet, kvSet } from './api.js';
 import { CallManager } from './calls.js';
-import { KeyRing, callAad, chatAad, codeFromFingerprint, decryptFile, deviceCode, encryptFile, generateDeviceKeys, keyFingerprint, newMessageId, statusAad } from './crypto.js';
-import { describeMedia, kindFor } from './media.js';
+import { KeyRing, callAad, chatAad, codeFromFingerprint, decryptFile, deviceCode, encryptFile, generateDeviceKeys, keyFingerprint, newMessageId, statusAad, wallpaperAad } from './crypto.js';
+import { describeMedia, kindFor, resizeWallpaper } from './media.js';
 import { toast } from './ui.js';
 
 export const api = new Api();
@@ -24,6 +24,7 @@ export const S = {
   typing: new Map(), // chatId -> Map userId -> { kind, until }
   statuses: new Map(),
   statusContent: new Map(),
+  wallpapers: new Map(), // `${chatId}:${wallpaperId}:${at}` -> { ok } | { error } | { pending }
   calls: [],
   starred: null,
   view: 'chats',
@@ -124,6 +125,7 @@ export async function boot(setStatus) {
   const anon = await api.get('/api/me');
   S.me = anon.user;
   S.limits = anon.limits;
+  S.callService = anon.calls || null; // { port } when calls go through the call service
   const key = `device:${S.me.id}`;
   let stored = await kvGet(key);
   if (stored) {
@@ -193,7 +195,7 @@ export async function boot(setStatus) {
   calls = new CallManager({
     realtime,
     onChange: render,
-    onIncoming: (ring) => notify(`Incoming ${ring.video ? 'video' : 'voice'} call`, nameOf(ring.from), ring.chatId),
+    onIncoming: (ring) => notify(`Incoming ${ring.video ? 'video' : 'voice'} call`, callerName(ring), ring.chatId),
     onEnded: () => loadCalls(),
     onError: (err) => toast(err.message),
     seal: async (callId, toDevice, toUser, data) => {
@@ -206,6 +208,7 @@ export async function boot(setStatus) {
       if (JSON.parse(sealed).from !== fromDevice) throw new Error('Call signalling from the wrong device refused');
       return S.ring.open(sealed, callAad(callId, fromDevice, S.device.id), fromUser);
     },
+    room: callRoom,
   });
   realtime.connect();
   document.addEventListener('visibilitychange', () => {
@@ -280,14 +283,24 @@ export function otherMember(chat) {
 export const isGroupish = (chat) => !!chat && chat.type !== 'direct';
 export const isChannel = (chat) => chat?.type === 'channel';
 export const showsSender = (chat) => chat?.type === 'group' || chat?.type === 'community';
-export const noun = (chat) => ({ group: 'group', community: 'community', channel: 'channel' })[chat?.type] || 'chat';
+export const noun = (chat) => (chat?.deviceGroup ? 'group' : ({ group: 'group', community: 'community', channel: 'channel' })[chat?.type] || 'chat');
 
-// A device chat is between two of your own devices (PROTOCOL.md §10).
-export const isDeviceChat = (chat) => Array.isArray(chat?.devices);
-export const devicePeer = (chat) => chat?.devices?.find((id) => id !== S.device.id) || null;
+// A device chat is between two of your own devices, and a device group is a
+// named chat between several of them (PROTOCOL.md §10).
+export const isDeviceGroup = (chat) => !!chat?.deviceGroup;
+export const isDeviceChat = (chat) => Array.isArray(chat?.devices) && !chat.deviceGroup;
+export const devicePeer = (chat) => (isDeviceChat(chat) ? chat.devices.find((id) => id !== S.device.id) || null : null);
+// The other devices in a device group that are still logged in.
+export const groupDevices = (chat) => (chat?.devices || []).filter((id) => id !== S.device.id).map(ownDevice).filter((d) => d && !d.revokedAt);
+// Whether this device sent a message, which puts it on the right. In a device
+// chat or device group every end is you, so it's the sending device that counts.
+export const sentHere = (m, chat) => (Array.isArray(chat?.devices) ? m.senderDevice === S.device.id : isMe(m.senderId));
+// Who sent a message: the person, or in a device group which of your devices.
+export const senderName = (m, chat) => (isDeviceGroup(chat) ? ownDevice(m.senderDevice)?.name || 'A logged-out device' : nameOf(m.senderId));
 
 export function chatTitle(chat) {
   if (!chat) return '';
+  if (isDeviceGroup(chat)) return chat.name;
   if (isDeviceChat(chat)) return ownDevice(devicePeer(chat))?.name || 'Your other device';
   if (isGroupish(chat)) return chat.name;
   const other = otherMember(chat);
@@ -297,6 +310,7 @@ export function chatTitle(chat) {
 export function chatAvatar(chat) {
   // Coloured like the machine's row was before it opened Tailchat.
   if (isDeviceChat(chat)) return { id: ownDevice(devicePeer(chat))?.machine?.id || devicePeer(chat) || chat.id, name: chatTitle(chat) };
+  if (isDeviceGroup(chat)) return { id: chat.id, name: chat.name, src: chat.avatar, group: 'group' };
   if (isGroupish(chat)) return { id: chat.id, name: chat.name, src: chat.avatar, group: chat.type === 'group' || chat.type };
   const u = S.users.get(otherMember(chat)) || S.me;
   return { id: u.id, name: u.name, src: u.avatar };
@@ -433,6 +447,8 @@ export function systemText(m, c) {
       return `${who} changed the ${kind} description`;
     case 'photo':
       return `${who} changed this ${kind}'s icon`;
+    case 'wallpaper':
+      return c.removed ? `${who} removed the chat wallpaper` : `${who} changed the chat wallpaper`;
     case 'disappearing':
       return c.seconds ? `${who} turned on disappearing messages. New messages will disappear ${disappearAfter(c.seconds)} after they're sent.` : `${who} turned off disappearing messages.`;
     case 'settings':
@@ -452,6 +468,13 @@ export function systemText(m, c) {
       return `${who} removed the group "${c.name}"`;
     case 'deactivated':
       return `${who} deactivated this community`;
+    case 'devices': {
+      const list = (ids) => (Array.isArray(ids) ? ids : []).map((id) => (id === S.device.id ? 'this device' : ownDevice(id)?.name || 'a logged-out device')).join(', ');
+      if (c.added?.length && c.removed?.length) return `${who} added ${list(c.added)} and removed ${list(c.removed)}`;
+      if (c.added?.length) return `${who} added ${list(c.added)}`;
+      const r = Array.isArray(c.removed) ? c.removed : [];
+      return r.length === 1 && r[0] === c.by ? `${list(r)} left` : `${who} removed ${list(r)}`;
+    }
     default:
       return 'Group updated';
   }
@@ -468,6 +491,13 @@ export function tickState(m, chat) {
   if (m.pending) return 'pending';
   if (m.failed) return 'failed';
   if (isChannel(chat)) return 'sent';
+  if (Array.isArray(chat.devices)) {
+    // A device chat or device group: your other logged-in devices' receipts.
+    if (!chat.peers) return 'sent';
+    if (chat.peers.every((p) => p.readSeq >= m.seq)) return 'read';
+    if (chat.peers.every((p) => p.deliveredSeq >= m.seq)) return 'delivered';
+    return 'sent';
+  }
   const others = chat.members.filter((x) => !x.left && x.userId !== S.me.id && x.joinedSeq < m.seq);
   if (!others.length) return 'read';
   if (others.every((x) => x.readSeq >= m.seq)) return 'read';
@@ -529,7 +559,10 @@ function mergeLatest(existing, fresh) {
 async function devicesFor(chatId) {
   const cached = S.chatDevices.get(chatId);
   if (cached && Date.now() - cached.at < 60_000) return cached.devices;
-  const devices = (await api.get(`/api/chats/${encodeURIComponent(chatId)}/devices`)).devices.filter((d) => !d.revokedAt);
+  let devices = (await api.get(`/api/chats/${encodeURIComponent(chatId)}/devices`)).devices.filter((d) => !d.revokedAt);
+  // A device chat or device group is sealed for its own devices only.
+  const only = S.chats.get(chatId)?.devices;
+  if (only) devices = devices.filter((d) => only.includes(d.id) && d.userId === S.me.id);
   noticeDevices(devices, { complete: true });
   S.chatDevices.set(chatId, { devices, at: Date.now() });
   return devices;
@@ -689,7 +722,7 @@ async function ensureDeviceChats() {
   for (const d of S.ownDevices) {
     if (d.id === S.device.id || deviceChatTried.has(d.id)) continue;
     deviceChatTried.add(d.id);
-    if ([...S.chats.values()].some((c) => c.devices?.includes(d.id))) continue;
+    if ([...S.chats.values()].some((c) => isDeviceChat(c) && c.devices.includes(d.id))) continue;
     const { chat } = await api.post('/api/chats/devices', { deviceId: d.id, open: false });
     if (chat) S.chats.set(chat.id, chat);
   }
@@ -708,6 +741,25 @@ export async function renameDevice(deviceId, name) {
 }
 
 export const ownDevice = (id) => S.ownDevices.find((d) => d.id === id);
+
+// A call's room on the call service: same host, the service's own port, so
+// the room is another origin and can't reach this page's keys. The call id
+// is random, so only the devices that were rung know the room.
+export function callRoom(callId) {
+  const port = Number(S.callService?.port);
+  if (!port) return null;
+  return `https://${location.hostname}:${port}/call/${encodeURIComponent(callId)}`;
+}
+
+// Who is calling: a person, or, when you call from one of your devices to
+// another, that device.
+export function callerName(ring) {
+  if (isMe(ring.from)) return ownDevice(ring.fromDevice)?.name || 'Your other device';
+  return nameOf(ring.from);
+}
+
+// Devices of yours you can call from this one.
+export const callableDevices = () => S.ownDevices.filter((d) => d.id !== S.device.id);
 
 // Requests from your other devices that this one can answer.
 export function historyAsks() {
@@ -791,8 +843,8 @@ export async function shareHistory(deviceId, code, onProgress) {
     batch = [];
   };
   try {
-    // Channels aren't encrypted, and a device chat is for its two devices only.
-    for (const chat of [...S.chats.values()].filter((c) => !isChannel(c) && !isDeviceChat(c))) {
+    // Channels aren't encrypted, and a device chat or device group is for its own devices only.
+    for (const chat of [...S.chats.values()].filter((c) => !isChannel(c) && !c.devices)) {
       let before = 0;
       for (;;) {
         const { messages, hasMore } = await api.get(`/api/chats/${encodeURIComponent(chat.id)}/messages?limit=200${before ? `&before=${before}` : ''}`);
@@ -1069,12 +1121,12 @@ function handleEvent(e) {
       upsertMessage(m);
       const chat = S.chats.get(m.chatId);
       if (!chat) chatOf(m.chatId).catch(() => {});
-      if (m.kind === 'msg' && !isMe(m.senderId)) {
+      if (m.kind === 'msg' && !sentHere(m, chat)) {
         S.typing.get(m.chatId)?.delete(m.senderId);
         if (S.active === m.chatId && document.visibilityState === 'visible') markRead(m.chatId);
         else markDelivered(m.chatId, m.seq);
         if (chat && (S.active !== m.chatId || document.visibilityState !== 'visible') && !(chat.me.mutedUntil > Date.now())) {
-          waitForContent(m).then(() => notify(chatTitle(chat), (showsSender(chat) ? `${nameOf(m.senderId)}: ` : '') + previewText(m), m.chatId));
+          waitForContent(m).then(() => notify(chatTitle(chat), (showsSender(chat) || isDeviceGroup(chat) ? `${senderName(m, chat)}: ` : '') + previewText(m), m.chatId));
         }
       }
       break;
@@ -1100,7 +1152,10 @@ function handleEvent(e) {
       const prev = S.chats.get(e.chat.id);
       S.chats.set(e.chat.id, e.chat);
       if (e.chat.lastMessage) decryptMessage(e.chat.lastMessage);
-      if (prev && prev.members.length !== e.chat.members.length) S.chatDevices.delete(e.chat.id);
+      if (prev && (prev.members.length !== e.chat.members.length || String(prev.devices) !== String(e.chat.devices))) {
+        S.chatDevices.delete(e.chat.id);
+        wallpaperDevicesChanged(e.chat.id);
+      }
       if (S.active === e.chat.id) markRead(e.chat.id);
       break;
     }
@@ -1129,7 +1184,11 @@ function handleEvent(e) {
     case 'devices':
       if (S.knownDevices.has(e.userId)) checkDevicesOf(e.userId).catch(() => {});
       if (isMe(e.userId)) loadHistory().catch(() => {});
-      for (const [chatId, chat] of S.chats) if (chat.members.some((m) => m.userId === e.userId)) S.chatDevices.delete(chatId);
+      for (const [chatId, chat] of S.chats) {
+        if (!chat.members.some((m) => m.userId === e.userId)) continue;
+        S.chatDevices.delete(chatId);
+        wallpaperDevicesChanged(chatId);
+      }
       break;
     case 'status':
       S.statuses.set(e.status.id, e.status);
@@ -1162,15 +1221,21 @@ export function notify(title, body, chatId) {
   updateTitle();
   if (!S.prefs.notifications || !('Notification' in window) || Notification.permission !== 'granted') return;
   if (document.visibilityState === 'visible' && S.active === chatId) return;
+  const options = { body: body.slice(0, 160), tag: chatId, renotify: true, icon: '/icon-192.png', data: { chatId } };
+  // Phones and the installed app only show notifications through the service
+  // worker; desktop browsers can show them from the page.
+  const viaWorker = () => navigator.serviceWorker?.getRegistration()
+    .then((reg) => reg?.showNotification(title, options))
+    .catch(() => {});
   try {
-    const n = new Notification(title, { body: body.slice(0, 160), tag: chatId, icon: '/icon.svg' });
+    const n = new Notification(title, options);
     n.onclick = () => {
       window.focus();
       openChat(chatId);
       n.close();
     };
   } catch {
-    // some browsers only allow notifications from a service worker
+    viaWorker();
   }
 }
 
@@ -1178,7 +1243,13 @@ export function updateTitle() {
   let unread = 0;
   for (const c of S.chats.values()) if (!c.me.archived && !(c.me.mutedUntil > Date.now()) && (c.unread || c.me.markedUnread)) unread++;
   document.title = unread ? `(${unread}) Tailchat` : 'Tailchat';
+  // The number on the installed app's icon, where the system supports it.
+  if (unread !== shownBadge && 'setAppBadge' in navigator) {
+    shownBadge = unread;
+    (unread ? navigator.setAppBadge(unread) : navigator.clearAppBadge()).catch(() => {});
+  }
 }
+let shownBadge = -1;
 
 // ---------- navigation ----------
 
@@ -1249,4 +1320,115 @@ export async function loadStarred() {
   S.starred = messages;
   for (const m of messages) decryptMessage(m);
   render();
+}
+
+// ---------- chat wallpapers (PROTOCOL.md §11) ----------
+
+const WALLPAPER_COLOR = /^#[0-9a-f]{6}$/i;
+const resealed = new Set();
+const rawWallpapers = new Map(); // tag -> the decrypted wallpaper, to seal again
+
+export function canChangeWallpaper(chat) {
+  return !!chat && !isChannel(chat) && !chat.me.left && (!isGroupish(chat) || !chat.adminsOnlyEdit || chat.me.role === 'admin');
+}
+
+// The chat's wallpaper as { color, dim, url }, or null while there is none
+// or it can't be read here. Decrypts and downloads in the background.
+export function wallpaperOf(chat) {
+  const wp = chat?.wallpaper;
+  if (!wp) return null;
+  const key = `${chat.id}:${wp.id}:${wp.at}`;
+  const hit = S.wallpapers.get(key);
+  if (!hit) {
+    S.wallpapers.set(key, { pending: true });
+    openWallpaper(chat, wp).then(
+      (ok) => S.wallpapers.set(key, { ok }),
+      (err) => S.wallpapers.set(key, { error: err.message }),
+    ).finally(render);
+    return null;
+  }
+  const c = hit.ok;
+  if (!c) return null;
+  const file = c.file ? S.files.get(c.file.id) : null;
+  if (c.file && !file) ensureFile(c.file).catch(() => {});
+  return { color: c.color, dim: c.dim, url: file?.url || null };
+}
+
+async function openWallpaper(chat, wp) {
+  const raw = await S.ring.open(wp.payload, wallpaperAad(chat.id, wp.id), wp.by);
+  if (raw?.type !== 'wallpaper') throw new Error('Not a wallpaper');
+  const content = {
+    color: WALLPAPER_COLOR.test(raw.color) ? raw.color : null,
+    dim: Math.max(0, Math.min(80, Number(raw.dim) || 0)),
+    // Only images, and only the file the server says this wallpaper uses.
+    file: raw.file?.id && raw.file.id === wp.file ? { ...raw.file, mime: /^image\/(jpeg|png|webp)$/.test(raw.file.mime) ? raw.file.mime : 'image/jpeg' } : null,
+  };
+  rawWallpapers.set(`${chat.id}:${wp.id}:${wp.at}`, raw);
+  resealIfNeeded(chat, wp, raw).catch(() => {});
+  return content;
+}
+
+// Someone in the chat linked or logged out a device, or the members changed:
+// check that the wallpaper is still sealed for all of them.
+function wallpaperDevicesChanged(chatId) {
+  const chat = S.chats.get(chatId);
+  const wp = chat?.wallpaper;
+  if (!wp) return;
+  const tag = `${chat.id}:${wp.id}:${wp.at}`;
+  const raw = rawWallpapers.get(tag);
+  if (!raw) return;
+  resealed.delete(tag);
+  resealIfNeeded(chat, wp, raw).catch(() => {});
+}
+
+// Devices linked, or people added, since the wallpaper was set have no key
+// for it: seal it again for everyone in the chat now.
+async function resealIfNeeded(chat, wp, content) {
+  const tag = `${chat.id}:${wp.id}:${wp.at}`;
+  if (resealed.has(tag) || !canChangeWallpaper(chat)) return;
+  resealed.add(tag);
+  const keys = JSON.parse(wp.payload).keys || {};
+  const devices = await devicesFor(chat.id);
+  if (devices.every((d) => keys[d.id])) return;
+  const payload = await S.ring.seal(content, wallpaperAad(chat.id, wp.id), devices);
+  await api.put(`/api/chats/${encodeURIComponent(chat.id)}/wallpaper`, { id: wp.id, payload, file: wp.file || null, reseal: true });
+}
+
+// choice: { color, dim, image?: File | Blob, keepImage?: true }. keepImage
+// reuses the current image (to change only the colour or dimming).
+export async function setWallpaper(chat, { color, dim = 0, image, keepImage }) {
+  let file = null;
+  if (image) {
+    const small = await resizeWallpaper(image);
+    const { blob, file: keys } = await encryptFile(small);
+    const up = await api.upload(blob);
+    file = { ...keys, id: up.id, name: 'wallpaper.jpg', mime: small.type || 'image/jpeg', size: small.size };
+    S.files.set(up.id, { url: URL.createObjectURL(small), blob: small });
+  } else if (keepImage) {
+    const current = S.wallpapers.get(`${chat.id}:${chat.wallpaper?.id}:${chat.wallpaper?.at}`)?.ok;
+    file = current?.file || null;
+  }
+  const content = { type: 'wallpaper', color: WALLPAPER_COLOR.test(color) ? color : '#808080', dim: Math.max(0, Math.min(80, Math.round(dim))), file: file || undefined };
+  const id = newMessageId();
+  const payload = await S.ring.seal(content, wallpaperAad(chat.id, id), await devicesFor(chat.id));
+  const res = await api.put(`/api/chats/${encodeURIComponent(chat.id)}/wallpaper`, { id, payload, file: file?.id || null });
+  const wp = res.chat.wallpaper;
+  if (wp) {
+    S.wallpapers.set(`${chat.id}:${wp.id}:${wp.at}`, { ok: { color: content.color, dim: content.dim, file } });
+    resealed.add(`${chat.id}:${wp.id}:${wp.at}`);
+  }
+  S.chats.set(res.chat.id, { ...S.chats.get(res.chat.id), ...res.chat });
+  render();
+}
+
+export async function removeWallpaper(chat) {
+  const res = await api.del(`/api/chats/${encodeURIComponent(chat.id)}/wallpaper`);
+  S.chats.set(res.chat.id, { ...S.chats.get(res.chat.id), ...res.chat });
+  render();
+}
+
+// The current wallpaper's decrypted content, for the picker.
+export function wallpaperChoice(chat) {
+  const wp = chat?.wallpaper;
+  return wp ? S.wallpapers.get(`${chat.id}:${wp.id}:${wp.at}`)?.ok || null : null;
 }

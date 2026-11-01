@@ -5,7 +5,7 @@ import { S, api, render } from './app.js';
 import { h, icon, iconButton, avatar, toast, menu, dialog, promptDialog, confirmDialog, listTime, dayLabel, timeOf, fileSize, disappearingLabel, lastSeenText, richText, reconcile, Slots, toggle } from './ui.js';
 import { extensionOf, resizePhoto } from './media.js';
 import * as O from './overlays.js';
-import { jumpTo, clearChat, deleteChat, exitGroup, exitLabel, blockUser, openCommunity } from './conversation.js';
+import { jumpTo, clearChat, deleteChat, exitGroup, exitLabel, blockUser, openCommunity, leaveDeviceGroup } from './conversation.js';
 
 const slots = new Slots();
 let mediaTab = 'media';
@@ -193,11 +193,18 @@ function settingsSection(chat) {
       if (A.isGroupish(chat) && chat.adminsOnlyEdit && chat.me.role !== 'admin') toast('Only admins can change this');
       else O.disappearingDialog(chat);
     }) : null,
+    !chat.me.left && !A.isChannel(chat) ? wallpaperRow(chat) : null,
     chat.type === 'group' && chat.me.role === 'admin' && !chat.me.left ? menuRow('settings', 'Group settings', null, () => groupSettingsDialog(chat)) : null,
     A.isChannel(chat)
       ? menuRow('info', 'Not end-to-end encrypted', "Channel posts are stored as they are so anyone can follow. Don't post secrets here.", () => {})
       : menuRow('lock', 'Encryption', 'Messages and calls are end-to-end encrypted. Click to verify.', () => O.securityCodeDialog(chat)),
   );
+}
+
+function wallpaperRow(chat) {
+  const by = chat.wallpaper?.by;
+  const sub = !chat.wallpaper ? 'Theme background' : A.isDeviceChat(chat) || !by ? 'Custom' : `Set by ${A.isMe(by) ? 'you' : A.nameOf(by)}`;
+  return menuRow('wallpaper', 'Wallpaper', sub, () => O.wallpaperDialog(chat));
 }
 
 function deviceInfo(chat) {
@@ -222,6 +229,7 @@ function deviceInfo(chat) {
         'div',
         { class: 'card flush' },
         d ? menuRow('edit', 'Rename device', null, () => O.renameDeviceDialog(d)) : null,
+        wallpaperRow(chat),
         menuRow('delete', 'Clear chat', null, () => clearChat(chat)),
         menuRow('delete', 'Delete chat', null, () => deleteChat(chat), { danger: true }),
       ),
@@ -229,8 +237,85 @@ function deviceInfo(chat) {
   ];
 }
 
+// A device group: a named chat between several of your own devices.
+const patchDevices = (chat, ids) => api.patch(`/api/chats/${encodeURIComponent(chat.id)}`, { devices: ids }).catch((e) => toast(e.message));
+
+function addDevicesDialog(chat) {
+  const choices = S.ownDevices.filter((d) => !d.revokedAt && !chat.devices.includes(d.id));
+  if (!choices.length) return toast('All your devices are already in this group. Open Tailchat on another device to add it.');
+  const picked = new Set();
+  dialog({
+    title: 'Add devices',
+    content: choices.map((d) => {
+      const box = h('input', { type: 'checkbox', onchange: () => (box.checked ? picked.add(d.id) : picked.delete(d.id)) });
+      return h('label', { class: 'check-row' }, box, h('div', { class: 'grow' }, h('div', null, d.name), A.deviceWhere(d) ? h('div', { class: 'muted' }, A.deviceWhere(d)) : null));
+    }),
+    actions: [
+      { label: 'Cancel', onClick: (close) => close() },
+      {
+        label: 'Add',
+        kind: 'primary',
+        onClick: (close) => {
+          close();
+          if (picked.size) patchDevices(chat, [...A.groupDevices(chat).map((d) => d.id), ...picked]);
+        },
+      },
+    ],
+  });
+}
+
+async function removeGroupDevice(chat, d) {
+  if (!(await confirmDialog(`Remove ${d.name}?`, "It won't get new messages in this group. Messages it already has stay on it.", 'Remove', 'danger'))) return;
+  patchDevices(chat, A.groupDevices(chat).filter((x) => x.id !== d.id).map((x) => x.id));
+}
+
+function deviceGroupInfo(chat) {
+  const others = A.groupDevices(chat);
+  const me = A.ownDevice(S.device.id);
+  const count = `${others.length + 1} device${others.length ? 's' : ''}`;
+  const row = (d, self) => h(
+    'div',
+    { class: 'row' },
+    avatar({ id: d.machine?.id || d.id, name: d.name }, 'md'),
+    h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, self ? `${d.name} (this device)` : d.name), h('div', { class: 'preview ellipsis' }, A.deviceWhere(d) || `Code ${S.deviceCodes.get(d.id) || '…'}`)),
+    self ? null : iconButton('close', `Remove ${d.name}`, () => removeGroupDevice(chat, d)),
+  );
+  let photoBtn;
+  return [
+    panelHeader('Group info'),
+    h(
+      'div',
+      { class: 'scroll' },
+      h(
+        'div',
+        { class: 'card center' },
+        (photoBtn = h('button', { type: 'button', class: 'avatar-btn', title: 'Change photo', onclick: () => groupPhotoMenu(chat, photoBtn) }, avatar(A.chatAvatar(chat), 'lg'))),
+        h('h2', { class: 'editable', onclick: () => editGroupField(chat, 'name') }, chat.name, icon('edit')),
+        h('h3', null, `Your devices · ${count}`),
+      ),
+      h('div', { class: 'card' }, h('p', null, "Messages and files you send here are end-to-end encrypted for the devices in this group only. Your other devices, and Tailchat's server, can't read them.")),
+      sharedSection(chat),
+      h(
+        'div',
+        { class: 'card flush' },
+        h('div', { class: 'list-section' }, count),
+        menuRow('add', 'Add devices', null, () => addDevicesDialog(chat)),
+        me ? row(me, true) : null,
+        others.map((d) => row(d, false)),
+      ),
+      h(
+        'div',
+        { class: 'card flush' },
+        menuRow('delete', 'Clear chat', null, () => clearChat(chat)),
+        menuRow('exit', 'Leave group on this device', null, () => leaveDeviceGroup(chat), { danger: true }),
+      ),
+    ),
+  ];
+}
+
 function directInfo(chat) {
   if (A.isDeviceChat(chat)) return deviceInfo(chat);
+  if (A.isDeviceGroup(chat)) return deviceGroupInfo(chat);
   const uid = A.otherMember(chat);
   const self = A.isMe(uid);
   const u = self ? S.me : S.users.get(uid) || { id: uid, name: A.nameOf(uid) };
@@ -490,6 +575,7 @@ export function renderDetails(el, chat) {
           chat,
           A.isDeviceChat(chat)
             ? [A.ownDevice(A.devicePeer(chat)) || null, S.deviceCodes.get(A.devicePeer(chat)) || null]
+            : A.isDeviceGroup(chat) ? [S.ownDevices, chat.devices.map((id) => S.deviceCodes.get(id) || null)]
             : chat.type === 'direct' ? S.users.get(A.otherMember(chat)) : chat.members.map((m) => S.users.get(m.userId)),
           A.box(chat.id).list.length,
           [...S.files.keys()].length,

@@ -64,7 +64,7 @@ function chatMenu(chat, anchor) {
     { label: 'Clear chat', icon: 'delete', onClick: () => clearChat(chat) },
     A.isGroupish(chat) && !chat.me.left
       ? { label: exitLabel(chat), icon: 'exit', danger: true, onClick: () => exitGroup(chat) }
-      : { label: A.isGroupish(chat) ? `Delete ${A.noun(chat)}` : 'Delete chat', icon: 'delete', danger: true, onClick: () => deleteChat(chat) },
+      : { label: A.isGroupish(chat) ? `Delete ${A.noun(chat)}` : A.isDeviceGroup(chat) ? 'Leave group on this device' : 'Delete chat', icon: A.isDeviceGroup(chat) ? 'exit' : 'delete', danger: true, onClick: () => deleteChat(chat) },
   ]);
 }
 
@@ -78,9 +78,9 @@ function chatRowData(chat, title) {
     time: listTime(last?.createdAt || chat.createdAt),
     typing: A.typingText(chat.id),
     draft: draft.slice(0, 100),
-    tick: last && last.kind === 'msg' && A.isMe(last.senderId) && !last.deletedAt ? A.tickState(last, chat) : null,
-    prefix: last && A.showsSender(chat) && last.kind === 'msg' && !last.deletedAt && !A.isMe(last.senderId) ? `${A.nameOf(last.senderId)}: ` : '',
-    preview: last ? A.previewText(last) : A.isGroupish(chat) ? 'No messages yet' : A.isDeviceChat(chat) ? 'Send messages and files to this device' : '',
+    tick: last && last.kind === 'msg' && A.sentHere(last, chat) && !last.deletedAt ? A.tickState(last, chat) : null,
+    prefix: last && (A.showsSender(chat) || A.isDeviceGroup(chat)) && last.kind === 'msg' && !last.deletedAt && !A.sentHere(last, chat) ? `${A.senderName(last, chat)}: ` : '',
+    preview: last ? A.previewText(last) : A.isGroupish(chat) || A.isDeviceGroup(chat) ? 'No messages yet' : A.isDeviceChat(chat) ? 'Send messages and files to this device' : '',
     unread: chat.unread,
     marked: chat.me.markedUnread,
     muted: chat.me.mutedUntil > Date.now(),
@@ -187,7 +187,7 @@ function searchResults(q) {
   const chats = sortChats([...S.chats.values()].filter((c) => A.chatTitle(c).toLowerCase().includes(q)));
   const machines = A.machineChats().filter((m) => m.name.toLowerCase().includes(q));
   if (chats.length || machines.length) nodes.push(h('div', { class: 'list-section' }, 'Chats'), chats.map(chatRow), machines.map(machineRow));
-  const direct = new Set(chats.filter((c) => c.type === 'direct' && !A.isDeviceChat(c)).map((c) => A.otherMember(c)));
+  const direct = new Set(chats.filter((c) => c.type === 'direct' && !c.devices).map((c) => A.otherMember(c)));
   const people = [...S.users.values()].filter((u) => !direct.has(u.id) && (u.name.toLowerCase().includes(q) || u.id.toLowerCase().includes(q)));
   if (people.length) nodes.push(h('div', { class: 'list-section' }, 'Contacts'), people.map((u) => userRow(u, () => startDirect(u.id))));
   const hits = [];
@@ -293,7 +293,7 @@ function chatsTab() {
     const shown = sortChats(all.filter((c) => {
       if (c.me.archived) return false;
       if (S.filter === 'unread') return c.unread || c.me.markedUnread || S.active === c.id;
-      if (S.filter === 'groups') return c.type === 'group' || c.type === 'community';
+      if (S.filter === 'groups') return c.type === 'group' || c.type === 'community' || A.isDeviceGroup(c);
       return true;
     }));
     const machines = S.filter === 'all' ? A.machineChats() : [];
@@ -309,7 +309,14 @@ function chatsTab() {
       shown.map(chatRow),
       machines.map(machineRow),
       !shown.length && !machines.length
-        ? h('div', { class: 'empty' }, S.filter === 'unread' ? 'No unread chats' : S.filter === 'groups' ? 'No groups yet' : 'No chats yet. Start one with the new chat button.')
+        ? h(
+          'div',
+          { class: 'empty' },
+          S.filter === 'unread' ? 'No unread chats' : S.filter === 'groups' ? 'No groups yet' : 'No chats yet. Start one with the new chat button.',
+          S.filter === 'groups' && S.ownDevices.some((d) => d.id !== S.device.id && !d.revokedAt)
+            ? h('div', null, h('button', { type: 'button', class: 'link', onclick: () => startNewGroup(true) }, 'Make a group of your devices'))
+            : null,
+        )
         : null,
       shown.length || machines.length ? h('div', { class: 'empty small' }, icon('lock'), ' Your personal messages are end-to-end encrypted') : null,
     ];
@@ -646,6 +653,49 @@ async function newCall(video) {
   }
 }
 
+// Calling your own devices: one of them (its device chat), or all of them at
+// once (your own chat rings every other device you have).
+async function callDevices(deviceId, video) {
+  try {
+    const { chat } = deviceId
+      ? await api.post('/api/chats/devices', { deviceId })
+      : await api.post('/api/chats/direct', { userId: S.me.id });
+    if (!chat) throw new Error('That device chat was deleted. Open it again from New chat.');
+    S.chats.set(chat.id, chat);
+    await O.startCall(chat, video);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function deviceCallRows() {
+  const devices = A.callableDevices();
+  if (!devices.length) return null;
+  const buttons = (id) => [
+    iconButton('video', 'Video call', (e) => { e.stopPropagation(); callDevices(id, true); }),
+    iconButton('phone', 'Voice call', (e) => { e.stopPropagation(); callDevices(id, false); }),
+  ];
+  return [
+    h('div', { class: 'list-section' }, 'Your devices'),
+    devices.length > 1
+      ? h(
+        'div',
+        { class: 'row', onclick: () => callDevices(null, true) },
+        h('div', { class: 'row-icon accent' }, icon('group')),
+        h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, 'All your devices'), h('div', { class: 'preview ellipsis' }, `Rings all ${devices.length} of them`)),
+        buttons(null),
+      )
+      : null,
+    devices.map((d) => h(
+      'div',
+      { class: 'row', onclick: () => callDevices(d.id, true) },
+      avatar({ id: d.machine?.id || d.id, name: d.name }, 'md'),
+      h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, d.name), h('div', { class: 'preview ellipsis' }, A.deviceWhere(d) || 'Your device')),
+      buttons(d.id),
+    )),
+  ];
+}
+
 function callsTab() {
   const rows = S.calls
     .map((c) => {
@@ -674,9 +724,10 @@ function callsTab() {
       { class: 'list' },
       h('div', { class: 'row short', onclick: () => newCall(false) }, h('div', { class: 'row-icon accent' }, icon('phone')), h('div', { class: 'body' }, 'New voice call')),
       h('div', { class: 'row short', onclick: () => newCall(true) }, h('div', { class: 'row-icon accent' }, icon('video')), h('div', { class: 'body' }, 'New video call')),
+      deviceCallRows(),
       h('div', { class: 'list-section' }, 'Recent'),
       rows.length ? rows : h('div', { class: 'empty' }, 'No calls yet'),
-      h('div', { class: 'empty small' }, icon('lock'), ' Calls go device to device across your tailnet and are end-to-end encrypted'),
+      h('div', { class: 'empty small' }, icon('lock'), S.callService ? ' Calls go device to device across your tailnet' : ' Calls go device to device across your tailnet and are end-to-end encrypted'),
     ),
   ];
 }
@@ -786,7 +837,8 @@ function newChatPanel() {
     ] : null,
     !q && (S.ownDevices.length > 1 || A.machineChats().length) ? [
       h('div', { class: 'list-section' }, 'Your devices'),
-      S.ownDevices.filter((d) => d.id !== S.device.id).map((d) => h(
+      action('group', 'New device group', () => startNewGroup(true), 'Chat with several of your devices at once'),
+      S.ownDevices.filter((d) => d.id !== S.device.id && !d.revokedAt).map((d) => h(
         'div',
         { class: 'row', onclick: () => A.openDeviceChat(d.id).then(() => { S.panel = null; render(); }).catch((e) => toast(e.message)) },
         avatar({ id: d.id, name: d.name }, 'md'),
@@ -812,13 +864,54 @@ function newChatPanel() {
   ]);
 }
 
-function startNewGroup() {
-  ng = { step: 1, members: new Set(), name: null, photo: null, photoUrl: null };
+// devices: a group of your own devices rather than of people.
+function startNewGroup(devices = false) {
+  ng = { step: 1, members: new Set(), name: null, photo: null, photoUrl: null, devices };
+  panelSearchEl = null;
   openPanel('new-group');
+}
+
+// Step 1 of a new device group: pick at least two of your other devices.
+function pickDevicesStep() {
+  const devices = S.ownDevices.filter((d) => d.id !== S.device.id && !d.revokedAt);
+  const toggle1 = (id) => { if (ng.members.has(id)) ng.members.delete(id); else ng.members.add(id); render(); };
+  const machines = A.machineChats();
+  return [
+    ...panelShell('Add devices', [
+      h('div', { class: 'chips-sel pad' }, [...ng.members].map((id) => h('button', { type: 'button', class: 'chip', onclick: () => toggle1(id) }, A.ownDevice(id)?.name || 'Device', ' ×'))),
+      h('div', { class: 'empty small' }, 'Messages in a device group are end-to-end encrypted for the devices you pick and this one.'),
+      devices.map((d) => h(
+        'div',
+        { class: 'row', onclick: () => toggle1(d.id) },
+        avatar({ id: d.machine?.id || d.id, name: d.name }, 'md'),
+        h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, d.name), h('div', { class: 'preview ellipsis' }, A.deviceWhere(d) || `Active ${listTime(d.lastActive)}`)),
+        h('input', { type: 'checkbox', checked: ng.members.has(d.id), tabindex: -1, class: 'row-check' }),
+      )),
+      machines.map((m) => h(
+        'div',
+        { class: 'row disabled' },
+        avatar({ id: m.id, name: m.name }, 'md'),
+        h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, m.name), h('div', { class: 'preview ellipsis' }, 'Open Tailchat on it to add it to a group')),
+      )),
+      devices.length < 2 ? h('div', { class: 'empty' }, 'A device group needs at least two of your other devices. Open Tailchat on another device first.') : null,
+    ]),
+    h('button', {
+      type: 'button',
+      class: 'fab',
+      'aria-label': 'Next',
+      title: 'Next',
+      onclick: () => {
+        if (ng.members.size < 2) return toast('Pick at least two devices');
+        ng.step = 2;
+        render();
+      },
+    }, icon('forward')),
+  ];
 }
 
 function newGroupPanel() {
   if (!ng) ng = { step: 1, members: new Set(), name: null, photo: null, photoUrl: null };
+  if (ng.step === 1 && ng.devices) return pickDevicesStep();
   if (ng.step === 1) {
     const q = panelSearchEl?.value.trim().toLowerCase() || '';
     return [
@@ -858,7 +951,9 @@ function newGroupPanel() {
           }),
         }, ng.photoUrl ? avatar({ id: 'new', name: '', src: ng.photoUrl }, 'lg') : h('div', { class: 'avatar lg placeholder' }, icon('camera'), h('span', null, 'Add group icon')))),
         h('label', { class: 'field' }, ng.name),
-        h('div', { class: 'muted' }, `${ng.members.size} member${ng.members.size === 1 ? '' : 's'} besides you: ${[...ng.members].map(A.nameOf).join(', ') || 'none yet'}`),
+        ng.devices
+          ? h('div', { class: 'muted' }, `This device and ${[...ng.members].map((id) => A.ownDevice(id)?.name || 'a device').join(', ')}`)
+          : h('div', { class: 'muted' }, `${ng.members.size} member${ng.members.size === 1 ? '' : 's'} besides you: ${[...ng.members].map(A.nameOf).join(', ') || 'none yet'}`),
       ),
     ], null, null),
     h('button', { type: 'button', class: 'fab', 'aria-label': 'Create group', title: 'Create group', onclick: createGroup }, icon('check')),
@@ -871,7 +966,9 @@ async function createGroup() {
   try {
     let avatarId;
     if (ng.photo) ({ id: avatarId } = await api.upload(ng.photo, { isPublic: true }));
-    const { chat } = await api.post('/api/chats/group', { name, members: [...ng.members], avatar: avatarId });
+    const { chat } = ng.devices
+      ? await api.post('/api/chats/device-group', { name, deviceIds: [...ng.members], avatar: avatarId })
+      : await api.post('/api/chats/group', { name, members: [...ng.members], avatar: avatarId });
     S.chats.set(chat.id, chat);
     if (ng.photoUrl) URL.revokeObjectURL(ng.photoUrl);
     ng = null;

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import ssl
 from urllib.parse import urlsplit
 
@@ -74,6 +75,18 @@ def cross_origin(request: web.Request) -> bool:
     # fetch; it must be this site. Other clients send none.
     origin = request.headers.get("Origin")
     return origin is not None and urlsplit(origin).netloc != request.host
+
+
+HOSTNAME = re.compile(r"^[a-z0-9]([a-z0-9-]{0,62}\.)*[a-z0-9-]{1,63}$")
+
+
+def calls_origin(request: web.Request, port: int) -> str | None:
+    """The call service's origin: the same host Tailchat was reached on, on
+    the calls port."""
+    if not port:
+        return None
+    host = (urlsplit(f"//{request.host}").hostname or "").lower().rstrip(".")
+    return f"https://{host}:{port}" if HOSTNAME.match(host) else None
 
 
 def create_app(config: Config) -> web.Application:
@@ -183,6 +196,16 @@ def create_app(config: Config) -> web.Application:
     async def security_headers(request: web.Request, response: web.StreamResponse) -> None:
         for name, value in SECURITY_HEADERS.items():
             response.headers.setdefault(name, value)
+        # The call screen embeds the call room, served on another port of
+        # this host, so another origin: it can't read Tailchat's keys, and
+        # only it may be framed and use the camera and microphone.
+        origin = calls_origin(request, config.calls_port)
+        if origin and response.headers.get("Content-Security-Policy") == SECURITY_HEADERS["Content-Security-Policy"]:
+            response.headers["Content-Security-Policy"] += f"; frame-src {origin}"
+            response.headers["Permissions-Policy"] = (
+                f'camera=(self "{origin}"), microphone=(self "{origin}"), geolocation=(self), '
+                f'display-capture=(self "{origin}"), fullscreen=(self "{origin}")'
+            )
 
     app = web.Application(client_max_size=1024**2)
     app.on_response_prepare.append(security_headers)
