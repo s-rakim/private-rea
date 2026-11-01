@@ -115,7 +115,7 @@ export function pickChats({ title, okLabel = 'Send', max = 5 }) {
       ...chats.map((c) => ({
         key: c.id,
         title: chatTitle(c),
-        sub: isChannel(c) ? `Channel · ${c.followers} followers` : isGroupish(c) ? `${c.members.filter((m) => !m.left).length} members` : c.devices ? 'Your device' : c.members.find((m) => !isMe(m.userId))?.userId || 'Message yourself',
+        sub: isChannel(c) ? `Channel · ${c.followers} followers` : isGroupish(c) ? `${c.members.filter((m) => !m.left).length} members` : c.deviceGroup ? `${c.devices.length} of your devices` : c.devices ? 'Your device' : c.members.find((m) => !isMe(m.userId))?.userId || 'Message yourself',
         av: chatAvatar(c),
         chatId: async () => c.id,
       })),

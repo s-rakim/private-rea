@@ -136,7 +136,11 @@ Tailscale. People show up under **New chat** once they have opened Tailchat;
   laptop and every other machine of yours. A machine that hasn't opened
   Tailchat yet shows the address to open on it once; after that its chat sends
   messages and files to just that device, end-to-end encrypted. **Message
-  yourself** reaches all of them. Two browsers on one machine are told apart
+  yourself** reaches all of them. To reach just some of them, make a
+  **device group**: tap the new chat button, then **New device group**, pick
+  two or more devices and name the group. Messages in it are encrypted for
+  those devices only, it shows under the **Groups** filter, and you can add or
+  remove devices under **Group info**. Two browsers on one machine are told apart
   by browser, and you can rename any device under **Linked devices**. Tagged
   machines (servers) and machines shared with you by other people aren't
   listed.

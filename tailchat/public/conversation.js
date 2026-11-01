@@ -417,6 +417,7 @@ function messageRow(m, chat, flags) {
   const parts = [];
   let mediaOnly = false;
   if (flags.showName) parts.push(h('div', { class: 'sender', style: { color: colorFor(m.senderId) } }, A.nameOf(m.senderId)));
+  else if (flags.device) parts.push(h('div', { class: 'sender', style: { color: colorFor(m.senderDevice) } }, flags.device));
   if (!res || res.pending) {
     parts.push(h('div', { class: 'text undecryptable' }, icon('clock'), 'Decrypting…'));
   } else if (res.error) {
@@ -467,7 +468,7 @@ function messageRow(m, chat, flags) {
         case 'media':
           if (['image', 'gif', 'sticker', 'video'].includes(c.kind)) {
             parts.push(mediaBlock(m, c));
-            mediaOnly = !c.caption && !c.replyTo && !c.forwarded && !flags.showName;
+            mediaOnly = !c.caption && !c.replyTo && !c.forwarded && !flags.showName && !flags.device;
           } else if (c.kind === 'voice' || c.kind === 'audio') parts.push(voiceBlock(m, c));
           else parts.push(docBlock(m, c));
           if (c.caption) parts.push(h('div', { class: 'text' }, richText(str(c.caption), { mentions: mentionMap(c), highlight: flags.search })));
@@ -626,6 +627,10 @@ function renderMessages(chat) {
     }
     const first = !prev || prev.kind === 'system' || prev.senderId !== m.senderId || new Date(prev.createdAt).toDateString() !== day;
     const flags = { first, showName: first && A.showsSender(chat) && !A.isMe(m.senderId) && m.kind === 'msg', search: term };
+    // In a device group, say which of your devices sent it.
+    if (A.isDeviceGroup(chat) && m.kind === 'msg' && m.senderDevice && m.senderDevice !== S.device.id && (first || prev.senderDevice !== m.senderDevice)) {
+      flags.device = A.ownDevice(m.senderDevice)?.name || 'A logged-out device';
+    }
     used.add(m.id);
     nodes.push(v.rows.get(m.id, rowSig(m, chat, flags), () => messageRow(m, chat, flags)));
     prev = m;
@@ -678,6 +683,10 @@ function subtitle(chat) {
     names.sort((a, b) => (a === 'You') - (b === 'You'));
     return { text: chat.me.left ? "You're no longer a member" : names.join(', ') };
   }
+  if (A.isDeviceGroup(chat)) {
+    const names = A.groupDevices(chat).map((d) => d.name);
+    return { text: ['This device', ...names].join(', ') };
+  }
   if (A.isDeviceChat(chat)) {
     const seen = lastSeenText(A.machineOf(A.devicePeer(chat)));
     return { text: `${seen ? `Your device, ${seen}` : 'Your device'} · only it and this one can read this chat` };
@@ -697,7 +706,7 @@ function chatMenuItems(chat) {
   const other = chat.type === 'direct' ? S.users.get(A.otherMember(chat)) : null;
   const self = chat.type === 'direct' && A.isMe(A.otherMember(chat));
   return [
-    { label: A.isGroupish(chat) ? `${A.noun(chat)[0].toUpperCase()}${A.noun(chat).slice(1)} info` : A.isDeviceChat(chat) ? 'Device info' : 'Contact info', icon: 'info', onClick: () => { S.details = 'info'; render(); } },
+    { label: A.isGroupish(chat) ? `${A.noun(chat)[0].toUpperCase()}${A.noun(chat).slice(1)} info` : A.isDeviceChat(chat) ? 'Device info' : A.isDeviceGroup(chat) ? 'Group info' : 'Contact info', icon: 'info', onClick: () => { S.details = 'info'; render(); } },
     chat.type === 'community' ? { label: 'Community home', icon: 'group', onClick: () => openCommunity(chat.id) } : null,
     { label: 'Search', icon: 'search', onClick: () => { S.details = 'search'; render(); } },
     { label: 'Media, links and docs', icon: 'image', onClick: () => { S.details = 'media'; render(); } },
@@ -712,7 +721,7 @@ function chatMenuItems(chat) {
     { label: 'Clear chat', icon: 'delete', onClick: () => clearChat(chat) },
     other && !self ? { label: other.blocked ? `Unblock ${other.name}` : `Block ${other.name}`, icon: 'block', danger: !other.blocked, onClick: () => blockUser(other) } : null,
     A.isGroupish(chat) && !chat.me.left ? { label: exitLabel(chat), icon: 'exit', danger: true, onClick: () => exitGroup(chat) } : null,
-    chat.type === 'direct' || chat.me.left ? { label: A.isGroupish(chat) ? `Delete ${A.noun(chat)}` : 'Delete chat', icon: 'delete', danger: true, onClick: () => deleteChat(chat) } : null,
+    chat.type === 'direct' || chat.me.left ? { label: A.isGroupish(chat) ? `Delete ${A.noun(chat)}` : A.isDeviceGroup(chat) ? 'Leave group on this device' : 'Delete chat', icon: A.isDeviceGroup(chat) ? 'exit' : 'delete', danger: true, onClick: () => deleteChat(chat) } : null,
     { label: 'Close chat', icon: 'close', onClick: () => { S.active = null; S.details = null; render(); } },
   ];
 }
@@ -739,7 +748,17 @@ export function exitLabel(chat) {
   return { channel: 'Unfollow channel', community: 'Exit community' }[chat.type] || 'Exit group';
 }
 
+export async function leaveDeviceGroup(chat) {
+  if (!(await confirmDialog(`Leave "${chat.name}" on this device?`, 'This device stops getting its messages. The group carries on for your other devices.', 'Leave', 'danger'))) return;
+  try {
+    await api.del(`/api/chats/${encodeURIComponent(chat.id)}`);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
 export async function deleteChat(chat) {
+  if (A.isDeviceGroup(chat)) return leaveDeviceGroup(chat);
   const title = A.isGroupish(chat) ? `Delete "${chat.name}"?` : `Delete chat with ${A.chatTitle(chat)}?`;
   if (!(await confirmDialog(title, 'Messages will be removed from all your devices. The chat comes back if someone writes to you again.', 'Delete', 'danger'))) return;
   try {

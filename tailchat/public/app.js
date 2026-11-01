@@ -280,14 +280,19 @@ export function otherMember(chat) {
 export const isGroupish = (chat) => !!chat && chat.type !== 'direct';
 export const isChannel = (chat) => chat?.type === 'channel';
 export const showsSender = (chat) => chat?.type === 'group' || chat?.type === 'community';
-export const noun = (chat) => ({ group: 'group', community: 'community', channel: 'channel' })[chat?.type] || 'chat';
+export const noun = (chat) => (chat?.deviceGroup ? 'group' : ({ group: 'group', community: 'community', channel: 'channel' })[chat?.type] || 'chat');
 
-// A device chat is between two of your own devices (PROTOCOL.md §10).
-export const isDeviceChat = (chat) => Array.isArray(chat?.devices);
-export const devicePeer = (chat) => chat?.devices?.find((id) => id !== S.device.id) || null;
+// A device chat is between two of your own devices, and a device group is a
+// named chat between several of them (PROTOCOL.md §10).
+export const isDeviceGroup = (chat) => !!chat?.deviceGroup;
+export const isDeviceChat = (chat) => Array.isArray(chat?.devices) && !chat.deviceGroup;
+export const devicePeer = (chat) => (isDeviceChat(chat) ? chat.devices.find((id) => id !== S.device.id) || null : null);
+// The other devices in a device group that are still logged in.
+export const groupDevices = (chat) => (chat?.devices || []).filter((id) => id !== S.device.id).map(ownDevice).filter((d) => d && !d.revokedAt);
 
 export function chatTitle(chat) {
   if (!chat) return '';
+  if (isDeviceGroup(chat)) return chat.name;
   if (isDeviceChat(chat)) return ownDevice(devicePeer(chat))?.name || 'Your other device';
   if (isGroupish(chat)) return chat.name;
   const other = otherMember(chat);
@@ -297,6 +302,7 @@ export function chatTitle(chat) {
 export function chatAvatar(chat) {
   // Coloured like the machine's row was before it opened Tailchat.
   if (isDeviceChat(chat)) return { id: ownDevice(devicePeer(chat))?.machine?.id || devicePeer(chat) || chat.id, name: chatTitle(chat) };
+  if (isDeviceGroup(chat)) return { id: chat.id, name: chat.name, src: chat.avatar, group: 'group' };
   if (isGroupish(chat)) return { id: chat.id, name: chat.name, src: chat.avatar, group: chat.type === 'group' || chat.type };
   const u = S.users.get(otherMember(chat)) || S.me;
   return { id: u.id, name: u.name, src: u.avatar };
@@ -452,6 +458,13 @@ export function systemText(m, c) {
       return `${who} removed the group "${c.name}"`;
     case 'deactivated':
       return `${who} deactivated this community`;
+    case 'devices': {
+      const list = (ids) => (Array.isArray(ids) ? ids : []).map((id) => (id === S.device.id ? 'this device' : ownDevice(id)?.name || 'a logged-out device')).join(', ');
+      if (c.added?.length && c.removed?.length) return `${who} added ${list(c.added)} and removed ${list(c.removed)}`;
+      if (c.added?.length) return `${who} added ${list(c.added)}`;
+      const r = Array.isArray(c.removed) ? c.removed : [];
+      return r.length === 1 && r[0] === c.by ? `${list(r)} left` : `${who} removed ${list(r)}`;
+    }
     default:
       return 'Group updated';
   }
@@ -529,7 +542,10 @@ function mergeLatest(existing, fresh) {
 async function devicesFor(chatId) {
   const cached = S.chatDevices.get(chatId);
   if (cached && Date.now() - cached.at < 60_000) return cached.devices;
-  const devices = (await api.get(`/api/chats/${encodeURIComponent(chatId)}/devices`)).devices.filter((d) => !d.revokedAt);
+  let devices = (await api.get(`/api/chats/${encodeURIComponent(chatId)}/devices`)).devices.filter((d) => !d.revokedAt);
+  // A device chat or device group is sealed for its own devices only.
+  const only = S.chats.get(chatId)?.devices;
+  if (only) devices = devices.filter((d) => only.includes(d.id) && d.userId === S.me.id);
   noticeDevices(devices, { complete: true });
   S.chatDevices.set(chatId, { devices, at: Date.now() });
   return devices;
@@ -689,7 +705,7 @@ async function ensureDeviceChats() {
   for (const d of S.ownDevices) {
     if (d.id === S.device.id || deviceChatTried.has(d.id)) continue;
     deviceChatTried.add(d.id);
-    if ([...S.chats.values()].some((c) => c.devices?.includes(d.id))) continue;
+    if ([...S.chats.values()].some((c) => isDeviceChat(c) && c.devices.includes(d.id))) continue;
     const { chat } = await api.post('/api/chats/devices', { deviceId: d.id, open: false });
     if (chat) S.chats.set(chat.id, chat);
   }
@@ -791,8 +807,8 @@ export async function shareHistory(deviceId, code, onProgress) {
     batch = [];
   };
   try {
-    // Channels aren't encrypted, and a device chat is for its two devices only.
-    for (const chat of [...S.chats.values()].filter((c) => !isChannel(c) && !isDeviceChat(c))) {
+    // Channels aren't encrypted, and a device chat or device group is for its own devices only.
+    for (const chat of [...S.chats.values()].filter((c) => !isChannel(c) && !c.devices)) {
       let before = 0;
       for (;;) {
         const { messages, hasMore } = await api.get(`/api/chats/${encodeURIComponent(chat.id)}/messages?limit=200${before ? `&before=${before}` : ''}`);
@@ -1100,7 +1116,7 @@ function handleEvent(e) {
       const prev = S.chats.get(e.chat.id);
       S.chats.set(e.chat.id, e.chat);
       if (e.chat.lastMessage) decryptMessage(e.chat.lastMessage);
-      if (prev && prev.members.length !== e.chat.members.length) S.chatDevices.delete(e.chat.id);
+      if (prev && (prev.members.length !== e.chat.members.length || String(prev.devices) !== String(e.chat.devices))) S.chatDevices.delete(e.chat.id);
       if (S.active === e.chat.id) markRead(e.chat.id);
       break;
     }
