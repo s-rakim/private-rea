@@ -166,8 +166,8 @@ window. The device needs Tailscale switched on and signed in to your tailnet.
   request until it is merged) asks for your Tailchat address the first time it
   opens.
 
-Each installed copy is its own device, with its own key and its own chat in
-everyone else's list of your devices.
+An app installed from a browser is the same device as that browser's tab: it
+shares its key and its chats. The Android APK is a device of its own.
 
 ## What's in it
 
