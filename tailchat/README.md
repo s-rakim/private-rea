@@ -226,6 +226,12 @@ shares its key and its chats. The Android APK is a device of its own.
   fixed. Any theme can be edited: Tailchat makes your own copy, shows the
   colours live as you pick them, warns about text that would be hard to read,
   and gives each theme a code you can paste on another device.
+* **Chat wallpapers**: give any chat a photo or a colour, dimmed as much as you
+  like. Everyone in the chat sees the same wallpaper on every device (both
+  devices of a device chat, every member of a group), in place of their
+  theme's chat background. It's end-to-end encrypted like the messages, so
+  the server never sees the photo. In groups where only admins edit the
+  group info, only admins change it.
 
 Not included: payments, business tools, live location and a sticker store.
 
