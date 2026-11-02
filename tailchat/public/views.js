@@ -3,8 +3,9 @@
 import * as A from './app.js';
 import { S, api, render } from './app.js';
 import { kvDelete } from './api.js';
-import { h, icon, iconButton, avatar, toast, menu, dialog, confirmDialog, promptDialog, listTime, duration, lastSeenText, reconcile, Slots, toggle } from './ui.js';
-import { resizePhoto, kindFor } from './media.js';
+import { h, icon, iconButton, avatar, toast, menu, dialog, confirmDialog, promptDialog, listTime, duration, lastSeenText, reconcile, Slots, toggle, viewer } from './ui.js';
+import { kindFor } from './media.js';
+import { pickPhoto, cropPhoto } from './photo.js';
 import * as O from './overlays.js';
 import * as T from './themes.js';
 import { renderConversation, drafts, clearChat, deleteChat, exitGroup, exitLabel, attachDialog, canSend, followChannel, openCommunity } from './conversation.js';
@@ -985,7 +986,9 @@ function newGroupPanel() {
           class: 'avatar-btn',
           title: 'Add group icon',
           onclick: () => pickImage(async (file) => {
-            ng.photo = await resizePhoto(file);
+            const blob = await cropPhoto(file, { title: 'Group icon' });
+            if (!blob) return;
+            ng.photo = blob;
             if (ng.photoUrl) URL.revokeObjectURL(ng.photoUrl);
             ng.photoUrl = URL.createObjectURL(ng.photo);
             render();
@@ -1065,10 +1068,46 @@ function settingsPanel() {
   ], null);
 }
 
-async function changeProfilePhoto(file) {
-  const blob = await resizePhoto(file);
-  const { id } = await api.upload(blob, { isPublic: true });
-  await api.patch('/api/me', { avatar: id });
+// Saves a new profile photo (or removes it, with null). The server tells
+// everyone else, your other devices included, with a "user" event.
+async function setProfilePhoto(blob) {
+  let id = null;
+  if (blob) {
+    profilePhotoBusy = true;
+    render();
+    try {
+      ({ id } = await api.upload(blob, { isPublic: true }));
+    } finally {
+      profilePhotoBusy = false;
+    }
+  }
+  const { user } = await api.patch('/api/me', { avatar: id });
+  S.me = { ...S.me, ...user };
+  S.users.set(user.id, { ...S.users.get(user.id), ...user });
+  render();
+  toast(blob ? 'Profile photo updated' : 'Profile photo removed');
+}
+
+let profilePhotoBusy = false;
+
+async function changeProfilePhoto() {
+  try {
+    const blob = await pickPhoto({ title: 'Profile photo' });
+    if (blob) await setProfilePhoto(blob);
+  } catch (err) {
+    profilePhotoBusy = false;
+    render();
+    toast(err.message);
+  }
+}
+
+function profilePhotoMenu(anchor) {
+  const uploaded = S.me.avatar && S.me.avatar.startsWith('/api/avatars/');
+  menu(anchor, [
+    S.me.avatar ? { label: 'View photo', icon: 'image', onClick: () => viewer({ title: S.me.name, subtitle: 'Profile photo', content: h('img', { src: S.me.avatar, alt: '', referrerpolicy: 'no-referrer' }) }) } : null,
+    { label: S.me.avatar ? 'Change photo' : 'Add photo', icon: 'camera', onClick: changeProfilePhoto },
+    uploaded ? { label: 'Remove photo', icon: 'delete', danger: true, onClick: () => setProfilePhoto(null).catch((e) => toast(e.message)) } : null,
+  ]);
 }
 
 function profilePanel() {
@@ -1087,15 +1126,25 @@ function profilePanel() {
     }
   };
   return panelShell('Profile', [
-    h('div', { class: 'card center' }, (photoBtn = h('button', {
-      type: 'button',
-      class: 'avatar-btn',
-      title: 'Change profile photo',
-      onclick: () => menu(photoBtn, [
-        { label: 'Upload photo', icon: 'image', onClick: () => pickImage((f) => changeProfilePhoto(f).catch((e) => toast(e.message))) },
-        S.me.avatar && S.me.avatar.startsWith('/api/avatars/') ? { label: 'Remove photo', icon: 'delete', onClick: () => api.patch('/api/me', { avatar: null }).catch((e) => toast(e.message)) } : null,
-      ]),
-    }, avatar(S.me, 'lg')))),
+    h(
+      'div',
+      { class: 'card center profile-card' },
+      (photoBtn = h(
+        'button',
+        {
+          type: 'button',
+          class: `avatar-btn profile-photo${profilePhotoBusy ? ' busy' : ''}`,
+          title: 'Change profile photo',
+          'aria-label': 'Change profile photo',
+          onclick: () => profilePhotoMenu(photoBtn),
+        },
+        avatar(S.me, 'lg'),
+        h('span', { class: 'photo-badge', 'aria-hidden': 'true' }, icon('camera')),
+        profilePhotoBusy ? h('span', { class: 'photo-spinner', 'aria-hidden': 'true' }) : null,
+      )),
+      h('button', { type: 'button', class: 'btn plain photo-change', onclick: changeProfilePhoto }, S.me.avatar ? 'Change photo' : 'Add a photo'),
+      h('p', { class: 'muted small' }, 'Everyone on your Tailchat sees this photo, on every device.'),
+    ),
     h('div', { class: 'card' }, h('h3', null, 'Your name'), h('div', { class: 'editable-line', onclick: () => edit('name', 'Your name', 60) }, h('span', { class: 'grow' }, S.me.name), icon('edit')), h('p', { class: 'muted small' }, 'Everyone who uses this Tailchat sees this name, including people it is shared with.')),
     h('div', { class: 'card' }, h('h3', null, 'About'), h('div', { class: 'editable-line', onclick: () => edit('about', 'About', 140, true) }, h('span', { class: 'grow' }, S.me.about || 'Hey there! I am using Tailchat.'), icon('edit'))),
     h('div', { class: 'card' }, h('h3', null, 'Tailnet login'), h('div', null, S.me.id), h('p', { class: 'muted small' }, 'Tailchat knows who you are from your Tailscale identity. There are no passwords.')),

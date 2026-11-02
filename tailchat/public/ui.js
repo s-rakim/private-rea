@@ -227,8 +227,10 @@ export function initials(name = '?') {
 }
 
 // group: true for a group's icon, or the name of the icon to show instead
-// ('community', 'channel').
-export function avatar({ id, name, src, group }, size = '') {
+// ('community', 'channel'). A user object from the server can be passed as
+// it is: its photo is in `avatar`.
+export function avatar({ id, name, src, avatar: photo, group }, size = '') {
+  src = src || (typeof photo === 'string' ? photo : null);
   const el = h('div', { class: `avatar ${size}`, style: { background: colorFor(id) } });
   const glyph = typeof group === 'string' ? group : 'group';
   if (src) {

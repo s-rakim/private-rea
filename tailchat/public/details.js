@@ -3,7 +3,8 @@
 import * as A from './app.js';
 import { S, api, render } from './app.js';
 import { h, icon, iconButton, avatar, toast, menu, dialog, promptDialog, confirmDialog, listTime, dayLabel, timeOf, fileSize, disappearingLabel, lastSeenText, richText, reconcile, Slots, toggle } from './ui.js';
-import { extensionOf, resizePhoto } from './media.js';
+import { extensionOf } from './media.js';
+import { pickPhoto } from './photo.js';
 import * as O from './overlays.js';
 import { jumpTo, clearChat, deleteChat, exitGroup, exitLabel, blockUser, openCommunity, leaveDeviceGroup } from './conversation.js';
 
@@ -50,21 +51,14 @@ function mediaCell({ m, c }) {
 }
 
 async function changeGroupPhoto(chat) {
-  const input = h('input', { type: 'file', accept: 'image/*', class: 'hidden' });
-  input.addEventListener('change', async () => {
-    const file = input.files[0];
-    input.remove();
-    if (!file) return;
-    try {
-      const blob = await resizePhoto(file);
-      const { id } = await api.upload(blob, { isPublic: true });
-      await api.patch(`/api/chats/${encodeURIComponent(chat.id)}`, { avatar: id });
-    } catch (err) {
-      toast(err.message);
-    }
-  });
-  document.body.append(input);
-  input.click();
+  try {
+    const blob = await pickPhoto({ title: 'Group icon' });
+    if (!blob) return;
+    const { id } = await api.upload(blob, { isPublic: true });
+    await api.patch(`/api/chats/${encodeURIComponent(chat.id)}`, { avatar: id });
+  } catch (err) {
+    toast(err.message);
+  }
 }
 
 function groupPhotoMenu(chat, anchor) {

@@ -77,21 +77,6 @@ export async function describeMedia(file, kind) {
   return {};
 }
 
-// Square-ish profile photo, resized client-side before upload.
-export async function resizePhoto(file, size = 640) {
-  const url = URL.createObjectURL(file);
-  try {
-    const img = await loadImage(url);
-    const side = Math.min(img.naturalWidth, img.naturalHeight);
-    const canvas = document.createElement('canvas');
-    canvas.width = canvas.height = Math.min(size, side);
-    canvas.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, canvas.width, canvas.height);
-    return await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-}
-
 // Chat wallpapers: at most 2560 px on the long side, as JPEG.
 export async function resizeWallpaper(file, max = 2560) {
   const url = URL.createObjectURL(file);
