@@ -249,7 +249,7 @@ async function printShots() {
     else shell('input keyevent 66');
   }
   const replied = await until(() => lastFromMalcolm().then((t) => t === 'On my way'), 30000, 1000);
-  check(replied, 'Reply in the notification sends the message', `last from Malcolm: ${await lastFromMalcolm()}`, onScreen);
+  check(replied, 'Reply in the notification sends the message', `last from Malcolm: ${await lastFromMalcolm()}`, () => `${onScreen()}\n${logs()}`);
   await sleep(1000);
   check(!note('tailchat_messages'), 'and clears the notification');
   shell('cmd statusbar collapse');
@@ -288,7 +288,8 @@ async function printShots() {
   check(await until(() => !popupFrame(), 5000, 500), 'the pop-up goes away');
   check(await until(() => !ringtonePlaying(), 5000, 500), 'the ringing stops');
   const active = await until(() => callStatus().then((s) => s === 'active'), 45000, 1000);
-  await sleep(2500);
+  check(await until(() => logged(/call: active/), 20000, 1000), 'the app sees the call connect');
+  await sleep(4000);
   shot('in-the-call');
   check(active, 'the call connects', `Dana's call: ${await callStatus()}`, () => `${onScreen()}\n${logs()}`);
   const ongoing = await until(() => note('tailchat_ongoing'), 10000, 1000);
@@ -297,10 +298,12 @@ async function printShots() {
   // ---- picture in picture ----
   shell('input keyevent KEYCODE_HOME');
   const pip = await until(() => logged(/picture in picture on/), 15000, 1000);
-  await sleep(2000);
+  await sleep(4000);
   shot('picture-in-picture');
   check(pip, 'going home during a video call carries it on in picture in picture', `pinned in dumpsys: ${pinned()}`, () => `${shell('dumpsys activity activities | grep -i -B 2 -A 6 pinned | head -40')}\n${logs()}`);
   check(await callStatus() === 'active', 'the call stays connected meanwhile');
+  await sleep(4000);
+  shot('picture-in-picture-later');
 
   // Dana hangs up.
   await hangUp();

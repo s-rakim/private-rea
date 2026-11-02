@@ -24,7 +24,10 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.util.Rational
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.webkit.WebView
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -184,10 +187,40 @@ internal object CallCenter {
       return
     }
     try {
-      send(m.toString())
+      if (!intoWebView(m)) send(m.toString())
     } catch (e: Exception) {
       Log.w(TAG, "couldn't reach the page", e)
     }
+  }
+
+  // React Native hands messages to the page only while the app is on screen
+  // (they wait for its next frame), so they go straight into the page's
+  // WebView when there is one: Decline, Reply, Mute and Hang up then work
+  // from the pop-up and the notifications while you use another app.
+  private var web: WeakReference<WebView>? = null
+
+  private fun intoWebView(m: JSONObject): Boolean {
+    val view = webView() ?: return false
+    // JSON is a JavaScript expression, apart from these two characters.
+    val json = m.toString().replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    view.evaluateJavascript("window.dispatchEvent(new CustomEvent('tailchat-native', { detail: $json }));", null)
+    return true
+  }
+
+  private fun webView(): WebView? {
+    web?.get()?.takeIf { it.isAttachedToWindow }?.let { return it }
+    val root = current()?.window?.peekDecorView() ?: return null
+    val found = findWebView(root)
+    web = found?.let { WeakReference(it) }
+    return found
+  }
+
+  private fun findWebView(v: View): WebView? {
+    if (v is WebView) return v
+    if (v is ViewGroup) {
+      for (i in 0 until v.childCount) findWebView(v.getChildAt(i))?.let { return it }
+    }
+    return null
   }
 
   private val pageThere: Boolean get() = sink != null && pageReady
@@ -876,6 +909,7 @@ internal object CallCenter {
 
   fun reply(chatId: String, text: String) {
     val ctx = app ?: return
+    Log.i(TAG, "reply from a notification")
     if (!pageThere) {
       Toast.makeText(ctx, "Open Tailchat to reply", Toast.LENGTH_SHORT).show()
       chats[chatId]?.let { Notices.post(ctx, chatId, Notices.ID_MESSAGE, Notices.message(ctx, it)) }
