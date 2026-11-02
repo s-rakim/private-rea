@@ -29,6 +29,7 @@ const ui = {
   fit: null, // 'cover' | 'contain', chosen by double tap
   pip: null, // { kind: 'doc' | 'video', win?, video?, stop? }
   nativePip: false,
+  route: null, // the Android app's { speaker, headset } during a call
   clock: null,
   mutedTalk: 0,
   hint: null,
@@ -196,6 +197,7 @@ function renderCall() {
     ui.swap = false;
     ui.sheet = null;
     ui.fit = null;
+    ui.route = null;
     poke();
   }
   if (!call) {
@@ -267,7 +269,7 @@ function renderCall() {
   reconcile(ui.part.hints, hints);
 
   reconcile(ui.part.dock, dock(call));
-  const sheetSig = ui.sheet ? JSON.stringify([ui.sheet, call.quality, call.hdAudio, call.audioMode, call.sharing, !!call.cam, call.micId, call.camId, call.outputId, calls.devices, call.peers.size, ui.sheet === 'info' ? peers.map((p) => [p.stats?.counters?.size, p.grade, p.state, Date.now() >> 11]) : 0, !!document.fullscreenElement]) : '';
+  const sheetSig = ui.sheet ? JSON.stringify([ui.sheet, call.quality, call.hdAudio, call.audioMode, call.sharing, !!call.cam, call.micId, call.camId, call.outputId, calls.devices, call.peers.size, ui.sheet === 'info' ? peers.map((p) => [p.stats?.counters?.size, p.grade, p.state, Date.now() >> 11]) : 0, !!document.fullscreenElement, ui.route]) : '';
   reconcile(ui.part.sheet, ui.sheet ? slot('sheet', sheetSig, () => sheet(call, peers)) : []);
   ui.part.sheet.classList.toggle('open', !!ui.sheet);
   reconcile(ui.part.waiting, waitingCards());
@@ -629,6 +631,7 @@ function sheet(call, peers) {
     const tiles = [
       canShare() && !wideScreen() ? sheetTile('screen', call.sharing ? 'Stop sharing' : 'Share screen', () => calls.toggleScreen(), call.sharing) : null,
       pip ? sheetTile('pip', 'Picture in picture', () => openPip()) : null,
+      native.app ? sheetTile('speaker', speakerLabel(call), () => toggleSpeaker(call), onSpeaker(call)) : null,
       canInvite(call) ? sheetTile('personAdd', 'Add people', () => invite()) : null,
       sheetTile('hd', `Video: ${QUALITIES[call.quality]?.short || '4K'}`, () => toggleSheet('quality')),
       sheetTile('mic', call.hdAudio ? 'HD audio on' : 'HD audio off', () => calls.setHdAudio(!call.hdAudio), call.hdAudio),
@@ -644,6 +647,17 @@ function sheet(call, peers) {
     ];
   }
   return [close, h('div', { class: 'callx-sheet-card', onclick: (e) => e.stopPropagation() }, body)];
+}
+
+// The Android app: speaker or earpiece. Video calls start on the speaker,
+// voice calls at your ear, and headphones take over when they're connected.
+const onSpeaker = (call) => ui.route?.speaker ?? !!call.video;
+const speakerLabel = (call) => (ui.route?.headset && !onSpeaker(call) ? 'Speaker (headphones on)' : onSpeaker(call) ? 'Speaker on' : 'Speaker');
+function toggleSpeaker(call) {
+  const next = !onSpeaker(call);
+  ui.route = { ...(ui.route || {}), speaker: next };
+  native.post('audio-route', { speaker: next });
+  render();
 }
 
 function sheetTile(name, label, onClick, on = false) {
@@ -994,5 +1008,18 @@ function setMediaSession(call) {
 native.on('pip', (m) => {
   ui.nativePip = !!m.on;
   if (m.on) ui.sheet = null;
+  if (m.error) toast(m.error);
   render();
+});
+
+// Which way the Android app sends the call's sound.
+native.on('audio-route', (m) => {
+  ui.route = { speaker: !!m.speaker, headset: !!m.headset };
+  render();
+});
+
+// Call back, from a missed call notification in the Android app.
+native.on('call-back', (m) => {
+  const chat = typeof m.chatId === 'string' ? S.chats.get(m.chatId) : null;
+  if (chat && !calls?.call) startCall(chat, !!m.video);
 });

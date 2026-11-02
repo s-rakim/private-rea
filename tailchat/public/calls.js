@@ -528,6 +528,19 @@ export class CallManager {
     }
     const before = call.grade;
     call.grade = worst || 'unknown';
+    // The shape of their video, for the Android app's picture in picture.
+    let aspect = 0;
+    for (const p of call.peers.values()) {
+      const v = p.stats?.video?.in;
+      if (v?.width && v?.height) {
+        aspect = Math.round((v.width / v.height) * 100) / 100;
+        break;
+      }
+    }
+    if (aspect !== (call.aspect || 0)) {
+      call.aspect = aspect;
+      this.onState(call);
+    }
     if (before !== call.grade || call.peers.size) this.onChange();
   }
 
@@ -557,6 +570,7 @@ export class CallManager {
     const peers = [...call.peers.values()];
     if (peers.length && peers.every((p) => p.state !== 'connected')) {
       call.status = 'reconnecting';
+      this.onState(call);
       this.onChange();
     }
   }
@@ -620,7 +634,10 @@ export class CallManager {
         call.ringing.add(event.deviceId);
         call.unreachable = false;
         if (call.status === 'calling' || call.status === 'ringing') {
-          call.status = 'ringing';
+          if (call.status !== 'ringing') {
+            call.status = 'ringing';
+            this.onState(call);
+          }
           if (!tones.playing('ringback')) tones.ringback();
         }
         break;
@@ -631,7 +648,10 @@ export class CallManager {
         break;
       case 'peer-joined':
         tones.stop('ringback');
-        if (call.status !== 'active') call.status = 'connecting';
+        if (call.status !== 'active' && call.status !== 'connecting') {
+          call.status = 'connecting';
+          this.onState(call);
+        }
         this.connect(event.deviceId, event.userId, false);
         call.timers.push(setTimeout(() => {
           if (this.call === call && call.status === 'connecting') this.failed(call);

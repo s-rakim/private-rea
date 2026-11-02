@@ -229,6 +229,17 @@ export async function boot(setStatus) {
   // Answer, Decline, Hang up and Mute from the Android app's call screens
   // and notifications.
   native.on('call-action', (m) => callAction(m.action, m.callId));
+  // The Android app's message notifications: tap to open, Reply, Mark as read.
+  native.on('open-chat', (m) => {
+    if (typeof m.chatId === 'string' && S.chats.has(m.chatId)) openChat(m.chatId);
+  });
+  native.on('reply', (m) => {
+    if (typeof m.chatId !== 'string' || typeof m.text !== 'string' || !m.text.trim() || !S.chats.has(m.chatId)) return;
+    sendText(m.chatId, m.text.trim()).then(() => markRead(m.chatId, { always: true })).catch((err) => toast(err.message));
+  });
+  native.on('mark-read', (m) => {
+    if (typeof m.chatId === 'string') markRead(m.chatId, { always: true });
+  });
   realtime.connect();
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && S.active) markRead(S.active);
@@ -832,7 +843,7 @@ async function callRinging(ring) {
   const who = ringInfo(ring);
   if (native.app) {
     const info = {
-      callId: ring.callId, video: !!ring.video, ongoing: !!ring.ongoing, waiting: !!ring.waiting,
+      callId: ring.callId, chatId: ring.chatId, video: !!ring.video, ongoing: !!ring.ongoing, waiting: !!ring.waiting,
       name: who.title, sub: who.sub, color: colorFor(who.av.id || ''), initials: initials(who.title),
       ringtone: S.prefs.ringtone !== false, vibrate: S.prefs.vibrate !== false,
     };
@@ -874,7 +885,7 @@ async function callRingEnded(ring, reason) {
   const who = ringInfo(ring);
   const text = `Missed ${ring.video ? 'video' : 'voice'} call${who.group ? ` from ${who.caller.name}` : ''}`;
   if (native.app) {
-    native.post('call-incoming-end', { callId: ring.callId, reason, missed, name: who.title, text });
+    native.post('call-incoming-end', { callId: ring.callId, chatId: ring.chatId, reason, missed, name: who.title, text });
     return;
   }
   ring.note?.close();
@@ -910,6 +921,8 @@ function callState(call) {
   native.post('call-state', {
     active: true,
     callId: call.callId,
+    chatId: call.chatId,
+    aspect: call.aspect || 0,
     title: callParty(call.chatId, peers).title,
     status: call.status,
     startedAt: call.startedAt || 0,
@@ -950,8 +963,20 @@ export function callAction(action, callId) {
 
 // A small copy of a profile picture for the Android app's call screen. Only
 // Tailchat's own pictures: one from another site can't be read back.
-async function photoFor(src) {
-  if (typeof src !== 'string' || !src.startsWith('/api/avatars/')) return null;
+const photos = new Map(); // src -> data: URL, or a promise of one
+function photoFor(src) {
+  if (typeof src !== 'string' || !src.startsWith('/api/avatars/')) return Promise.resolve(null);
+  if (!photos.has(src)) {
+    if (photos.size > 60) photos.delete(photos.keys().next().value);
+    photos.set(src, smallPhoto(src).catch(() => {
+      photos.delete(src);
+      return null;
+    }));
+  }
+  return photos.get(src);
+}
+
+async function smallPhoto(src) {
   const res = await fetch(src);
   if (!res.ok) return null;
   const img = await createImageBitmap(await res.blob());
@@ -1243,9 +1268,12 @@ export async function ensureFile(file) {
   }
 }
 
-export async function markRead(chatId) {
+// Marks a chat read once you can see it, or straight away for Mark as read
+// and Reply in the Android app's notifications ({ always: true }).
+export async function markRead(chatId, { always = false } = {}) {
   const chat = S.chats.get(chatId);
-  if (!chat || document.visibilityState !== 'visible') return;
+  if (!chat || (!always && document.visibilityState !== 'visible')) return;
+  native.post('notify-clear', { chatId });
   if (chat.lastSeq > chat.me.readSeq || chat.me.markedUnread || chat.unread) {
     chat.unread = 0;
     chat.me.markedUnread = false;
@@ -1327,14 +1355,13 @@ function handleEvent(e) {
       const m = e.message;
       upsertMessage(m);
       const chat = S.chats.get(m.chatId);
-      if (!chat) chatOf(m.chatId).catch(() => {});
-      if (m.kind === 'msg' && !sentHere(m, chat)) {
-        S.typing.get(m.chatId)?.delete(m.senderId);
-        if (S.active === m.chatId && document.visibilityState === 'visible') markRead(m.chatId);
-        else markDelivered(m.chatId, m.seq);
-        if (chat && (S.active !== m.chatId || document.visibilityState !== 'visible') && !(chat.me.mutedUntil > Date.now())) {
-          waitForContent(m).then(() => notify(chatTitle(chat), (showsSender(chat) || isDeviceGroup(chat) ? `${senderName(m, chat)}: ` : '') + previewText(m), m.chatId));
-        }
+      if (chat) newMessage(m, chat);
+      // A chat this device hasn't seen yet, such as the first message from
+      // someone new: fetch it, then tell you about the message.
+      else {
+        chatOf(m.chatId).then((c) => newMessage(m, c), () => {
+          if (m.kind === 'msg' && !isMe(m.senderId)) markDelivered(m.chatId, m.seq);
+        });
       }
       break;
     }
@@ -1420,12 +1447,28 @@ function handleEvent(e) {
   render();
 }
 
+// A message someone else sent: delivered or read, and a notification unless
+// you're looking at that chat or it's muted.
+function newMessage(m, chat) {
+  if (!chat || m.kind !== 'msg' || sentHere(m, chat)) return;
+  S.typing.get(m.chatId)?.delete(m.senderId);
+  const looking = S.active === m.chatId && document.visibilityState === 'visible';
+  if (looking) markRead(m.chatId);
+  else markDelivered(m.chatId, m.seq);
+  if (looking || chat.me.mutedUntil > Date.now()) return;
+  waitForContent(m).then(() => notify(chatTitle(chat), (showsSender(chat) || isDeviceGroup(chat) ? `${senderName(m, chat)}: ` : '') + previewText(m), m.chatId, m));
+}
+
 async function waitForContent(m) {
   for (let i = 0; i < 20 && !contentOf(m)?.ok && !contentOf(m)?.error; i++) await new Promise((r) => setTimeout(r, 50));
 }
 
-export function notify(title, body, chatId) {
+export function notify(title, body, chatId, m = null) {
   updateTitle();
+  if (native.app) {
+    appNotify(title, body, chatId, m);
+    return;
+  }
   if (!S.prefs.notifications || !('Notification' in window) || Notification.permission !== 'granted') return;
   if (document.visibilityState === 'visible' && S.active === chatId) return;
   const options = { body: body.slice(0, 160), tag: chatId, renotify: true, icon: '/icon-192.png', data: { chatId } };
@@ -1444,6 +1487,28 @@ export function notify(title, body, chatId) {
   } catch {
     viaWorker();
   }
+}
+
+// A new message in the Android app: it pops up with the sender, their
+// picture and a preview, with Reply and Mark as read.
+function appNotify(title, body, chatId, m) {
+  if (S.prefs.appNotifications === false) return;
+  if (document.visibilityState === 'visible' && S.active === chatId) return;
+  const chat = S.chats.get(chatId);
+  const group = !!chat && chat.type !== 'direct';
+  const sender = m ? senderName(m, chat) : title;
+  const who = m ? S.users.get(m.senderId) : null;
+  const text = group && m ? previewText(m) : body;
+  const info = {
+    chatId, title, group, sender, senderId: m?.senderId || chatId, text: String(text).slice(0, 600), at: m?.createdAt || Date.now(),
+    color: colorFor(m?.senderId || chatId), initials: initials(sender),
+  };
+  const src = who?.avatar || who?.src;
+  if (!src) {
+    native.post('notify', info);
+    return;
+  }
+  photoFor(src).catch(() => null).then((photo) => native.post('notify', photo ? { ...info, photo } : info));
 }
 
 export function updateTitle() {

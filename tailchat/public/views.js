@@ -239,6 +239,9 @@ function chatsTab() {
       h('button', { type: 'button', class: `chip${S.filter === k ? ' active' : ''}`, onclick: () => { S.filter = k; render(); } }, label)),
   ));
   const showBanner = 'Notification' in window && Notification.permission !== 'denied' && !S.prefs.notifications && !S.prefs.bannerDismissed;
+  // In the Android app: calls can only pop up over other apps once Android
+  // allows it, so ask once.
+  const showOverlay = native.app && native.status.overlay === false && !S.prefs.overlayDismissed;
   const banner = showBanner
     ? slots.get('banner', '1', () => h(
       'div',
@@ -247,7 +250,15 @@ function chatsTab() {
       h('div', { class: 'grow' }, h('div', null, 'Get notified of new messages'), h('button', { type: 'button', class: 'link', onclick: enableNotifications }, 'Turn on desktop notifications')),
       iconButton('close', 'Dismiss', () => A.savePrefs({ bannerDismissed: true })),
     ))
-    : null;
+    : showOverlay
+      ? slots.get('banner', 'overlay', () => h(
+        'div',
+        { class: 'banner' },
+        icon('layers'),
+        h('div', { class: 'grow' }, h('div', null, 'Let calls pop up over other apps'), h('button', { type: 'button', class: 'link', onclick: () => native.post('open-settings', { what: 'overlay' }) }, 'Allow Tailchat to display over other apps')),
+        iconButton('close', 'Dismiss', () => A.savePrefs({ overlayDismissed: true })),
+      ))
+      : null;
   const offline = !S.online ? slots.get('offline', '1', () => h('div', { class: 'banner warn' }, icon('info'), h('div', null, "Connecting to Tailchat… Messages you send now go out when you're back online."))) : null;
   const linked = S.prefs.securityAlerts?.devices || [];
   const linkedBanner = linked.length ? slots.get('linked', JSON.stringify(linked), () => h(
@@ -1065,7 +1076,7 @@ function settingsPanel() {
     settingsRow('theme', 'Themes', `${A.activeTheme().name} · ${MODE_LABELS[S.prefs.theme] || MODE_LABELS.system}`, () => openPanel('themes')),
     settingsRow('chat', 'Chats', 'Enter to send', () => openPanel('chat-settings')),
     settingsRow('phone', 'Calls', callSettingsSummary(), () => openPanel('call-settings')),
-    settingsRow('bell', 'Notifications', S.prefs.notifications ? 'On' : 'Off', () => openPanel('notifications')),
+    settingsRow('bell', 'Notifications', (native.app ? S.prefs.appNotifications !== false && native.status.notifications !== false : S.prefs.notifications) ? 'On' : 'Off', () => openPanel('notifications')),
     settingsRow('devices', 'Linked devices', null, () => openPanel('devices')),
     settingsRow('shield', 'Security', 'How Tailchat protects your messages', () => openPanel('help')),
     settingsRow('exit', 'Log out', null, logout, true),
@@ -1234,10 +1245,10 @@ function callSettingsPanel() {
       ? h('span', { class: 'call-allowed' }, icon('check'), 'On')
       : h('button', { type: 'button', class: 'btn plain small', onclick: () => native.post('open-settings', { what }) }, label));
     incoming.push(
-      line('ringer', 'Ring when Tailchat is closed', 'Keeps a connection to your server so calls ring like phone calls. Android shows a small notification while it does.', toggle(!!st.background, (on) => native.post('keep-alive', { on }), 'Ring when Tailchat is closed')),
-      line('layers', 'Show calls over other apps', 'A call that comes in while you use another app fills the screen, so you can answer it there', allow('overlay', st.overlay)),
-      line('fullscreen', 'Ring on the lock screen', 'Incoming calls show full screen when your phone is locked', allow('full-screen', st.fullScreen !== false)),
-      line('bell', 'Call notifications', 'Answer and Decline in the notification, and missed calls', allow('notifications', st.notifications !== false)),
+      line('ringer', 'Stay connected in the background', 'So calls ring and messages pop up while you use other apps. Android shows a small notification while it does.', toggle(st.background !== false, (on) => native.post('keep-alive', { on }), 'Stay connected in the background')),
+      line('layers', 'Pop up over other apps', 'A call that comes in while you use another app pops up at the top of the screen, with Answer and Decline', allow('overlay', st.overlay)),
+      line('fullscreen', 'Fill the lock screen', 'When your phone is locked, an incoming call fills the screen', allow('full-screen', st.fullScreen !== false)),
+      line('bell', 'Notifications', 'Incoming and missed calls, and new messages', allow('notifications', st.notifications !== false)),
       line('battery', 'No battery limits', "So Android doesn't put Tailchat to sleep and miss calls", allow('battery', st.battery, 'Remove')),
       line('pip', 'Picture in picture', 'Leave the app in a video call and it carries on in a small window', allow('pip', st.pip !== false)),
     );
@@ -1406,11 +1417,27 @@ function themeEditorPanel() {
 }
 
 function notificationsPanel() {
+  if (native.app) return appNotificationsPanel();
   const supported = 'Notification' in window;
   return panelShell('Notifications', [
     h('div', { class: 'menu-row' }, icon('bell'), h('div', { class: 'grow' }, h('div', null, 'Desktop notifications'), h('div', { class: 'sub' }, !supported ? "This browser can't show notifications" : Notification.permission === 'denied' ? 'Blocked in your browser settings' : 'Show new messages while Tailchat is in the background')), supported ? toggle(S.prefs.notifications && Notification.permission === 'granted', (on) => (on ? enableNotifications() : A.savePrefs({ notifications: false })), 'Desktop notifications') : null),
     settingsRow('phone', 'Calls', 'Ringing notifications, ringtone and vibration', () => openPanel('call-settings')),
     h('div', { class: 'empty small' }, 'Notifications show the sender and a preview. They are generated on this device after decryption; the server never sees message text.'),
+  ], 'settings');
+}
+
+// In the Android app, notifications are the phone's own: they pop up with
+// the sender's picture and a preview, with Reply and Mark as read.
+function appNotificationsPanel() {
+  const st = native.status;
+  const allowed = st.notifications !== false;
+  return panelShell('Notifications', [
+    h('div', { class: 'menu-row' }, icon('bell'), h('div', { class: 'grow' }, h('div', null, 'Message notifications'), h('div', { class: 'sub' }, allowed ? 'New messages pop up with the sender and a preview, with Reply and Mark as read' : 'Notifications are off for Tailchat in your phone\'s settings')),
+      allowed
+        ? toggle(S.prefs.appNotifications !== false, (on) => A.savePrefs({ appNotifications: on }), 'Message notifications')
+        : h('button', { type: 'button', class: 'btn plain small', onclick: () => native.post('open-settings', { what: 'notifications' }) }, 'Allow')),
+    settingsRow('phone', 'Calls', 'Ringing, the pop-up over other apps and the lock screen', () => openPanel('call-settings')),
+    h('div', { class: 'empty small' }, 'Notifications show the sender and a preview. They are made on this phone after decryption; the server never sees message text. Muted chats stay quiet.'),
   ], 'settings');
 }
 
