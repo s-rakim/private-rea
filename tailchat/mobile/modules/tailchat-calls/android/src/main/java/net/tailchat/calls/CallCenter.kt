@@ -157,6 +157,7 @@ internal object CallCenter {
   // or going on any more.
   private fun hello() {
     val ctx = app ?: return
+    Log.i(TAG, "page ready")
     pageReady = true
     pageSeen = true
     for (id in rings.keys.toList()) dropRing(ctx, id)
@@ -419,6 +420,7 @@ internal object CallCenter {
     if (ring == null) {
       ringer?.stop()
       popup?.hide()
+      shown(null)
       return
     }
     // Waiting calls beep in the call; the page plays that.
@@ -428,22 +430,27 @@ internal object CallCenter {
       inFront(ctx) -> {
         popup?.hide()
         if (ringNotes.remove(ring.callId)) Notices.cancel(ctx, ring.callId, Notices.ID_INCOMING)
+        shown("in the app")
       }
       !locked && fullScreenUp -> {
         popup?.hide()
         postRing(ctx, ring, Notices.RingStyle.QUIET)
+        shown("full screen")
       }
       !locked && Perms.overlay(ctx) -> {
         if (ring.popupDismissed) popup?.hide() else popup?.show(ring)
         postRing(ctx, ring, Notices.RingStyle.QUIET)
+        shown(if (popup?.showing == true) "pop-up" else "notification")
       }
       ring.silenced -> {
         popup?.hide()
         postRing(ctx, ring, Notices.RingStyle.SILENCED)
+        shown("silenced notification")
       }
       else -> {
         popup?.hide()
         postRing(ctx, ring, Notices.RingStyle.LOUD)
+        shown(if (locked) "call notification, locked" else "call notification")
         // Android 14 may not let the notification fill the lock screen, but
         // an app that may draw over other apps can open its screen itself.
         if (locked && !Perms.fullScreen(ctx) && Perms.overlay(ctx) && !IncomingCallActivity.showing) {
@@ -451,6 +458,15 @@ internal object CallCenter {
         }
       }
     }
+  }
+
+  // Where the ringing call shows, in the log when it changes.
+  private var shownAs: String? = null
+
+  private fun shown(how: String?) {
+    if (how == shownAs) return
+    shownAs = how
+    Log.i(TAG, if (how == null) "ringing stopped" else "ringing: $how")
   }
 
   private fun postRing(ctx: Context, ring: Ring, style: Notices.RingStyle) {
@@ -497,6 +513,7 @@ internal object CallCenter {
       openApp(from)
       return
     }
+    Log.i(TAG, "answering")
     endRing(callId)
     if (locked(ctx)) {
       overLock = true
@@ -534,6 +551,9 @@ internal object CallCenter {
     val next = CallInfo(m)
     val before = call
     call = next
+    if (before == null || before.status != next.status || before.video != next.video) {
+      Log.i(TAG, "call: ${next.status}${if (next.video) ", video" else ""}")
+    }
     if (before == null || before.callId != next.callId) {
       speaker = null
       connected = false
@@ -551,6 +571,7 @@ internal object CallCenter {
 
   private fun endCall() {
     val ctx = app ?: return
+    if (call != null) Log.i(TAG, "call: ended")
     val wasInPip = inPip
     call = null
     connected = false
@@ -682,6 +703,7 @@ internal object CallCenter {
   private fun setPip(on: Boolean) {
     if (inPip == on) return
     inPip = on
+    Log.i(TAG, "picture in picture ${if (on) "on" else "off"}")
     toPage(JSONObject().put("type", "pip").put("on", on))
     refreshRing()
   }
@@ -838,6 +860,7 @@ internal object CallCenter {
     while (note.lines.size > 7) note.lines.removeAt(0)
     note.count++
     Notices.post(ctx, chatId, Notices.ID_MESSAGE, Notices.message(ctx, note))
+    Log.i(TAG, "message notification")
   }
 
   private fun clearChat(ctx: Context, chatId: String) {

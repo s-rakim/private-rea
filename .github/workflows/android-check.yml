@@ -1,7 +1,8 @@
 name: Android build check
 
 # Builds the Android app from source whenever it changes, so a mistake in its
-# native code (tailchat/mobile/modules) shows up here rather than on a phone.
+# native code (tailchat/mobile/modules) shows up here rather than on a phone,
+# then runs it on an Android emulator to check calls and notifications work.
 # It publishes nothing: the Android APK workflow makes the releases. The APK
 # it builds is signed with a throwaway key and only meant for testing.
 
@@ -55,4 +56,76 @@ jobs:
         with:
           name: tailchat-test-apk
           path: tailchat/mobile/android/app/build/outputs/apk/release/*.apk
+          retention-days: 7
+
+  # Runs that APK on an Android emulator against a test Tailchat server, with
+  # someone calling and messaging it from a browser: see
+  # tailchat/mobile/e2e/emulator-test.cjs for what it checks.
+  emulator:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      OUT: ${{ github.workspace }}/e2e-out
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tailchat-test-apk
+          path: apk
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the server and a browser
+        run: |
+          pip install -r tailchat/requirements.txt
+          npm install --prefix "$RUNNER_TEMP/pw" --no-save --no-package-lock playwright@1.63.0
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+          echo "NODE_PATH=$RUNNER_TEMP/pw/node_modules" >> "$GITHUB_ENV"
+          echo "APK=$(ls "$GITHUB_WORKSPACE"/apk/*.apk | head -1)" >> "$GITHUB_ENV"
+
+      - name: Start a test Tailchat server
+        run: |
+          mkdir -p "$OUT" "$RUNNER_TEMP/data"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=localhost \
+            -keyout "$RUNNER_TEMP/key.pem" -out "$RUNNER_TEMP/cert.pem" 2>/dev/null
+          cd tailchat
+          TAILCHAT_AUTH=dev TAILCHAT_HOST=127.0.0.1 TAILCHAT_PORT=8099 TAILCHAT_DATA="$RUNNER_TEMP/data" TAILCHAT_RING_MS=60000 \
+            nohup python -m tailchat_server > "$OUT/server.log" 2>&1 &
+          nohup node mobile/e2e/tls-proxy.cjs "$RUNNER_TEMP/cert.pem" "$RUNNER_TEMP/key.pem" > "$OUT/proxy.log" 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sk -o /dev/null https://localhost:8443/api/me && break
+            sleep 1
+          done
+          curl -sk https://localhost:8443/api/me | head -c 200; echo
+
+      - name: Let the emulator use KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run the app on an emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_4
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back emulated -camera-front emulated
+          script: bash tailchat/mobile/e2e/emulator-test.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: emulator-test
+          path: e2e-out
           retention-days: 7
