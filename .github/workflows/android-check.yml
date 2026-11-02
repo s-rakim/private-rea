@@ -1,0 +1,58 @@
+name: Android build check
+
+# Builds the Android app from source whenever it changes, so a mistake in its
+# native code (tailchat/mobile/modules) shows up here rather than on a phone.
+# It publishes nothing: the Android APK workflow makes the releases. The APK
+# it builds is signed with a throwaway key and only meant for testing.
+
+on:
+  push:
+    paths:
+      - 'tailchat/mobile/**'
+      - '.github/workflows/android-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: tailchat/mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tailchat/mobile/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: npm ci
+
+      - name: Generate the Android project
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Build the APK
+        working-directory: tailchat/mobile/android
+        run: ./gradlew :app:assembleRelease -PreactNativeArchitectures=x86_64,arm64-v8a --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tailchat-test-apk
+          path: tailchat/mobile/android/app/build/outputs/apk/release/*.apk
+          retention-days: 7
