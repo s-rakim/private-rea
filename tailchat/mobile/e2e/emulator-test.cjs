@@ -224,6 +224,8 @@ async function printShots() {
     return c?.text || null;
   }), chatId);
   await dcall((id) => import('/app.js').then((m) => m.openChat(id)), chatId);
+  // 720p from Dana: an emulator decodes video in software, too slowly for 4K.
+  await dcall(() => import('/app.js').then((m) => m.savePrefs({ callQuality: 'hd' })));
 
   // ---- a message pops up while you use another app ----
   shell('input keyevent KEYCODE_HOME');
@@ -289,6 +291,7 @@ async function printShots() {
   check(await until(() => !ringtonePlaying(), 5000, 500), 'the ringing stops');
   const active = await until(() => callStatus().then((s) => s === 'active'), 45000, 1000);
   check(await until(() => logged(/call: active/), 20000, 1000), 'the app sees the call connect');
+  check(await until(() => logged(/their video arrived/), 30000, 1000), "Dana's video arrives in the app");
   await sleep(4000);
   shot('in-the-call');
   check(active, 'the call connects', `Dana's call: ${await callStatus()}`, () => `${onScreen()}\n${logs()}`);

@@ -587,6 +587,9 @@ internal object CallCenter {
     if (before == null || before.status != next.status || before.video != next.video) {
       Log.i(TAG, "call: ${next.status}${if (next.video) ", video" else ""}")
     }
+    if (next.aspect > 0 && (before == null || before.callId != next.callId || before.aspect <= 0)) {
+      Log.i(TAG, "call: their video arrived")
+    }
     if (before == null || before.callId != next.callId) {
       speaker = null
       connected = false
