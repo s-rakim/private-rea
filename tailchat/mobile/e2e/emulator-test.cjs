@@ -116,6 +116,26 @@ function providerLinks() {
   return found.join('; ') || 'none';
 }
 
+// Every few seconds, whether Tailchat holds anything of Google Play
+// services open: if it does when Play services' process restarts, Android
+// closes Tailchat too. Tailchat shouldn't, so any sighting is printed at
+// the end, with whether Play services did restart during the test.
+const playSightings = [];
+function watchPlayServices() {
+  const timer = setInterval(() => {
+    const held = providerLinks().split('; ').filter((l) => l.startsWith('com.google.android.gms'));
+    if (held.length) playSightings.push(`${new Date().toISOString().slice(11, 19)} ${held.join('; ')}`);
+  }, 5000);
+  timer.unref();
+}
+function playServicesReport() {
+  const deaths = adb('logcat', '-d', '-b', 'events').split('\n').filter((l) => /am_proc_died|am_kill/.test(l) && /com\.google\.android\.gms\.persistent/.test(l));
+  return [
+    playSightings.length ? `Tailchat held Google Play services open at:\n${playSightings.slice(0, 20).join('\n')}` : 'Tailchat never held Google Play services open',
+    deaths.length ? `Google Play services' process restarted during the test:\n${deaths.slice(-6).join('\n')}` : "Google Play services' process kept running",
+  ].join('\n');
+}
+
 // Why Tailchat stopped: how its process ended, and where its main thread
 // was stuck if it stopped responding.
 function whyStopped() {
@@ -272,11 +292,7 @@ async function printShots() {
   appPid = pidOf();
   await sleep(4000);
   console.log(`providers Tailchat holds: ${providerLinks()}`);
-  // A garbage collection in the app (the signal makes Android run one), to
-  // see whether what it holds is only waiting to be collected.
-  shell(`kill -10 ${appPid}`);
-  await sleep(4000);
-  console.log(`after a garbage collection: ${providerLinks()}`);
+  watchPlayServices();
   shot('chats');
   check(note('tailchat_connection'), 'it stays connected in the background, with a small notification', JSON.stringify(notifications().map((n) => n.channel)), tailchatNotes);
 
@@ -464,6 +480,7 @@ async function printShots() {
   check(!crashes.includes(PKG), 'the app never crashed', crashes.split('\n').slice(0, 12).join(' | '));
   const pid = pidOf();
   check(pid && pid === appPid, 'Tailchat kept running to the end', `process ${appPid}, now ${pid || 'gone'}`, whyStopped);
+  console.log(`\n${playServicesReport()}`);
   console.log('\n---- Tailchat log ----');
   console.log(history.join('\n').split('\n').filter((l) => l && !l.startsWith('---------')).join('\n'));
 
