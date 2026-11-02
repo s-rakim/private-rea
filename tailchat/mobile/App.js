@@ -15,6 +15,8 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { File, Paths } from 'expo-file-system';
+import { EncodingType, deleteAsync, readAsStringAsync } from 'expo-file-system/legacy';
+import * as DocumentPicker from 'expo-document-picker';
 import * as Sharing from 'expo-sharing';
 import * as Clipboard from 'expo-clipboard';
 
@@ -22,33 +24,155 @@ const SERVER_KEY = 'tailchat-server';
 const ACCENT = '#3f5db3';
 const DARK = '#1f1e1e';
 
-// The web app saves files by clicking an <a download> that points at a blob:
-// URL, which Android's WebView ignores. This catches those clicks, reads the
-// blob in the page and hands it to the app, which opens the share sheet.
+// How much of a file crosses between the app and the page at a time, as
+// base64. Small enough to keep memory flat, big enough to stay quick.
+const CHUNK = 1024 * 1024;
+
+// Runs in the page before Tailchat loads.
+//
+// Picking files: Tailchat asks for "any file" picks through
+// window.TailchatApp.pickFiles, which opens Android's own document picker
+// here in the app (expo-document-picker) instead of the WebView's file input.
+// The app copies the picked files to its cache, and the page reads them back
+// a chunk at a time and rebuilds them as Files.
+//
+// Saving files: the web app saves by clicking an <a download> that points at
+// a blob: URL, which Android's WebView ignores. This catches those clicks and
+// streams the blob to the app a chunk at a time; the app writes it to its
+// cache and opens the share sheet. The page can't fetch blob: URLs (Tailchat's
+// content policy), so the bridge remembers the blob behind each one.
+//
 // WebView also refuses navigator.clipboard.writeText, so copies go to the app.
 const PAGE_BRIDGE = `
 (function () {
+  var CHUNK = ${CHUNK};
+  var calls = {};
+  var seq = 0;
+  function post(msg) {
+    window.ReactNativeWebView.postMessage(JSON.stringify(msg));
+  }
+  // Sends a request to the app; it answers through window.__tailchatApp.reply.
+  function ask(msg) {
+    return new Promise(function (resolve, reject) {
+      var id = ++seq;
+      calls[id] = { resolve: resolve, reject: reject };
+      msg.id = id;
+      post(msg);
+    });
+  }
+  function fromBase64(text) {
+    var bin = atob(text);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  function toBase64(blob) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(String(reader.result).split(',')[1] || ''); };
+      reader.onerror = function () { reject(reader.error); };
+      reader.readAsDataURL(blob);
+    });
+  }
+  Object.defineProperty(window, '__tailchatApp', {
+    value: Object.freeze({
+      reply: function (id, value, error) {
+        var call = calls[id];
+        if (!call) return;
+        delete calls[id];
+        if (error) call.reject(new Error(error));
+        else call.resolve(value);
+      },
+    }),
+  });
+
+  function readPicked(pick, index, info) {
+    var parts = [];
+    var offset = 0;
+    function next() {
+      if (info.size != null && offset >= info.size) return finish();
+      return ask({ type: 'read', pick: pick, file: index, offset: offset }).then(function (data) {
+        var bytes = fromBase64(data || '');
+        if (bytes.length) parts.push(bytes);
+        offset += bytes.length;
+        // Size unknown: read until a short chunk. Known: stop at the size.
+        if (info.size == null && bytes.length < CHUNK) return finish();
+        if (info.size != null && !bytes.length && offset < info.size) throw new Error("Couldn't read " + info.name);
+        return next();
+      });
+    }
+    function finish() {
+      return new File(parts, info.name || 'file', { type: info.mime || '', lastModified: info.lastModified || Date.now() });
+    }
+    return next();
+  }
+
+  window.TailchatApp = Object.freeze({
+    pickFiles: function (options) {
+      options = options || {};
+      return ask({ type: 'pick', multiple: !!options.multiple }).then(function (picked) {
+        if (!picked || !picked.files || !picked.files.length) return [];
+        var total = picked.files.reduce(function (n, f) { return n + (f.size || 0); }, 0);
+        if (total > 4 * CHUNK && typeof options.onLoading === 'function') options.onLoading();
+        var files = [];
+        var chain = Promise.resolve();
+        picked.files.forEach(function (info, i) {
+          chain = chain.then(function () {
+            return readPicked(picked.pick, i, info).then(function (f) { files.push(f); });
+          });
+        });
+        function release() { post({ type: 'picked', pick: picked.pick }); }
+        return chain.then(function () { release(); return files; }, function (err) { release(); throw err; });
+      });
+    },
+  });
+
   if (navigator.clipboard) {
     navigator.clipboard.writeText = function (text) {
-      window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'copy', text: String(text) }));
+      post({ type: 'copy', text: String(text) });
       return Promise.resolve();
     };
   }
+
+  var saves = 0;
+  function save(blob, name) {
+    var offset = 0;
+    var saveId = ++saves;
+    var mime = blob.type || 'application/octet-stream';
+    function next() {
+      var end = Math.min(offset + CHUNK, blob.size);
+      return toBase64(blob.slice(offset, end)).then(function (data) {
+        var first = offset === 0;
+        offset = end;
+        return ask({ type: 'save', save: saveId, name: name, mime: mime, data: data, first: first, last: offset >= blob.size });
+      }).then(function () {
+        if (offset < blob.size) return next();
+      });
+    }
+    return next();
+  }
+  // Tailchat's content policy (connect-src 'self') stops the page from
+  // fetching blob: URLs, so keep each blob behind its URL and read it directly.
+  var blobs = new Map();
+  var createObjectURL = URL.createObjectURL;
+  var revokeObjectURL = URL.revokeObjectURL;
+  URL.createObjectURL = function (obj) {
+    var url = createObjectURL.call(URL, obj);
+    if (obj instanceof Blob) blobs.set(url, obj);
+    return url;
+  };
+  URL.revokeObjectURL = function (url) {
+    blobs.delete(url);
+    return revokeObjectURL.call(URL, url);
+  };
   document.addEventListener('click', function (e) {
     var a = e.target && e.target.closest && e.target.closest('a[download]');
     if (!a || a.href.indexOf('blob:') !== 0) return;
     e.preventDefault();
     e.stopImmediatePropagation();
-    var name = a.getAttribute('download') || 'file';
-    fetch(a.href).then(function (r) { return r.blob(); }).then(function (blob) {
-      var reader = new FileReader();
-      reader.onload = function () {
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'download', name: name, mime: blob.type, data: String(reader.result).split(',')[1] || '',
-        }));
-      };
-      reader.readAsDataURL(blob);
-    });
+    var blob = blobs.get(a.href);
+    if (!blob) return;
+    save(blob, a.getAttribute('download') || 'file').catch(function () {});
   }, true);
 })();
 true;
@@ -131,6 +255,10 @@ function LoadError({ server, onRetry, onChange }) {
 function Chat({ server, onChangeServer }) {
   const web = useRef(null);
   const canGoBack = useRef(false);
+  const picking = useRef(false);
+  const pickCount = useRef(0);
+  const picks = useRef(new Map()); // pick id -> cached copies of the picked files
+  const saves = useRef(new Map()); // save id -> file being written
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
@@ -145,7 +273,19 @@ function Chat({ server, onChangeServer }) {
     return () => sub.remove();
   }, []);
 
+  // Answers a request from the page bridge (see PAGE_BRIDGE).
+  const reply = useCallback((id, value, error) => {
+    const args = [id, value === undefined ? null : value, error || null].map((v) => JSON.stringify(v)).join(',');
+    web.current?.injectJavaScript(`window.__tailchatApp && window.__tailchatApp.reply(${args}); true;`);
+  }, []);
+
   const onMessage = useCallback(async (event) => {
+    // Only Tailchat's own pages may use the bridge.
+    try {
+      if (new URL(event.nativeEvent.url).hostname.toLowerCase() !== new URL(server).hostname.toLowerCase()) return;
+    } catch {
+      return;
+    }
     let msg;
     try {
       msg = JSON.parse(event.nativeEvent.data);
@@ -156,16 +296,74 @@ function Chat({ server, onChangeServer }) {
       Clipboard.setStringAsync(msg.text).catch(() => {});
       return;
     }
-    if (msg?.type !== 'download' || typeof msg.data !== 'string') return;
-    try {
-      const file = new File(Paths.cache, safeFileName(msg.name));
-      file.create({ overwrite: true });
-      file.write(msg.data, { encoding: 'base64' });
-      await Sharing.shareAsync(file.uri, { mimeType: msg.mime || 'application/octet-stream', dialogTitle: msg.name });
-    } catch {
-      // the user closed the share sheet or the cache is full; nothing to clean up
+    if (!Number.isSafeInteger(msg?.id)) return;
+    const { id } = msg;
+
+    if (msg.type === 'pick') {
+      if (picking.current) return reply(id, null);
+      picking.current = true;
+      try {
+        const result = await DocumentPicker.getDocumentAsync({ type: '*/*', multiple: !!msg.multiple, copyToCacheDirectory: true });
+        if (result.canceled || !result.assets?.length) return reply(id, null);
+        const pick = String(++pickCount.current);
+        picks.current.set(pick, result.assets.map((a) => a.uri));
+        reply(id, {
+          pick,
+          files: result.assets.map((a) => ({
+            name: a.name || 'file',
+            mime: a.mimeType || '',
+            size: Number.isFinite(a.size) ? a.size : null,
+            lastModified: a.lastModified || Date.now(),
+          })),
+        });
+      } catch (err) {
+        reply(id, null, `Couldn't open the file picker: ${err?.message || err}`);
+      } finally {
+        picking.current = false;
+      }
+      return;
     }
-  }, []);
+
+    if (msg.type === 'read') {
+      const uri = picks.current.get(String(msg.pick))?.[msg.file];
+      const offset = Number(msg.offset);
+      if (!uri || !Number.isSafeInteger(offset) || offset < 0) return reply(id, null, 'That file is no longer available');
+      try {
+        const data = await readAsStringAsync(uri, { encoding: EncodingType.Base64, position: offset, length: CHUNK });
+        reply(id, data);
+      } catch (err) {
+        reply(id, null, `Couldn't read the file: ${err?.message || err}`);
+      }
+      return;
+    }
+
+    if (msg.type === 'picked') {
+      for (const uri of picks.current.get(String(msg.pick)) || []) deleteAsync(uri, { idempotent: true }).catch(() => {});
+      picks.current.delete(String(msg.pick));
+      return;
+    }
+
+    if (msg.type === 'save' && typeof msg.data === 'string') {
+      try {
+        const key = String(msg.save);
+        let file = saves.current.get(key);
+        if (msg.first || !file) {
+          file = new File(Paths.cache, safeFileName(msg.name));
+          file.create({ overwrite: true });
+          saves.current.set(key, file);
+        }
+        file.write(msg.data, { encoding: 'base64', append: !msg.first });
+        reply(id, true);
+        if (msg.last) {
+          saves.current.delete(key);
+          await Sharing.shareAsync(file.uri, { mimeType: msg.mime || 'application/octet-stream', dialogTitle: msg.name });
+        }
+      } catch (err) {
+        saves.current.delete(String(msg.save));
+        reply(id, null, String(err?.message || err));
+      }
+    }
+  }, [reply, server]);
 
   // Pages on the Tailchat machine open in the app, on any port so the call
   // service works too; any other link opens in the browser.

@@ -303,6 +303,29 @@ export function toast(message, ms = 3200) {
   setTimeout(() => el.remove(), ms);
 }
 
+// Asks the user for files. In the Android app, picks of any kind of file go
+// to the phone's own document picker, which the app hands the files over
+// from; the camera, media-only picks and every other browser use a hidden
+// file input. Resolves to a list of Files, empty when cancelled.
+export function chooseFiles({ accept = '', multiple = false, capture } = {}) {
+  const app = window.TailchatApp;
+  if (!capture && (!accept || accept === '*/*') && typeof app?.pickFiles === 'function') {
+    return app.pickFiles({ multiple, onLoading: () => toast('Getting the file ready…') });
+  }
+  return new Promise((resolve) => {
+    const input = h('input', { type: 'file', accept: accept || undefined, multiple, class: 'hidden' });
+    if (capture) input.setAttribute('capture', capture);
+    const done = (files) => {
+      input.remove();
+      resolve(files);
+    };
+    input.addEventListener('change', () => done([...input.files]));
+    input.addEventListener('cancel', () => done([]));
+    document.body.append(input);
+    input.click();
+  });
+}
+
 let openMenuEl = null;
 export function closeMenu() {
   openMenuEl?.remove();
