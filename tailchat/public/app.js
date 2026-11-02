@@ -5,7 +5,8 @@ import { Api, ApiError, Realtime, kvGet, kvSet } from './api.js';
 import { CallManager } from './calls.js';
 import { KeyRing, callAad, chatAad, codeFromFingerprint, decryptFile, deviceCode, encryptFile, generateDeviceKeys, keyFingerprint, newMessageId, statusAad, wallpaperAad } from './crypto.js';
 import { describeMedia, kindFor, resizeWallpaper } from './media.js';
-import { toast } from './ui.js';
+import { colorFor, initials, toast } from './ui.js';
+import * as native from './native.js';
 
 export const api = new Api();
 
@@ -62,10 +63,17 @@ export function onRender(fn) {
 export function render() {
   if (renderQueued) return;
   renderQueued = true;
-  requestAnimationFrame(() => {
+  // On the next frame; a page that's out of sight gets no frames, so a timer
+  // stands in, and a call in picture-in-picture keeps up.
+  let done = false;
+  const run = () => {
+    if (done) return;
+    done = true;
     renderQueued = false;
     for (const fn of listeners) fn();
-  });
+  };
+  requestAnimationFrame(run);
+  setTimeout(run, 100);
 }
 
 function loadPrefs() {
@@ -125,7 +133,6 @@ export async function boot(setStatus) {
   const anon = await api.get('/api/me');
   S.me = anon.user;
   S.limits = anon.limits;
-  S.callService = anon.calls || null; // { port } when calls go through the call service
   const key = `device:${S.me.id}`;
   let stored = await kvGet(key);
   if (stored) {
@@ -194,9 +201,19 @@ export async function boot(setStatus) {
   });
   calls = new CallManager({
     realtime,
+    // In the Android app the phone itself rings, with your ringtone.
+    settings: () => ({
+      quality: S.prefs.callQuality,
+      hdAudio: S.prefs.hdAudio !== false,
+      ringtone: !native.app && S.prefs.ringtone !== false,
+      vibrate: !native.app && S.prefs.vibrate !== false,
+    }),
     onChange: render,
-    onIncoming: (ring) => notify(`Incoming ${ring.video ? 'video' : 'voice'} call`, callerName(ring), ring.chatId),
-    onEnded: () => loadCalls(),
+    onIncoming: (ring) => callRinging(ring).catch((err) => console.warn('ring alert failed', err)),
+    onIncomingEnd: (ring, reason) => callRingEnded(ring, reason).catch(() => {}),
+    onState: callState,
+    onLevels: (levels) => callView.levels(levels),
+    onReaction: (peer, emoji) => callView.reaction(peer, emoji),
     onError: (err) => toast(err.message),
     seal: async (callId, toDevice, toUser, data) => {
       await S.ring.publicKey(toDevice);
@@ -208,7 +225,20 @@ export async function boot(setStatus) {
       if (JSON.parse(sealed).from !== fromDevice) throw new Error('Call signalling from the wrong device refused');
       return S.ring.open(sealed, callAad(callId, fromDevice, S.device.id), fromUser);
     },
-    room: callRoom,
+  });
+  // Answer, Decline, Hang up and Mute from the Android app's call screens
+  // and notifications.
+  native.on('call-action', (m) => callAction(m.action, m.callId));
+  // The Android app's message notifications: tap to open, Reply, Mark as read.
+  native.on('open-chat', (m) => {
+    if (typeof m.chatId === 'string' && S.chats.has(m.chatId)) openChat(m.chatId);
+  });
+  native.on('reply', (m) => {
+    if (typeof m.chatId !== 'string' || typeof m.text !== 'string' || !m.text.trim() || !S.chats.has(m.chatId)) return;
+    sendText(m.chatId, m.text.trim()).then(() => markRead(m.chatId, { always: true })).catch((err) => toast(err.message));
+  });
+  native.on('mark-read', (m) => {
+    if (typeof m.chatId === 'string') markRead(m.chatId, { always: true });
   });
   realtime.connect();
   document.addEventListener('visibilitychange', () => {
@@ -248,6 +278,7 @@ export async function loadCalls() {
 }
 
 async function catchUp() {
+  calls?.resume();
   try {
     await Promise.all([loadUsers(), loadChats(), loadStatuses(), loadHistory()]);
     for (const [chatId, box] of S.msgs) {
@@ -742,20 +773,221 @@ export async function renameDevice(deviceId, name) {
 
 export const ownDevice = (id) => S.ownDevices.find((d) => d.id === id);
 
-// A call's room on the call service: same host, the service's own port, so
-// the room is another origin and can't reach this page's keys. The call id
-// is random, so only the devices that were rung know the room.
-export function callRoom(callId) {
-  const port = Number(S.callService?.port);
-  if (!port) return null;
-  return `https://${location.hostname}:${port}/call/${encodeURIComponent(callId)}`;
+// ---------- calls (calls.js makes them, callscreen.js draws them) ----------
+
+// Your own chat, not a device chat: calling it rings all your other devices.
+export const isOwnChat = (chat) => chat?.type === 'direct' && !chat.devices && chat.members.every((m) => isMe(m.userId));
+
+// A device in a call: the person, or which of your devices it is.
+export const callPeerName = (p) => (isMe(p.userId) ? ownDevice(p.deviceId)?.name || 'Your other device' : nameOf(p.userId));
+
+export function callPeerAvatar(p) {
+  if (isMe(p.userId)) {
+    const d = ownDevice(p.deviceId);
+    return { id: d?.machine?.id || p.deviceId, name: callPeerName(p) };
+  }
+  return S.users.get(p.userId) || { id: p.userId, name: callPeerName(p) };
 }
 
-// Who is calling: a person, or, when you call from one of your devices to
-// another, that device.
-export function callerName(ring) {
-  if (isMe(ring.from)) return ownDevice(ring.fromDevice)?.name || 'Your other device';
-  return nameOf(ring.from);
+// The name and picture a call goes by: the group's, the other device's in a
+// call between your own devices, else the other person's.
+export function callParty(chatId, peers = []) {
+  const chat = S.chats.get(chatId);
+  if (chat && chat.type !== 'direct') return { title: chatTitle(chat), av: chatAvatar(chat), group: true };
+  if (peers.length === 1 && isMe(peers[0].userId)) return { title: callPeerName(peers[0]), av: callPeerAvatar(peers[0]) };
+  if (isOwnChat(chat)) return { title: 'Your devices', av: { id: S.me.id, name: S.me.name, group: 'devices' } };
+  if (chat) return { title: chatTitle(chat), av: chatAvatar(chat) };
+  return { title: 'Tailchat call', av: { id: chatId, name: '?' } };
+}
+
+// Who a call ringing here is from: a person, or when you call from one of
+// your devices to another, that device.
+export function ringInfo(ring) {
+  const chat = S.chats.get(ring.chatId);
+  const device = isMe(ring.from) ? ownDevice(ring.fromDevice) : null;
+  const caller = device
+    ? { id: device.machine?.id || device.id, name: device.name }
+    : S.users.get(ring.from) || { id: ring.from, name: nameOf(ring.from) };
+  const group = !!chat && chat.type !== 'direct';
+  const kind = ring.ongoing ? 'Join the call' : ring.video ? 'Video call' : 'Voice call';
+  return {
+    caller,
+    group,
+    own: !!device,
+    title: group ? chatTitle(chat) : caller.name,
+    av: group ? chatAvatar(chat) : caller,
+    sub: `${group ? `${caller.name} · ` : device ? 'Your device · ' : ''}${kind}`,
+  };
+}
+
+// Whether a call in the calls list was made from here. Between your own
+// devices you're the caller on every end, so it's the device that counts.
+export function callOutgoing(c) {
+  const chat = S.chats.get(c.chatId);
+  const ownCall = isOwnChat(chat) || isDeviceChat(chat) || isDeviceGroup(chat);
+  return ownCall && c.callerDevice ? c.callerDevice === S.device.id : isMe(c.callerId);
+}
+
+// The call screen draws voice levels and reactions as they come, without
+// redrawing the app; callscreen.js fills these in.
+export const callView = { levels: () => {}, reaction: () => {} };
+
+const canNotify = () => 'Notification' in window && Notification.permission === 'granted' && S.prefs.callAlerts !== false;
+const workerReg = () => navigator.serviceWorker?.getRegistration().catch(() => null) ?? Promise.resolve(null);
+
+// A call ringing here. The page shows its ring screen and rings; when
+// Tailchat isn't in front of you a notification with Answer and Decline
+// comes up too. In the Android app the phone rings instead and shows its
+// own incoming call screen, over other apps and the lock screen.
+async function callRinging(ring) {
+  const who = ringInfo(ring);
+  if (native.app) {
+    const info = {
+      callId: ring.callId, chatId: ring.chatId, video: !!ring.video, ongoing: !!ring.ongoing, waiting: !!ring.waiting,
+      name: who.title, sub: who.sub, color: colorFor(who.av.id || ''), initials: initials(who.title),
+      ringtone: S.prefs.ringtone !== false, vibrate: S.prefs.vibrate !== false,
+    };
+    native.post('call-incoming', info);
+    const photo = await photoFor(who.av.src || who.av.avatar).catch(() => null);
+    if (photo && calls.incoming.has(ring.callId)) native.post('call-incoming', { ...info, photo });
+    return;
+  }
+  if (!canNotify() || (document.visibilityState === 'visible' && document.hasFocus())) return;
+  const title = who.title;
+  const body = ring.ongoing ? `${who.group ? `${who.caller.name} is in a call` : 'A call is going on'} · tap to join` : `Incoming ${ring.video ? 'video' : 'voice'} call${who.group ? ` from ${who.caller.name}` : who.own ? ' from your device' : ''}`;
+  const options = { body, tag: `call:${ring.callId}`, renotify: true, requireInteraction: true, icon: '/icon-192.png', data: { chatId: ring.chatId, callId: ring.callId } };
+  const reg = await workerReg();
+  if (!calls.incoming.has(ring.callId)) return;
+  if (reg) {
+    await reg.showNotification(title, {
+      ...options,
+      vibrate: S.prefs.vibrate === false ? [] : [450, 250, 450, 250, 450, 1200, 450, 250, 450],
+      actions: [{ action: 'decline', title: 'Decline' }, { action: 'answer', title: ring.video ? 'Answer video' : 'Answer' }],
+    });
+    return;
+  }
+  try {
+    const n = new Notification(title, options);
+    n.onclick = () => {
+      window.focus();
+      n.close();
+    };
+    ring.note = n;
+  } catch {
+    // no notifications here: the ring screen and ringtone still go
+  }
+}
+
+// It stopped ringing: answered, declined, answered on another device, or
+// missed. A missed call leaves a notification behind.
+async function callRingEnded(ring, reason) {
+  const missed = reason === 'missed' || reason === 'cancelled';
+  const who = ringInfo(ring);
+  const text = `Missed ${ring.video ? 'video' : 'voice'} call${who.group ? ` from ${who.caller.name}` : ''}`;
+  if (native.app) {
+    native.post('call-incoming-end', { callId: ring.callId, chatId: ring.chatId, reason, missed, name: who.title, text });
+    return;
+  }
+  ring.note?.close();
+  const reg = await workerReg();
+  for (const n of (await reg?.getNotifications({ tag: `call:${ring.callId}` }).catch(() => [])) || []) n.close();
+  if (!missed || !canNotify() || (document.visibilityState === 'visible' && document.hasFocus())) return;
+  const options = { body: text, tag: `missed:${ring.callId}`, icon: '/icon-192.png', data: { chatId: ring.chatId } };
+  if (reg) await reg.showNotification(who.title, options).catch(() => {});
+  else {
+    try {
+      const n = new Notification(who.title, options);
+      n.onclick = () => {
+        window.focus();
+        openChat(ring.chatId);
+        n.close();
+      };
+    } catch {
+      // the calls list shows it as missed
+    }
+  }
+}
+
+// The Android app keeps a call going while you use other apps (a
+// foreground service with Hang up and Mute in its notification) and shows
+// it in picture-in-picture; it learns about the call from here.
+function callState(call) {
+  if (!native.app) return;
+  if (!call) {
+    native.post('call-state', { active: false });
+    return;
+  }
+  const peers = [...call.peers.values()];
+  native.post('call-state', {
+    active: true,
+    callId: call.callId,
+    chatId: call.chatId,
+    aspect: call.aspect || 0,
+    title: callParty(call.chatId, peers).title,
+    status: call.status,
+    startedAt: call.startedAt || 0,
+    video: !!call.cam || peers.some((p) => p.video || p.sharing),
+    muted: call.muted,
+    cameraOff: !call.cam,
+  });
+}
+
+// What a notification button or the Android app asked for.
+export function callAction(action, callId) {
+  if (!calls) return;
+  const current = calls.call;
+  const here = typeof callId === 'string' && calls.incoming.has(callId);
+  switch (action) {
+    case 'accept':
+    case 'accept-audio':
+      if (here) calls.accept(callId, action === 'accept-audio' ? { video: false } : {}).catch((err) => toast(err.message));
+      break;
+    case 'decline':
+      // In another call, the caller hears you're busy.
+      if (here) calls.decline(callId, current ? 'busy' : undefined);
+      break;
+    case 'silence':
+      calls.silence();
+      break;
+    case 'hangup':
+      if (current && (!callId || current.callId === callId)) calls.hangup();
+      break;
+    case 'mute':
+    case 'unmute':
+      if (current && current.muted !== (action === 'mute')) calls.toggleMute();
+      break;
+    default:
+      break;
+  }
+}
+
+// A small copy of a profile picture for the Android app's call screen. Only
+// Tailchat's own pictures: one from another site can't be read back.
+const photos = new Map(); // src -> data: URL, or a promise of one
+function photoFor(src) {
+  if (typeof src !== 'string' || !src.startsWith('/api/avatars/')) return Promise.resolve(null);
+  if (!photos.has(src)) {
+    if (photos.size > 60) photos.delete(photos.keys().next().value);
+    photos.set(src, smallPhoto(src).catch(() => {
+      photos.delete(src);
+      return null;
+    }));
+  }
+  return photos.get(src);
+}
+
+async function smallPhoto(src) {
+  const res = await fetch(src);
+  if (!res.ok) return null;
+  const img = await createImageBitmap(await res.blob());
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const scale = Math.max(size / img.width, size / img.height);
+  canvas.getContext('2d').drawImage(img, (size - img.width * scale) / 2, (size - img.height * scale) / 2, img.width * scale, img.height * scale);
+  img.close?.();
+  return canvas.toDataURL('image/jpeg', 0.86);
 }
 
 // Devices of yours you can call from this one.
@@ -1036,9 +1268,12 @@ export async function ensureFile(file) {
   }
 }
 
-export async function markRead(chatId) {
+// Marks a chat read once you can see it, or straight away for Mark as read
+// and Reply in the Android app's notifications ({ always: true }).
+export async function markRead(chatId, { always = false } = {}) {
   const chat = S.chats.get(chatId);
-  if (!chat || document.visibilityState !== 'visible') return;
+  if (!chat || (!always && document.visibilityState !== 'visible')) return;
+  native.post('notify-clear', { chatId });
   if (chat.lastSeq > chat.me.readSeq || chat.me.markedUnread || chat.unread) {
     chat.unread = 0;
     chat.me.markedUnread = false;
@@ -1120,14 +1355,13 @@ function handleEvent(e) {
       const m = e.message;
       upsertMessage(m);
       const chat = S.chats.get(m.chatId);
-      if (!chat) chatOf(m.chatId).catch(() => {});
-      if (m.kind === 'msg' && !sentHere(m, chat)) {
-        S.typing.get(m.chatId)?.delete(m.senderId);
-        if (S.active === m.chatId && document.visibilityState === 'visible') markRead(m.chatId);
-        else markDelivered(m.chatId, m.seq);
-        if (chat && (S.active !== m.chatId || document.visibilityState !== 'visible') && !(chat.me.mutedUntil > Date.now())) {
-          waitForContent(m).then(() => notify(chatTitle(chat), (showsSender(chat) || isDeviceGroup(chat) ? `${senderName(m, chat)}: ` : '') + previewText(m), m.chatId));
-        }
+      if (chat) newMessage(m, chat);
+      // A chat this device hasn't seen yet, such as the first message from
+      // someone new: fetch it, then tell you about the message.
+      else {
+        chatOf(m.chatId).then((c) => newMessage(m, c), () => {
+          if (m.kind === 'msg' && !isMe(m.senderId)) markDelivered(m.chatId, m.seq);
+        });
       }
       break;
     }
@@ -1213,12 +1447,28 @@ function handleEvent(e) {
   render();
 }
 
+// A message someone else sent: delivered or read, and a notification unless
+// you're looking at that chat or it's muted.
+function newMessage(m, chat) {
+  if (!chat || m.kind !== 'msg' || sentHere(m, chat)) return;
+  S.typing.get(m.chatId)?.delete(m.senderId);
+  const looking = S.active === m.chatId && document.visibilityState === 'visible';
+  if (looking) markRead(m.chatId);
+  else markDelivered(m.chatId, m.seq);
+  if (looking || chat.me.mutedUntil > Date.now()) return;
+  waitForContent(m).then(() => notify(chatTitle(chat), (showsSender(chat) || isDeviceGroup(chat) ? `${senderName(m, chat)}: ` : '') + previewText(m), m.chatId, m));
+}
+
 async function waitForContent(m) {
   for (let i = 0; i < 20 && !contentOf(m)?.ok && !contentOf(m)?.error; i++) await new Promise((r) => setTimeout(r, 50));
 }
 
-export function notify(title, body, chatId) {
+export function notify(title, body, chatId, m = null) {
   updateTitle();
+  if (native.app) {
+    appNotify(title, body, chatId, m);
+    return;
+  }
   if (!S.prefs.notifications || !('Notification' in window) || Notification.permission !== 'granted') return;
   if (document.visibilityState === 'visible' && S.active === chatId) return;
   const options = { body: body.slice(0, 160), tag: chatId, renotify: true, icon: '/icon-192.png', data: { chatId } };
@@ -1237,6 +1487,28 @@ export function notify(title, body, chatId) {
   } catch {
     viaWorker();
   }
+}
+
+// A new message in the Android app: it pops up with the sender, their
+// picture and a preview, with Reply and Mark as read.
+function appNotify(title, body, chatId, m) {
+  if (S.prefs.appNotifications === false) return;
+  if (document.visibilityState === 'visible' && S.active === chatId) return;
+  const chat = S.chats.get(chatId);
+  const group = !!chat && chat.type !== 'direct';
+  const sender = m ? senderName(m, chat) : title;
+  const who = m ? S.users.get(m.senderId) : null;
+  const text = group && m ? previewText(m) : body;
+  const info = {
+    chatId, title, group, sender, senderId: m?.senderId || chatId, text: String(text).slice(0, 600), at: m?.createdAt || Date.now(),
+    color: colorFor(m?.senderId || chatId), initials: initials(sender),
+  };
+  const src = who?.avatar || who?.src;
+  if (!src) {
+    native.post('notify', info);
+    return;
+  }
+  photoFor(src).catch(() => null).then((photo) => native.post('notify', photo ? { ...info, photo } : info));
 }
 
 export function updateTitle() {

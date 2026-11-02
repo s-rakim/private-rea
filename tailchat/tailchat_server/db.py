@@ -204,6 +204,9 @@ class Database:
         self._add_columns("chats", device_pair="TEXT", wallpaper="TEXT", wallpaper_file="TEXT")
         self.conn.execute("CREATE INDEX IF NOT EXISTS chats_wallpaper ON chats(wallpaper_file) WHERE wallpaper_file IS NOT NULL")
         self._add_columns("devices", machine_id="TEXT", machine_name="TEXT", renamed="INTEGER NOT NULL DEFAULT 0")
+        # Which device made a call, so a call between your own devices shows
+        # as incoming (or missed) on the others.
+        self._add_columns("calls", caller_device="TEXT")
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._depth = 0
 

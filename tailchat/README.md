@@ -11,13 +11,12 @@ framework in other languages.
 
 ## Run it with Docker
 
-The compose file runs three containers. A Tailscale container joins your
+The compose file runs two containers. A Tailscale container joins your
 tailnet as its own machine and serves `https://tailchat.<your-tailnet>.ts.net`
 with a real certificate. The Tailchat container shares its network, so
 `tailscale serve` reaches it on `127.0.0.1` and tells it who each visitor is.
-The calls container runs [peer-calls](https://github.com/peer-calls/peer-calls)
-for voice and video calls, served on port 3443 of the same name. Nothing is
-published on the Docker host, and Funnel stays off.
+Voice and video calls are part of Tailchat itself. Nothing is published on the
+Docker host, and Funnel stays off.
 
 1. In the [Tailscale admin console](https://login.tailscale.com/admin/dns),
    turn on **MagicDNS** and **HTTPS certificates**.
@@ -44,9 +43,8 @@ other than `tailchat`, and `TAILCHAT_MAX_UPLOAD_MB` to change the 2 GB file
 limit. To update, pull the new code and run `docker compose up -d --build`
 again.
 
-All three containers run with a read-only root filesystem, no Linux
-capabilities and `no-new-privileges`, and the Tailchat and calls ones as
-unprivileged users.
+Both containers run with a read-only root filesystem, no Linux capabilities
+and `no-new-privileges`, and the Tailchat one as an unprivileged user.
 Tailscale uses userspace networking, so it needs no tun device and nothing
 but `tailscale serve` is reachable on the node.
 
@@ -59,21 +57,30 @@ setting. Set `TAILCHAT_TAILNET=off` in `.env` to turn the machine list off.
 
 ### Calls
 
-Calling a chat, or one of your devices from the Calls tab, rings the other
-side in Tailchat. Each device that picks up joins the call's room on
-peer-calls, which opens inside the app. The first time on each device the room
-asks for a name to show and which camera and microphone to use, then remembers
-them. The link button above the call opens the room in its own window.
+Call a chat (voice or video), or one of your own devices from the Calls tab,
+and every device of the people you call rings. You hear a ringing tone while
+it rings on the other side; they get a ring screen with the caller's photo,
+**Answer**, **Decline** and quick replies, and a notification with Answer and
+Decline when Tailchat is in the background. In the Android app the phone
+rings with its own ringtone, and the call pops up over other apps or fills
+the lock screen (see [mobile/README.md](mobile/README.md)).
 
-peer-calls only passes call setup between the browsers. The audio and video go
-device to device over WebRTC on your tailnet addresses, and no public STUN or
-TURN server is used. The room runs on its own port, so it is a separate site
-from Tailchat and can't read Tailchat's keys or messages. Each call gets a
-random room that only the devices that were rung know.
+During a call you can mute, turn the camera off or switch cameras, share your
+screen (on a computer), react, add people, pick the video quality, turn the
+call into picture in picture and see the connection's quality. Video goes up
+to 4K when both cameras and the connection allow (Full HD, HD and a data
+saver are in the call's **More** sheet and in **Settings > Calls**), and
+**HD audio** sends full-band Opus at up to 128 kbit/s, or 192 kbit/s stereo
+with **Original sound** for music. Group calls take up to 8 people or
+devices. A call that drops (a phone changing networks) carries on when the
+device reconnects, a call that's still going on can be joined from the chat,
+and calls nobody answers show as missed.
 
-Set `TAILCHAT_CALLS_PORT=0` in `.env` to use the calls built into Tailchat
-instead. Those seal call setup end to end, but have a simpler call screen. If
-your access rules limit ports on the Tailchat node, allow 3443 as well as 443.
+Everything about a call stays on your server and tailnet. The Tailchat server
+only rings and passes each call's setup messages between the devices, sealed
+end to end so it can't read or change them, and the audio and video go
+straight from device to device over WebRTC on your tailnet addresses. No
+STUN or TURN server is used, public or otherwise.
 
 To harden it further:
 
@@ -158,9 +165,10 @@ window. The device needs Tailscale switched on and signed in to your tailnet.
 * **Android (Chrome)**: install Tailscale from the Play Store, sign in and turn
   it on. Open your Tailchat address in Chrome, then open the ⋮ menu and tap
   **Add to Home screen > Install**. Tailchat opens full screen from its icon.
-* **Android APK**: a separate Android app (`tailchat/mobile`, in its own pull
-  request until it is merged) asks for your Tailchat address the first time it
-  opens.
+* **Android APK**: the Tailchat Android app (`mobile/`, APKs on the Releases
+  page) asks for your Tailchat address the first time it opens. It rings like
+  a phone, pops calls up over other apps and keeps them going in the
+  background; see [mobile/README.md](mobile/README.md).
 
 An app installed from a browser is the same device as that browser's tab: it
 shares its key and its chats. The Android APK is a device of its own.
@@ -185,9 +193,10 @@ shares its key and its chats. The Android APK is a device of its own.
   Followers react and vote but can't post or see each other.
 * **Status**: text, photo and video updates that disappear after 24 hours,
   with a viewer list and replies.
-* **Calls**: voice and video, one-to-one and groups of up to 8, with a call log.
-  You can also call any of your own devices, or ring all of them at once from
-  the Calls tab.
+* **Calls**: voice and video up to 4K with HD audio, one-to-one and groups of
+  up to 8, with ringing, missed calls, call waiting and a call log. You can
+  also call any of your own devices, or ring all of them at once from the
+  Calls tab.
 * **Privacy and devices**: last seen, read receipts, blocking, security codes
   to compare in person, linked devices you can rename or log out remotely, a
   chat with each of your other devices, and chat history sent end-to-end
@@ -219,10 +228,8 @@ Not included: payments, business tools, live location and a sticker store.
 Each device (browser or client) makes its own P-256 key pair and keeps the
 private key to itself. A message is sealed with a fresh AES-256-GCM key, which
 is wrapped for every device of every member. Files are encrypted in 1 MiB
-chunks before upload. With the built-in calls, call setup is sealed the same
-way, so the server can't put itself in the middle of a call. Calls through
-peer-calls (the Docker default) set up through your own peer-calls container
-instead, on your tailnet only. The full design is in
+chunks before upload. Call setup is sealed the same way, so the server can't
+put itself in the middle of a call. The full design is in
 [PROTOCOL.md](PROTOCOL.md).
 
 Every device key the app sees is pinned to its owner. When someone you talk to
@@ -287,9 +294,13 @@ communities. Channels and community management are in the web app.
 ### Android app
 
 `mobile/` is an Expo app that opens your server's web app in a full-screen
-WebView, with camera, microphone and location for calls and sharing, and the
-share sheet for saving files. Install Tailscale on the phone, open Tailchat and
-enter your server address. APKs are on the repository's Releases page.
+WebView, with Android code of its own for calls and notifications: the phone's
+ringtone for incoming calls, a pop-up with Answer and Decline over other apps,
+full screen on the lock screen, calls that carry on in the background and in
+picture in picture, and message notifications with Reply and Mark as read.
+Install Tailscale on the phone, open Tailchat and enter your server address.
+APKs are on the repository's Releases page; [mobile/README.md](mobile/README.md)
+lists the phone settings to allow.
 
 The **Android APK** workflow builds it on [EAS](https://expo.dev) and publishes
 a release with the APK. Add an `EXPO_TOKEN` repository secret (an access token

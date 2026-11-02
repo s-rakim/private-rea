@@ -1,0 +1,57 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <!-- Ringing, the incoming call pop-up and message notifications. -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+  <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+  <uses-permission android:name="android.permission.VIBRATE" />
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+  <!-- Keeping a call, or the connection to the server, going in the background. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+  <!-- Speaker or earpiece during a call. -->
+  <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+  <application>
+    <!-- The full screen incoming call, only over the lock screen. -->
+    <activity
+      android:name="net.tailchat.calls.IncomingCallActivity"
+      android:exported="false"
+      android:excludeFromRecents="true"
+      android:launchMode="singleTop"
+      android:taskAffinity="net.tailchat.calls.incoming"
+      android:showWhenLocked="true"
+      android:turnScreenOn="true"
+      android:theme="@style/Tailchat.IncomingCall"
+      android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|uiMode" />
+
+    <!-- Answer in a notification: see-through, gone again at once. -->
+    <activity
+      android:name="net.tailchat.calls.AnswerActivity"
+      android:exported="false"
+      android:excludeFromRecents="true"
+      android:noHistory="true"
+      android:launchMode="singleInstance"
+      android:taskAffinity="net.tailchat.calls.answer"
+      android:showWhenLocked="true"
+      android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+    <service
+      android:name="net.tailchat.calls.TailchatService"
+      android:exported="false"
+      android:foregroundServiceType="microphone|camera|specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="Keeps the connection to the user's own Tailchat server open while the app is in the background, so incoming calls ring and new messages show." />
+    </service>
+
+    <receiver
+      android:name="net.tailchat.calls.ActionReceiver"
+      android:exported="false" />
+  </application>
+</manifest>

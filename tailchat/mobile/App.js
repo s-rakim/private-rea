@@ -19,6 +19,7 @@ import { EncodingType, deleteAsync, readAsStringAsync } from 'expo-file-system/l
 import * as DocumentPicker from 'expo-document-picker';
 import * as Sharing from 'expo-sharing';
 import * as Clipboard from 'expo-clipboard';
+import TailchatCalls from './modules/tailchat-calls';
 
 const SERVER_KEY = 'tailchat-server';
 const ACCENT = '#3f5db3';
@@ -43,6 +44,13 @@ const CHUNK = 1024 * 1024;
 // content policy), so the bridge remembers the blob behind each one.
 //
 // WebView also refuses navigator.clipboard.writeText, so copies go to the app.
+//
+// Calls and notifications: window.TailchatApp.post hands the page's messages
+// to the app's Android side (modules/tailchat-calls), which rings, pops calls
+// up over other apps and the lock screen, keeps a call going in the
+// background, and shows message notifications. Its answers reach the page as
+// 'tailchat-native' events. Without the native part (Expo Go) there's no
+// post, and the page works as it does in a browser.
 const PAGE_BRIDGE = `
 (function () {
   var CHUNK = ${CHUNK};
@@ -108,6 +116,9 @@ const PAGE_BRIDGE = `
   }
 
   window.TailchatApp = Object.freeze({
+    platform: 'android',
+    version: 4,
+    ${TailchatCalls ? "post: function (msg) { post({ type: 'native', msg: msg }); }," : ''}
     pickFiles: function (options) {
       options = options || {};
       return ask({ type: 'pick', multiple: !!options.multiple }).then(function (picked) {
@@ -196,6 +207,16 @@ function safeFileName(name) {
   return String(name).replace(/[/\\?%*:|"<>\u0000-\u001f]/g, '_').slice(0, 120) || 'file';
 }
 
+// The page is reloading or closing: the Android side holds its messages
+// until the next one says hello.
+function pageGone() {
+  try {
+    TailchatCalls?.post(JSON.stringify({ type: 'page-gone' }));
+  } catch {
+    // nothing to tell
+  }
+}
+
 function ServerForm({ initial, onSave }) {
   const [value, setValue] = useState(initial || '');
   const [error, setError] = useState('');
@@ -273,6 +294,19 @@ function Chat({ server, onChangeServer }) {
     return () => sub.remove();
   }, []);
 
+  // What the Android side has to say goes to the page as a DOM event.
+  useEffect(() => {
+    if (!TailchatCalls) return undefined;
+    const sub = TailchatCalls.addListener('message', (e) => {
+      if (typeof e?.json !== 'string') return;
+      web.current?.injectJavaScript(`window.dispatchEvent(new CustomEvent('tailchat-native', { detail: JSON.parse(${JSON.stringify(e.json)}) })); true;`);
+    });
+    return () => {
+      sub.remove();
+      pageGone();
+    };
+  }, []);
+
   // Answers a request from the page bridge (see PAGE_BRIDGE).
   const reply = useCallback((id, value, error) => {
     const args = [id, value === undefined ? null : value, error || null].map((v) => JSON.stringify(v)).join(',');
@@ -294,6 +328,14 @@ function Chat({ server, onChangeServer }) {
     }
     if (msg?.type === 'copy' && typeof msg.text === 'string') {
       Clipboard.setStringAsync(msg.text).catch(() => {});
+      return;
+    }
+    if (msg?.type === 'native' && msg.msg && typeof msg.msg === 'object') {
+      try {
+        TailchatCalls?.post(JSON.stringify(msg.msg));
+      } catch {
+        // the native side refused it
+      }
       return;
     }
     if (!Number.isSafeInteger(msg?.id)) return;
@@ -365,8 +407,8 @@ function Chat({ server, onChangeServer }) {
     }
   }, [reply, server]);
 
-  // Pages on the Tailchat machine open in the app, on any port so the call
-  // service works too; any other link opens in the browser.
+  // Pages on the Tailchat machine open in the app; any other link opens in
+  // the browser.
   const onShouldStart = useCallback((req) => {
     if (/^(blob|data|about):/.test(req.url)) return true;
     try {
@@ -399,6 +441,7 @@ function Chat({ server, onChangeServer }) {
       onShouldStartLoadWithRequest={onShouldStart}
       onNavigationStateChange={(s) => { canGoBack.current = s.canGoBack; }}
       onError={() => setFailed(true)}
+      onLoadStart={pageGone}
       onMessage={onMessage}
       injectedJavaScriptBeforeContentLoaded={PAGE_BRIDGE}
       javaScriptEnabled

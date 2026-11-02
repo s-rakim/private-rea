@@ -10,6 +10,9 @@ import * as O from './overlays.js';
 import * as T from './themes.js';
 import { renderConversation, drafts, clearChat, deleteChat, exitGroup, exitLabel, attachDialog, canSend, followChannel, openCommunity } from './conversation.js';
 import { renderDetails, starredRow, inviteDialog, addMembers, deactivateCommunity } from './details.js';
+import { QUALITIES, DEFAULT_QUALITY } from './rtc.js';
+import * as tones from './tones.js';
+import * as native from './native.js';
 
 const slots = new Slots();
 let root;
@@ -236,6 +239,9 @@ function chatsTab() {
       h('button', { type: 'button', class: `chip${S.filter === k ? ' active' : ''}`, onclick: () => { S.filter = k; render(); } }, label)),
   ));
   const showBanner = 'Notification' in window && Notification.permission !== 'denied' && !S.prefs.notifications && !S.prefs.bannerDismissed;
+  // In the Android app: calls can only pop up over other apps once Android
+  // allows it, so ask once.
+  const showOverlay = native.app && native.status.overlay === false && !S.prefs.overlayDismissed;
   const banner = showBanner
     ? slots.get('banner', '1', () => h(
       'div',
@@ -244,7 +250,15 @@ function chatsTab() {
       h('div', { class: 'grow' }, h('div', null, 'Get notified of new messages'), h('button', { type: 'button', class: 'link', onclick: enableNotifications }, 'Turn on desktop notifications')),
       iconButton('close', 'Dismiss', () => A.savePrefs({ bannerDismissed: true })),
     ))
-    : null;
+    : showOverlay
+      ? slots.get('banner', 'overlay', () => h(
+        'div',
+        { class: 'banner' },
+        icon('layers'),
+        h('div', { class: 'grow' }, h('div', null, 'Let calls pop up over other apps'), h('button', { type: 'button', class: 'link', onclick: () => native.post('open-settings', { what: 'overlay' }) }, 'Allow Tailchat to display over other apps')),
+        iconButton('close', 'Dismiss', () => A.savePrefs({ overlayDismissed: true })),
+      ))
+      : null;
   const offline = !S.online ? slots.get('offline', '1', () => h('div', { class: 'banner warn' }, icon('info'), h('div', null, "Connecting to Tailchat… Messages you send now go out when you're back online."))) : null;
   const linked = S.prefs.securityAlerts?.devices || [];
   const linkedBanner = linked.length ? slots.get('linked', JSON.stringify(linked), () => h(
@@ -710,7 +724,7 @@ function callsTab() {
     .map((c) => {
       const chat = S.chats.get(c.chatId);
       if (!chat) return null;
-      const outgoing = A.isMe(c.callerId);
+      const outgoing = A.callOutgoing(c);
       const missed = !c.answeredAt && !outgoing;
       const length = c.answeredAt && c.endedAt ? ` · ${duration((c.endedAt - c.answeredAt) / 1000)}` : '';
       return h(
@@ -736,7 +750,7 @@ function callsTab() {
       deviceCallRows(),
       h('div', { class: 'list-section' }, 'Recent'),
       rows.length ? rows : h('div', { class: 'empty' }, 'No calls yet'),
-      h('div', { class: 'empty small' }, icon('lock'), S.callService ? ' Calls go device to device across your tailnet' : ' Calls go device to device across your tailnet and are end-to-end encrypted'),
+      h('div', { class: 'empty small' }, icon('lock'), ' Calls go straight between devices across your tailnet, end-to-end encrypted'),
     ),
   ];
 }
@@ -755,7 +769,7 @@ async function logout() {
 }
 
 const VIEW_TITLES = { chats: 'Chats', status: 'Updates', communities: 'Communities', calls: 'Calls' };
-const SETTINGS_PANELS = new Set(['settings', 'profile', 'privacy', 'chat-settings', 'themes', 'theme-editor', 'notifications', 'help']);
+const SETTINGS_PANELS = new Set(['settings', 'profile', 'privacy', 'chat-settings', 'call-settings', 'themes', 'theme-editor', 'notifications', 'help']);
 
 // The heading over the list: the section's name and what you can start there.
 function topbar() {
@@ -793,7 +807,7 @@ function navCounts() {
     else if (has) unread++;
   }
   const unseen = channelUnread || [...S.statuses.values()].some((s) => !s.seen && !A.isMe(s.userId));
-  const missed = S.calls.filter((c) => !c.answeredAt && !A.isMe(c.callerId) && c.startedAt > (S.prefs.callsSeenAt || 0)).length;
+  const missed = S.calls.filter((c) => !c.answeredAt && !A.callOutgoing(c) && c.startedAt > (S.prefs.callsSeenAt || 0)).length;
   return { unread, unseen, missed };
 }
 
@@ -1061,7 +1075,8 @@ function settingsPanel() {
     settingsRow('lock', 'Privacy', 'Last seen, read receipts, blocked contacts', () => openPanel('privacy')),
     settingsRow('theme', 'Themes', `${A.activeTheme().name} · ${MODE_LABELS[S.prefs.theme] || MODE_LABELS.system}`, () => openPanel('themes')),
     settingsRow('chat', 'Chats', 'Enter to send', () => openPanel('chat-settings')),
-    settingsRow('bell', 'Notifications', S.prefs.notifications ? 'On' : 'Off', () => openPanel('notifications')),
+    settingsRow('phone', 'Calls', callSettingsSummary(), () => openPanel('call-settings')),
+    settingsRow('bell', 'Notifications', (native.app ? S.prefs.appNotifications !== false && native.status.notifications !== false : S.prefs.notifications) ? 'On' : 'Off', () => openPanel('notifications')),
     settingsRow('devices', 'Linked devices', null, () => openPanel('devices')),
     settingsRow('shield', 'Security', 'How Tailchat protects your messages', () => openPanel('help')),
     settingsRow('exit', 'Log out', null, logout, true),
@@ -1173,6 +1188,91 @@ function chatSettingsPanel() {
     settingsRow('theme', 'Themes', `${A.activeTheme().name} · ${MODE_LABELS[S.prefs.theme] || MODE_LABELS.system}`, () => openPanel('themes')),
     h('div', { class: 'list-section' }, 'Keyboard'),
     h('div', { class: 'menu-row' }, icon('send'), h('div', { class: 'grow' }, h('div', null, 'Enter is send'), h('div', { class: 'sub' }, 'Shift+Enter adds a new line')), toggle(S.prefs.enterToSend, (on) => A.savePrefs({ enterToSend: on }), 'Enter is send')),
+  ], 'settings');
+}
+
+// ---------- call settings ----------
+
+const QUALITY_NOTES = {
+  best: 'The sharpest picture both cameras and your connection allow',
+  fhd: 'Sharp, and lighter on the connection',
+  hd: 'For slower connections',
+  saver: 'Uses the least data',
+};
+
+const callQuality = () => (S.prefs.callQuality in QUALITIES ? S.prefs.callQuality : DEFAULT_QUALITY);
+
+function callSettingsSummary() {
+  return `${QUALITIES[callQuality()].short} video · ${S.prefs.hdAudio !== false ? 'HD audio' : 'standard audio'}`;
+}
+
+let ringPreview = null;
+function previewRingtone() {
+  clearTimeout(ringPreview);
+  if (tones.playing('ringtone') && ringPreview) {
+    tones.stop('ringtone');
+    ringPreview = null;
+  } else {
+    tones.ringtone({ sound: true, vibrate: S.prefs.vibrate !== false });
+    ringPreview = setTimeout(() => {
+      tones.stop('ringtone');
+      ringPreview = null;
+      render();
+    }, 4800);
+  }
+  render();
+}
+
+function callAlertsToggle(on) {
+  if (!on) return A.savePrefs({ callAlerts: false });
+  if (!('Notification' in window)) return toast("This browser can't show notifications");
+  Notification.requestPermission().then((p) => {
+    A.savePrefs({ callAlerts: p === 'granted' });
+    if (p !== 'granted') toast('Notifications are blocked in your browser settings');
+  });
+}
+
+function callSettingsPanel() {
+  const q = callQuality();
+  const line = (iconName, label, sub, control) => h('div', { class: 'menu-row' }, icon(iconName), h('div', { class: 'grow' }, h('div', null, label), sub ? h('div', { class: 'sub' }, sub) : null), control);
+  const supported = 'Notification' in window;
+  const incoming = [];
+  if (native.app) {
+    // What Android lets the app do, as it last told us. Each one opens the
+    // right page of the phone's settings.
+    const st = native.status;
+    const allow = (what, ok, label = 'Allow') => (ok
+      ? h('span', { class: 'call-allowed' }, icon('check'), 'On')
+      : h('button', { type: 'button', class: 'btn plain small', onclick: () => native.post('open-settings', { what }) }, label));
+    incoming.push(
+      line('ringer', 'Stay connected in the background', 'So calls ring and messages pop up while you use other apps. Android shows a small notification while it does.', toggle(st.background !== false, (on) => native.post('keep-alive', { on }), 'Stay connected in the background')),
+      line('layers', 'Pop up over other apps', 'A call that comes in while you use another app pops up at the top of the screen, with Answer and Decline', allow('overlay', st.overlay)),
+      line('fullscreen', 'Fill the lock screen', 'When your phone is locked, an incoming call fills the screen', allow('full-screen', st.fullScreen !== false)),
+      line('bell', 'Notifications', 'Incoming and missed calls, and new messages', allow('notifications', st.notifications !== false)),
+      line('battery', 'No battery limits', "So Android doesn't put Tailchat to sleep and miss calls", allow('battery', st.battery, 'Remove')),
+      line('pip', 'Picture in picture', 'Leave the app in a video call and it carries on in a small window', allow('pip', st.pip !== false)),
+    );
+  } else {
+    const perm = supported ? Notification.permission : 'denied';
+    incoming.push(line('bell', 'Ringing notifications', !supported ? "This browser can't show notifications" : perm === 'denied' ? 'Blocked in your browser settings' : 'With Answer and Decline, when Tailchat is in the background', supported ? toggle(S.prefs.callAlerts !== false && perm === 'granted', callAlertsToggle, 'Ringing notifications') : null));
+  }
+  return panelShell('Calls', [
+    h('div', { class: 'list-section' }, 'Video quality'),
+    Object.entries(QUALITIES).map(([key, v]) => h(
+      'button',
+      { type: 'button', class: 'menu-row', 'aria-pressed': String(q === key), onclick: () => A.savePrefs({ callQuality: key }) },
+      icon(key === 'saver' ? 'battery' : 'hd'),
+      h('div', { class: 'grow' }, h('div', null, v.label), h('div', { class: 'sub' }, QUALITY_NOTES[key])),
+      q === key ? icon('check') : null,
+    )),
+    h('div', { class: 'list-section' }, 'Sound'),
+    line('mic', 'HD audio', 'Full-band, studio-quality voice. Turn it off on a slow connection.', toggle(S.prefs.hdAudio !== false, (on) => A.savePrefs({ hdAudio: on }), 'HD audio')),
+    line('ringer', 'Ringtone', native.app ? "Your phone's ringtone, for incoming calls" : 'Plays while a call rings and Tailchat is open', toggle(S.prefs.ringtone !== false, (on) => A.savePrefs({ ringtone: on }), 'Ringtone')),
+    native.app ? null : line('music', 'Hear the ringtone', null, h('button', { type: 'button', class: 'btn plain small', onclick: previewRingtone }, ringPreview ? 'Stop' : 'Play')),
+    line('vibrate', 'Vibrate', 'When a call rings, on phones that can', toggle(S.prefs.vibrate !== false, (on) => A.savePrefs({ vibrate: on }), 'Vibrate')),
+    h('div', { class: 'list-section' }, 'Incoming calls'),
+    incoming,
+    h('div', { class: 'empty small' }, icon('lock'), ' Audio and video go straight between your devices across your tailnet, encrypted end to end. Your server only rings them.'),
   ], 'settings');
 }
 
@@ -1317,10 +1417,27 @@ function themeEditorPanel() {
 }
 
 function notificationsPanel() {
+  if (native.app) return appNotificationsPanel();
   const supported = 'Notification' in window;
   return panelShell('Notifications', [
-    h('div', { class: 'menu-row' }, icon('bell'), h('div', { class: 'grow' }, h('div', null, 'Desktop notifications'), h('div', { class: 'sub' }, !supported ? "This browser can't show notifications" : Notification.permission === 'denied' ? 'Blocked in your browser settings' : 'Show new messages and calls while Tailchat is in the background')), supported ? toggle(S.prefs.notifications && Notification.permission === 'granted', (on) => (on ? enableNotifications() : A.savePrefs({ notifications: false })), 'Desktop notifications') : null),
+    h('div', { class: 'menu-row' }, icon('bell'), h('div', { class: 'grow' }, h('div', null, 'Desktop notifications'), h('div', { class: 'sub' }, !supported ? "This browser can't show notifications" : Notification.permission === 'denied' ? 'Blocked in your browser settings' : 'Show new messages while Tailchat is in the background')), supported ? toggle(S.prefs.notifications && Notification.permission === 'granted', (on) => (on ? enableNotifications() : A.savePrefs({ notifications: false })), 'Desktop notifications') : null),
+    settingsRow('phone', 'Calls', 'Ringing notifications, ringtone and vibration', () => openPanel('call-settings')),
     h('div', { class: 'empty small' }, 'Notifications show the sender and a preview. They are generated on this device after decryption; the server never sees message text.'),
+  ], 'settings');
+}
+
+// In the Android app, notifications are the phone's own: they pop up with
+// the sender's picture and a preview, with Reply and Mark as read.
+function appNotificationsPanel() {
+  const st = native.status;
+  const allowed = st.notifications !== false;
+  return panelShell('Notifications', [
+    h('div', { class: 'menu-row' }, icon('bell'), h('div', { class: 'grow' }, h('div', null, 'Message notifications'), h('div', { class: 'sub' }, allowed ? 'New messages pop up with the sender and a preview, with Reply and Mark as read' : 'Notifications are off for Tailchat in your phone\'s settings')),
+      allowed
+        ? toggle(S.prefs.appNotifications !== false, (on) => A.savePrefs({ appNotifications: on }), 'Message notifications')
+        : h('button', { type: 'button', class: 'btn plain small', onclick: () => native.post('open-settings', { what: 'notifications' }) }, 'Allow')),
+    settingsRow('phone', 'Calls', 'Ringing, the pop-up over other apps and the lock screen', () => openPanel('call-settings')),
+    h('div', { class: 'empty small' }, 'Notifications show the sender and a preview. They are made on this phone after decryption; the server never sees message text. Muted chats stay quiet.'),
   ], 'settings');
 }
 
@@ -1499,6 +1616,8 @@ function panelNodes() {
       return privacyPanel();
     case 'chat-settings':
       return chatSettingsPanel();
+    case 'call-settings':
+      return callSettingsPanel();
     case 'themes':
       return themesPanel();
     case 'theme-editor':
@@ -1638,6 +1757,7 @@ export function mount() {
   welcomeEl = welcome();
   root.replaceChildren(railEl, sidebarEl, mainEl);
   A.onRender(update);
+  native.on('status', () => render());
   document.addEventListener('keydown', onKey);
   // Files dropped on the open chat go to the attach dialog.
   convEl.addEventListener('dragover', (e) => e.preventDefault());

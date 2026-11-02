@@ -30,7 +30,10 @@ class Config:
     edit_window_s: int
     delete_window_s: int
     sweep_interval_s: float
-    calls_port: int = 0
+    # How long an unanswered call rings, and how long a device in a call may
+    # be offline before it is dropped from it.
+    ring_s: float = 45.0
+    call_grace_s: float = 30.0
 
 
 def _int(env: dict, name: str, fallback: int) -> int:
@@ -66,11 +69,6 @@ def load_config(env: dict | None = None) -> Config:
     tailnet = env.get("TAILCHAT_TAILNET") or ("localapi" if auth != "dev" else "dev" if dev_tailnet else "off")
     if tailnet not in ("localapi", "dev", "off") or (tailnet == "dev" and not (auth == "dev" and dev_tailnet)):
         raise ValueError("TAILCHAT_TAILNET must be localapi or off (dev needs TAILCHAT_AUTH=dev and TAILCHAT_DEV_TAILNET)")
-    # The HTTPS port on this same host where the call service (peer-calls)
-    # is served; 0 keeps calls built in.
-    calls_port = _int(env, "TAILCHAT_CALLS_PORT", 0)
-    if not 0 <= calls_port <= 65535:
-        raise ValueError("TAILCHAT_CALLS_PORT must be a port number, or 0 for built-in calls")
     # The server is its own node in Docker, so by default its machine is not
     # one of yours.
     list_self = env.get("TAILCHAT_LIST_SELF", "0").lower() in ("1", "true", "yes")
@@ -92,5 +90,6 @@ def load_config(env: dict | None = None) -> Config:
         edit_window_s=_int(env, "TAILCHAT_EDIT_WINDOW_S", 15 * 60),
         delete_window_s=_int(env, "TAILCHAT_DELETE_WINDOW_S", 2 * 24 * 3600),
         sweep_interval_s=_int(env, "TAILCHAT_SWEEP_INTERVAL_MS", 15000) / 1000,
-        calls_port=calls_port,
+        ring_s=_int(env, "TAILCHAT_RING_MS", 45000) / 1000,
+        call_grace_s=_int(env, "TAILCHAT_CALL_GRACE_MS", 30000) / 1000,
     )

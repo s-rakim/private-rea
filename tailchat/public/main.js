@@ -1,5 +1,5 @@
 // Entry point: unlock this device's keys, then draw the app.
-import { boot, openChat } from './app.js';
+import { boot, openChat, callAction } from './app.js';
 import { mount } from './views.js';
 
 const status = document.getElementById('boot-status');
@@ -23,7 +23,10 @@ boot((text) => {
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
   navigator.serviceWorker.addEventListener('message', (e) => {
-    if (e.data?.type === 'open-chat' && typeof e.data.chatId === 'string') openChat(e.data.chatId);
+    const m = e.data;
+    if (m?.type === 'open-chat' && typeof m.chatId === 'string') openChat(m.chatId);
+    // Answer, Decline or swipe-away on a ringing call's notification.
+    else if (m?.type === 'call-action' && typeof m.callId === 'string') callAction(m.action, m.callId);
   });
   navigator.serviceWorker.startMessages?.();
 }

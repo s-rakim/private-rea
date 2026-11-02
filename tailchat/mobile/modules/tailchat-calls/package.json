@@ -1,0 +1,9 @@
+{
+  "name": "tailchat-calls",
+  "version": "0.1.0",
+  "description": "Ringing, pop-up notifications and picture in picture for the Tailchat Android app",
+  "main": "index.js",
+  "private": true,
+  "author": "Malcolm Opondo",
+  "license": "UNLICENSED"
+}
