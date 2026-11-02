@@ -13,6 +13,11 @@ adb root >/dev/null 2>&1 && sleep 3
 adb wait-for-device
 adb shell 'echo "_ --ignore-certificate-errors" > /data/local/tmp/webview-command-line; chmod 644 /data/local/tmp/webview-command-line'
 adb shell settings put system screen_off_timeout 1800000
+# No "isn't responding" dialogs over the test, and a moment for the freshly
+# booted phone to settle.
+adb shell settings put global hide_error_dialogs 1
+sleep 20
+adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null
 adb shell settings put global heads_up_notifications_enabled 1
 adb reverse tcp:8443 tcp:8443
 adb install -r -g "$APK"

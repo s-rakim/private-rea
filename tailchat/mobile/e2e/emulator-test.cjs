@@ -107,15 +107,26 @@ function notifications() {
 }
 const note = (channel) => notifications().find((n) => n.channel === channel) || null;
 
-// The views in the window in front, from uiautomator.
-function views() {
+// The views in the window in front, from uiautomator. A slow emulator
+// sometimes says another app "isn't responding": that dialog is waved away
+// with Wait, since it would cover everything else.
+function views(again = 2) {
   shell('uiautomator dump /sdcard/tc-ui.xml');
   const xml = shell('cat /sdcard/tc-ui.xml');
-  return (xml.match(/<node [^>]*>/g) || []).map((n) => {
+  const list = (xml.match(/<node [^>]*>/g) || []).map((n) => {
     const attr = (k) => new RegExp(`${k}="([^"]*)"`).exec(n)?.[1] || '';
     const b = /bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/.exec(n);
     return { text: attr('text'), desc: attr('content-desc'), cls: attr('class'), pkg: attr('package'), x: b ? (+b[1] + +b[3]) >> 1 : 0, y: b ? (+b[2] + +b[4]) >> 1 : 0 };
   });
+  const anr = list.find((v) => /isn.t responding/.test(v.text));
+  const wait = anr && list.find((v) => v.text === 'Wait');
+  if (wait && again > 0) {
+    console.log(`(waving away "${anr.text}")`);
+    shell(`input tap ${wait.x} ${wait.y}`);
+    execFileSync('sleep', ['1']);
+    return views(again - 1);
+  }
+  return list;
 }
 async function tap(match, timeout = 15000) {
   const v = await until(() => views().find(match), timeout, 1000);
@@ -139,7 +150,7 @@ function resumed() {
   const out = activities();
   return /(?:topResumedActivity|mResumedActivity)[=:]\s*ActivityRecord\{\S+ u\d+ (\S+)/.exec(out)?.[1] || '';
 }
-const pinned = () => /mode=pinned[^\n]*\n(?:[^\n]*\n){0,12}?[^\n]*net\.tailchat\.app/.test(activities()) || /PinnedTask|pinned.*net\.tailchat\.app/.test(shell('dumpsys activity activities | grep -i pinned'));
+const pinned = () => shell('dumpsys activity activities | grep -A 4 "mode=pinned"').includes(PKG);
 const ringtonePlaying = () => /state:started[^\n]*USAGE_NOTIFICATION_RINGTONE|USAGE_NOTIFICATION_RINGTONE[^\n]*state:started/.test(shell('dumpsys audio'));
 const awake = () => /mWakefulness=Awake/.test(shell('dumpsys power'));
 const keyguard = () => /isKeyguardShowing=true|mShowing=true/.test(shell('dumpsys window policy') + shell('dumpsys activity activities | grep -i keyguard'));
@@ -147,6 +158,22 @@ const keyguard = () => /isKeyguardShowing=true|mShowing=true/.test(shell('dumpsy
 function density() {
   const m = /(\d+)\s*$/.exec(shell('wm density').trim().split('\n').pop() || '');
   return m ? Number(m[1]) / 160 : 2.75;
+}
+
+// The screenshots, small, into the log (the test's artifacts can't always
+// be fetched).
+async function printShots() {
+  const browser = await chromium.launch();
+  const page = await browser.newPage({ viewport: { width: 300, height: 300 }, deviceScaleFactor: 1 });
+  for (const s of shots) {
+    const png = fs.readFileSync(s.file).toString('base64');
+    await page.setContent(`<body style="margin:0"><img id="i" style="display:block;width:300px" src="data:image/png;base64,${png}"></body>`);
+    await page.waitForFunction(() => document.getElementById('i').complete);
+    const jpg = (await page.locator('#i').screenshot({ type: 'jpeg', quality: 55 })).toString('base64');
+    const parts = jpg.match(/.{1,3000}/g);
+    parts.forEach((p, i) => console.log(`@@SHOT ${s.name} ${i + 1}/${parts.length} ${p}`));
+  }
+  await browser.close();
 }
 
 // ---------- the test ----------
@@ -166,7 +193,12 @@ function density() {
     shell('input keyevent 66');
   }
   const ready = await until(() => logged(/page ready/), 120000, 2000);
-  check(ready, 'Tailchat loads in the app and talks to the Android side', '', () => `${onScreen()}\n${logs()}`);
+  if (!check(ready, 'Tailchat loads in the app and talks to the Android side', '', () => `${onScreen()}\n${logs()}`)) {
+    shot('not-loaded');
+    await printShots();
+    console.log('\nstopping: the rest needs Tailchat loaded in the app');
+    process.exit(1);
+  }
   await sleep(4000);
   shot('chats');
   check(note('tailchat_connection'), 'it stays connected in the background, with a small notification', JSON.stringify(notifications().map((n) => n.channel)), tailchatNotes);
@@ -339,17 +371,8 @@ function density() {
   console.log('\n---- Tailchat log ----');
   console.log(adb('logcat', '-d', '-s', 'TailchatCalls:*').split('\n').slice(-80).join('\n'));
 
-  // ---- screenshots into the log ----
-  const page = await browser.newPage({ viewport: { width: 300, height: 300 }, deviceScaleFactor: 1 });
-  for (const s of shots) {
-    const png = fs.readFileSync(s.file).toString('base64');
-    await page.setContent(`<body style="margin:0"><img id="i" style="display:block;width:300px" src="data:image/png;base64,${png}"></body>`);
-    await page.waitForFunction(() => document.getElementById('i').complete);
-    const jpg = (await page.locator('#i').screenshot({ type: 'jpeg', quality: 55 })).toString('base64');
-    const parts = jpg.match(/.{1,3000}/g);
-    parts.forEach((p, i) => console.log(`@@SHOT ${s.name} ${i + 1}/${parts.length} ${p}`));
-  }
   await browser.close();
+  await printShots();
 
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length} of ${results.length} checks passed`);
