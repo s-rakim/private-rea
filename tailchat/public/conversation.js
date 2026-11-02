@@ -3,7 +3,7 @@ import * as A from './app.js';
 import { S, api, render } from './app.js';
 import {
   h, icon, iconButton, avatar, richText, isJumboEmoji, timeOf, dayLabel, lastSeenText, fileSize, duration, colorFor,
-  toast, menu, closeMenu, dialog, confirmDialog, emojiPicker, QUICK_REACTIONS, reconcile, Slots,
+  toast, menu, closeMenu, dialog, confirmDialog, emojiPicker, QUICK_REACTIONS, reconcile, Slots, chooseFiles,
 } from './ui.js';
 import { extensionOf, kindFor, VoiceRecorder } from './media.js';
 import * as O from './overlays.js';
@@ -880,15 +880,10 @@ function autosize(ta) {
 }
 
 function pickFiles(accept, multiple, onPick, capture) {
-  const input = h('input', { type: 'file', accept, multiple, class: 'hidden' });
-  if (capture) input.setAttribute('capture', capture);
-  input.addEventListener('change', () => {
-    const files = [...input.files];
-    input.remove();
-    if (files.length) onPick(files);
-  });
-  document.body.append(input);
-  input.click();
+  chooseFiles({ accept, multiple, capture }).then(
+    (files) => files.length && onPick(files),
+    (err) => toast(err?.message || "Couldn't open that file"),
+  );
 }
 
 export function attachDialog(chat, files, { asDocument = false } = {}) {

@@ -829,7 +829,7 @@ async function callRinging(ring) {
       ringtone: S.prefs.ringtone !== false, vibrate: S.prefs.vibrate !== false,
     };
     native.post('call-incoming', info);
-    const photo = await photoFor(who.av.src).catch(() => null);
+    const photo = await photoFor(who.av.src || who.av.avatar).catch(() => null);
     if (photo && calls.incoming.has(ring.callId)) native.post('call-incoming', { ...info, photo });
     return;
   }

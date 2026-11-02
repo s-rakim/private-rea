@@ -50,6 +50,9 @@ function statusText(call) {
   }
 }
 
+// The picture an avatar shows: a chat's src, or a person's avatar.
+const photoOf = (av) => av.src || (typeof av.avatar === 'string' ? av.avatar : '');
+
 const clock = (call) => duration((Date.now() - (call.startedAt || Date.now())) / 1000);
 
 function tint(el, id) {
@@ -397,7 +400,7 @@ function heroBlock(call, who, peers) {
   const ringing = call.status !== 'active' && call.status !== 'reconnecting';
   const p = peers[0];
   const av = p && !who.group ? peerAvatar(p) : who.av;
-  const hero = slot('hero', `${av.id}|${av.src || ''}|${who.title}`, () => {
+  const hero = slot('hero', `${av.id}|${photoOf(av)}|${who.title}`, () => {
     const rings = h('div', { class: 'pulse' }, h('span'), h('span'), h('span'), avatar(av, 'xl'));
     const el = h('div', { class: 'callx-hero' }, rings, h('div', { class: 'callx-hero-name' }, who.title), h('div', { class: 'callx-hero-sub' }));
     el.rings = rings;
@@ -429,7 +432,7 @@ function tile(p, { small = false } = {}) {
   const name = peerName(p);
   const av = peerAvatar(p);
   const t = slot(`tile:${p.deviceId}:${small ? 's' : 'l'}`, '', () => tint(h('div', { class: `callx-tile${small ? ' small' : ''}` }), av.id));
-  const face = v ? videoEl(`${p.deviceId}:cam`, p.stream) : slot(`face:${p.deviceId}:${small}`, `${av.id}|${av.src || ''}`, () => h('div', { class: 'face' }, h('div', { class: 'pulse live' }, h('span'), avatar(av, small ? 'md' : 'lg'))));
+  const face = v ? videoEl(`${p.deviceId}:cam`, p.stream) : slot(`face:${p.deviceId}:${small}`, `${av.id}|${photoOf(av)}`, () => h('div', { class: 'face' }, h('div', { class: 'pulse live' }, h('span'), avatar(av, small ? 'md' : 'lg'))));
   const state = p.state !== 'connected' ? (p.gaveUp ? 'Lost' : 'Connecting…') : '';
   const label = slot(`label:${p.deviceId}:${small}`, `${name}|${p.remote.muted}|${state}`, () => [
     h('div', { class: 'label' }, p.remote.muted ? icon('micOff') : null, h('span', { class: 'ellipsis' }, name)),
@@ -714,7 +717,7 @@ function renderMini(call, who, peers, remoteVideo) {
     ? videoEl(`${peers[0].deviceId}:mini`, peers[0].stream)
     : call.cam && !peers.length
       ? videoEl('self:mini', call.preview, { mirror: call.facing === 'user' })
-      : slot('mini-face', `${av.id}|${av.src || ''}`, () => h('div', { class: 'pulse live' }, h('span'), avatar(av, 'md')));
+      : slot('mini-face', `${av.id}|${photoOf(av)}`, () => h('div', { class: 'pulse live' }, h('span'), avatar(av, 'md')));
   if (!remoteVideo && peers.length === 1) watchLevel(peers[0].deviceId, face);
   tint(ui.mini, who.av.id);
   ui.mini.classList.toggle('has-video', !!remoteVideo || (!!call.cam && !peers.length));
