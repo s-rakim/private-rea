@@ -62,6 +62,8 @@ test('a device chat call rings the other device only', async () => {
 
   const log = (await phone.call('GET', '/api/calls')).calls.find((c) => c.id === callId);
   assert.ok(log.answeredAt);
+  // Every end is dee, so the calls list goes by the device that rang.
+  assert.equal(log.callerDevice, phone.deviceId);
   frame(laptop, { action: 'hangup', callId });
   await phone.waitFor(callEvent(callId, 'ended'));
 });

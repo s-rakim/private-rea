@@ -809,6 +809,14 @@ export function ringInfo(ring) {
   };
 }
 
+// Whether a call in the calls list was made from here. Between your own
+// devices you're the caller on every end, so it's the device that counts.
+export function callOutgoing(c) {
+  const chat = S.chats.get(c.chatId);
+  const ownCall = isOwnChat(chat) || isDeviceChat(chat) || isDeviceGroup(chat);
+  return ownCall && c.callerDevice ? c.callerDevice === S.device.id : isMe(c.callerId);
+}
+
 // The call screen draws voice levels and reactions as they come, without
 // redrawing the app; callscreen.js fills these in.
 export const callView = { levels: () => {}, reaction: () => {} };

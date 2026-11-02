@@ -2084,6 +2084,7 @@ class Api:
                         "id": c["id"],
                         "chatId": c["chat_id"],
                         "callerId": c["caller_id"],
+                        "callerDevice": c["caller_device"],
                         "video": bool(c["video"]),
                         "startedAt": c["started_at"],
                         "answeredAt": c["answered_at"],
@@ -2177,8 +2178,8 @@ class Api:
                 "socks": {sock.device_id: sock}, "away": {}, "answered": False, "timers": [],
             }
             db.run(
-                "INSERT INTO calls (id, chat_id, caller_id, video, started_at, participants) VALUES (?, ?, ?, ?, ?, ?)",
-                call_id, chat_id, user_id, int(video), now(), json.dumps([user_id]),
+                "INSERT INTO calls (id, chat_id, caller_id, caller_device, video, started_at, participants) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                call_id, chat_id, user_id, sock.device_id, int(video), now(), json.dumps([user_id]),
             )
             self._ring(call_id, sock, set(others), set(own))
             return

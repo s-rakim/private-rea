@@ -713,7 +713,7 @@ function callsTab() {
     .map((c) => {
       const chat = S.chats.get(c.chatId);
       if (!chat) return null;
-      const outgoing = A.isMe(c.callerId);
+      const outgoing = A.callOutgoing(c);
       const missed = !c.answeredAt && !outgoing;
       const length = c.answeredAt && c.endedAt ? ` · ${duration((c.endedAt - c.answeredAt) / 1000)}` : '';
       return h(
@@ -796,7 +796,7 @@ function navCounts() {
     else if (has) unread++;
   }
   const unseen = channelUnread || [...S.statuses.values()].some((s) => !s.seen && !A.isMe(s.userId));
-  const missed = S.calls.filter((c) => !c.answeredAt && !A.isMe(c.callerId) && c.startedAt > (S.prefs.callsSeenAt || 0)).length;
+  const missed = S.calls.filter((c) => !c.answeredAt && !A.callOutgoing(c) && c.startedAt > (S.prefs.callsSeenAt || 0)).length;
   return { unread, unseen, missed };
 }
 

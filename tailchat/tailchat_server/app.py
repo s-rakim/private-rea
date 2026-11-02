@@ -193,6 +193,13 @@ def create_app(config: Config) -> web.Application:
         app.router.add_get("/dev/login", dev_login)
     app.router.add_route("GET", "/{tail:.*}", handle_static)
     app.cleanup_ctx.append(sweeper)
+
+    async def close_sockets(app: web.Application) -> None:
+        # Open WebSockets would otherwise hold a graceful shutdown up for a
+        # minute (aiohttp waits for every handler to finish).
+        await hub.close()
+
+    app.on_shutdown.append(close_sockets)
     return app
 
 
