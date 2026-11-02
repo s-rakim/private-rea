@@ -208,14 +208,46 @@ Clients send `{"type":"typing","chatId","on","kind"}` and call frames.
 ### Calls
 
 WebRTC, device to device across the tailnet (no STUN/TURN servers needed:
-Tailscale addresses are directly reachable). Frames are
-`{"type":"call","action",...}`:
+Tailscale addresses are directly reachable). The server rings, relays sealed
+setup messages and keeps the call log; audio and video never go through it.
+Frames are `{"type":"call","action",...}`:
 
-* `ring {callId, chatId, video}` → others get `ring {callId, chatId, from, video}`
-* `accept {callId}` → you get `joined {peers:[{deviceId,userId}]}` and send an
-  SDP offer to each peer; existing peers get `peer-joined`
+* `ring {callId, chatId, video}` → everyone else in the chat gets
+  `ring {callId, chatId, from, fromDevice, video, ongoing}` on each of their
+  devices. `ongoing` is true when the call is already going on (someone
+  in it rang you with `invite`).
+* `ringing {callId}`: a device that is ringing says so, and the devices in the
+  call get `ringing {userId, deviceId}`. The caller plays the ringing tone from
+  then on, so it only rings out once something is really ringing.
+* `accept {callId}` → you get `joined {peers:[{deviceId,userId}], video}` and
+  send an SDP offer to each peer; existing peers get
+  `peer-joined {userId, deviceId}`, and your other devices
+  `answered-elsewhere`, which stops them ringing.
 * `signal {callId, toDevice, data:{sealed}}` → relayed as `signal {fromDevice, from, data}`
-* `decline`, `hangup` → `declined`, `peer-left`, `ended {reason}`
+* `decline {callId, reason}` (`reason: "busy"` from a device already in a
+  call, which plays the busy tone to the caller) → the devices in the call get
+  `declined {userId, deviceId, reason}` and your other devices
+  `answered-elsewhere`.
+* `invite {callId}` (from a device in the call) rings everyone in the chat who
+  is neither in the call nor ringing, such as people who missed or declined
+  it; in a call between your own devices, your devices that aren't in it.
+* `hangup {callId}` → the others get `peer-left {deviceId}`.
+* `ended {callId, reason}` goes to everyone in the chat when the call is over:
+  `ended` (one device left), `declined` or `busy` (nobody left to ring and the
+  caller alone), or `missed` (nobody answered).
+* `missed {callId}`: a device still ringing when the ring time runs out (45 s,
+  `TAILCHAT_RING_MS`) after someone else answered stops ringing.
+* `rejoin {callId}` after a device's connection comes back: a device in the
+  call gets `rejoined {peers, video}` and reconnects to them; one that was
+  ringing gets `answered-elsewhere` if the call went on without it, and any
+  device gets `ended` for a call that's over.
+* `error {callId, message}`: the call can't be placed (in a channel, too many
+  people, no other device to call).
+
+A device whose connection to the server drops (a phone changing networks)
+stays in the call for 30 s (`TAILCHAT_CALL_GRACE_MS`), since its audio and
+video don't go through the server, and carries on if it sends `rejoin` in
+time.
 
 `sealed` is an envelope (§3) holding `{sdp}` or `{candidate}`, wrapped for
 `toDevice` only, with the call AAD `tailchat/v1|call:<callId>|<fromDevice>|<toDevice>`.
@@ -224,27 +256,26 @@ device belongs to `from`, and drops unsealed signals. The SDP carries the
 DTLS fingerprints that secure the media, so sealing it stops a server from
 putting itself in the middle of a call.
 
-Group calls are a mesh of up to 8 people.
+Each pair of devices has one `RTCPeerConnection` with three transceivers
+added in this order: microphone, camera and screen share, so each side knows
+which incoming track is which. A negotiated data channel (`tailchat`, id 0)
+carries `{"t":"state","muted","cameraOff","sharing"}` whenever that changes
+and `{"t":"react","emoji"}` for reactions. Opus is tuned in the SDP (stereo,
+up to 192 kbit/s); video is capped per quality, shared between the peers.
+
+Group calls are a mesh of up to 8 people or devices.
 
 Calling yourself rings your own devices. In a device chat (§10) the other
-device gets the `ring`, in a device group its other logged-in devices; in your own chat (the direct chat whose only member is
-you) every other device you have gets it. A `ring` also carries `fromDevice`.
-Each device answers for itself: one of them picking up or declining doesn't
-stop the others ringing, `declined` says which `deviceId` declined, and the
-call ends once all of them have declined. No other device can join. Calls are
-limited to 8 people or devices.
+device gets the `ring`, in a device group its other logged-in devices; in your
+own chat (the direct chat whose only member is you) every other device you
+have gets it. Each device answers for itself: one of them picking up or
+declining doesn't stop the others ringing, `declined` says which `deviceId`
+declined, and the call ends once all of them have declined. No other device
+can join.
 
-#### Call service
-
-`GET /api/me` returns `calls: {port}` when the server is set up with a call
-service (`TAILCHAT_CALLS_PORT`, peer-calls in the Docker setup), or `null`.
-With one, clients still ring, accept, decline and hang up as above, but skip
-`signal`: each device in the call opens the room
-`https://<this host>:<port>/call/<callId>`, and the room sets up WebRTC
-between them. The room is on another origin, so it can't reach the client's
-keys; pages allow framing it (`frame-src`) and give it the camera, microphone
-and screen (`Permissions-Policy`), and nothing else. Call ids are 128 random
-bits, so only the devices that were rung know the room.
+The call log (`GET /api/calls`) lists each call with `chatId`, `callerId`,
+`callerDevice` (so a call between your own devices shows which one rang),
+`video`, `startedAt`, `answeredAt`, `endedAt` and `participants`.
 
 ## 7. REST summary
 

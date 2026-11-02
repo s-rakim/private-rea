@@ -10,6 +10,7 @@ on:
   push:
     paths:
       - 'tailchat/mobile/**'
+      - '!tailchat/mobile/**/*.md'
       - '.github/workflows/android-check.yml'
   workflow_dispatch:
 
