@@ -11,6 +11,9 @@ pkg=net.tailchat.app
 
 adb root >/dev/null 2>&1 && sleep 3
 adb wait-for-device
+# Room in the logs for the whole test, so Android's record of what it did
+# to the app is still there at the end.
+adb logcat -G 8M >/dev/null 2>&1 || true
 adb shell 'echo "_ --ignore-certificate-errors" > /data/local/tmp/webview-command-line; chmod 644 /data/local/tmp/webview-command-line'
 adb shell settings put system screen_off_timeout 1800000
 # No "isn't responding" dialogs over the test, and a moment for the freshly

@@ -187,7 +187,10 @@ internal object CallCenter {
       return
     }
     try {
-      if (!intoWebView(m)) send(m.toString())
+      if (!intoWebView(m)) {
+        Log.i(TAG, "no WebView to hand ${m.optString("type")} to: it waits for the app to be on screen")
+        send(m.toString())
+      }
     } catch (e: Exception) {
       Log.w(TAG, "couldn't reach the page", e)
     }
@@ -569,6 +572,7 @@ internal object CallCenter {
   }
 
   fun decline(callId: String) {
+    Log.i(TAG, "declining")
     endRing(callId)
     toPage(JSONObject().put("type", "call-action").put("action", "decline").put("callId", callId))
   }

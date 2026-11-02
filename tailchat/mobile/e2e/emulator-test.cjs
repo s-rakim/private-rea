@@ -39,7 +39,7 @@ function check(ok, what, detail = '', why = null) {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${what}${detail ? `  [${detail}]` : ''}`);
   if (!ok && why) {
     try {
-      console.log(`  ${String(why()).trim().split('\n').slice(0, 60).join('\n  ')}`);
+      console.log(`  ${String(why()).trim().split('\n').slice(0, 100).join('\n  ')}`);
     } catch (e) {
       console.log(`  (couldn't explain: ${e.message})`);
     }
@@ -75,9 +75,64 @@ function shot(name) {
 
 // ---------- what the phone shows ----------
 
-// Tailchat's lines in the log since the test started.
-const logs = () => adb('logcat', '-d', '-s', 'TailchatCalls:I');
+// Tailchat's lines in the log since this part of the test began, and the
+// WebView's if its page stopped.
+const logs = () => adb('logcat', '-d', '-s', 'TailchatCalls:I', 'RNCWebViewClient:W');
 const logged = (re) => re.test(logs());
+
+// Each part of the test starts with an empty main log, so its checks only
+// see what happened in it. What each part logged is kept for the end, and
+// the other logs (crashes, and Android's record of stopping apps) stay.
+const history = [];
+let lastLog = '';
+function freshLog() {
+  lastLog = logs();
+  history.push(lastLog);
+  adb('logcat', '-b', 'main', '-c');
+}
+function part(name) {
+  freshLog();
+  history.push(`-- ${name}`);
+  console.log(`\n-- ${name}`);
+}
+
+// Tailchat's process. Android stops an app that doesn't respond in time
+// (this test hides the "isn't responding" dialog, which then means the app
+// is closed), or one it needs the memory of.
+const pidOf = () => shell(`pidof ${PKG}`).trim().split(/\s+/)[0] || '';
+let appPid = '';
+
+// Why Tailchat stopped: how its process ended, and where its main thread
+// was stuck if it stopped responding.
+function whyStopped() {
+  const exits = shell(`dumpsys activity exit-info ${PKG}`).split('\n').slice(0, 30).join('\n');
+  const events = adb('logcat', '-d', '-b', 'events').split('\n').filter((l) => /am_(anr|crash|kill|proc_died)/.test(l) && l.includes(PKG)).slice(-10).join('\n');
+  const anr = shell('ls -t /data/anr').trim().split(/\s+/).find((f) => /^anr_/.test(f)) || '';
+  const trace = anr ? shell(`cat /data/anr/${anr}`).split('\n') : [];
+  const at = trace.findIndex((l) => l.startsWith('"main"'));
+  const main = at >= 0 ? `main thread when it stopped responding (${anr}):\n${trace.slice(at, at + 25).join('\n')}` : '';
+  return [exits, events, main].filter(Boolean).join('\n');
+}
+
+// If Android stopped Tailchat, or the WebView's page, during the last part:
+// says so and why, and opens Tailchat again so the parts after it still
+// test something.
+async function stillRunning() {
+  const pid = pidOf();
+  const pageGone = lastLog.split('\n').find((l) => /rendering process/.test(l));
+  if (pid && pid === appPid && !pageGone) return true;
+  if (pageGone) {
+    check(false, "Tailchat's page is still running", pageGone.trim());
+    shell(`am force-stop ${PKG}`);
+  } else {
+    check(false, 'Tailchat is still running', `process ${appPid} ${pid ? `is now ${pid}` : 'is gone'}`, whyStopped);
+  }
+  shell(`monkey -p ${PKG} -c android.intent.category.LAUNCHER 1`);
+  await until(() => logged(/page ready/), 90000, 2000);
+  appPid = pidOf();
+  await sleep(3000);
+  return false;
+}
 
 // Tailchat's notifications: channel, title, text, template and actions.
 function notifications() {
@@ -199,6 +254,7 @@ async function printShots() {
     console.log('\nstopping: the rest needs Tailchat loaded in the app');
     process.exit(1);
   }
+  appPid = pidOf();
   await sleep(4000);
   shot('chats');
   check(note('tailchat_connection'), 'it stays connected in the background, with a small notification', JSON.stringify(notifications().map((n) => n.channel)), tailchatNotes);
@@ -228,6 +284,7 @@ async function printShots() {
   await dcall(() => import('/app.js').then((m) => m.savePrefs({ callQuality: 'hd' })));
 
   // ---- a message pops up while you use another app ----
+  part('a message');
   shell('input keyevent KEYCODE_HOME');
   await sleep(2500);
   await say('Hello from Dana');
@@ -258,6 +315,8 @@ async function printShots() {
   await sleep(1000);
 
   // ---- a call pops up over other apps ----
+  part('a video call while you use another app');
+  await stillRunning();
   shell('input keyevent KEYCODE_HOME');
   await sleep(1500);
   await startCall(true);
@@ -317,32 +376,35 @@ async function printShots() {
   shot('after-the-call');
 
   // ---- Decline on the pop-up ----
+  part('Decline on the pop-up');
+  await stillRunning();
   shell('input keyevent KEYCODE_HOME');
   await sleep(2000);
-  adb('logcat', '-c');
   await startCall(false);
   const frame2 = await until(() => popupFrame(), 30000, 1000);
   await sleep(600);
+  check(frame2, 'a voice call pops up the same way', JSON.stringify(frame2), () => `${logs()}\n${tailchatWindows()}`);
   if (frame2 && !frame2.unknown) {
     const y = Math.round((frame2.t + 4 * dp + frame2.b - 14 * dp) / 2);
     const x = Math.round(frame2.r - (6 + 12 + 24 + 24 + 10 + 24) * dp);
     shell(`input tap ${x} ${y}`);
   }
   const declined = await until(() => callStatus().then((s) => s === null || s === 'ended' || s === 'declined'), 15000, 1000);
-  check(frame2 && declined, 'Decline on the pop-up declines the call', `Dana's call: ${await callStatus()}`);
-  check(await until(() => !popupFrame(), 5000, 500), 'and the pop-up goes away');
+  check(frame2 && declined, 'Decline on the pop-up declines the call', `Dana's call: ${await callStatus()}`, () => `${logs()}\n${whyStopped()}`);
+  check(frame2 && await until(() => !popupFrame(), 5000, 500), 'and the pop-up goes away');
   await hangUp();
   await sleep(3000);
 
   // ---- a call on the lock screen ----
-  adb('logcat', '-c');
+  part('a call on the lock screen');
+  await stillRunning();
   shell('input keyevent KEYCODE_SLEEP');
   await sleep(3000);
   await startCall(false);
   const full = await until(() => resumed().includes('IncomingCallActivity'), 30000, 1000);
   await sleep(1500);
   shot('lock-screen-call');
-  check(full, 'on the lock screen an incoming call fills the screen', resumed(), () => `${tailchatNotes()}\n${logs()}`);
+  check(full, 'on the lock screen an incoming call fills the screen', resumed(), () => `${logs()}\n${tailchatNotes()}`);
   check(awake(), 'and turns the screen on');
   check(logged(/ringing: call notification, locked/), 'with the call notification behind it', JSON.stringify(note('tailchat_calls')));
   check(await until(() => ringtonePlaying(), 5000, 500), 'the phone rings');
@@ -357,12 +419,14 @@ async function printShots() {
   shot('missed-call');
 
   // ---- with Tailchat open, its own ring screen shows ----
+  part('a call with Tailchat open');
+  await stillRunning();
   shell('input keyevent KEYCODE_WAKEUP');
   shell('wm dismiss-keyguard');
   await sleep(1500);
   shell(`monkey -p ${PKG} -c android.intent.category.LAUNCHER 1`);
   await sleep(3000);
-  adb('logcat', '-c');
+  freshLog();
   await startCall(true);
   const inApp = await until(() => logged(/ringing: in the app/), 30000, 1000);
   await sleep(1200);
@@ -371,11 +435,14 @@ async function printShots() {
   await hangUp();
   await sleep(2000);
 
-  // ---- nothing crashed ----
+  // ---- nothing crashed, and Tailchat ran the whole time ----
+  part('the end');
   const crashes = adb('logcat', '-d', '-b', 'crash');
   check(!crashes.includes(PKG), 'the app never crashed', crashes.split('\n').slice(0, 12).join(' | '));
+  const pid = pidOf();
+  check(pid && pid === appPid, 'Tailchat kept running to the end', `process ${appPid}, now ${pid || 'gone'}`, whyStopped);
   console.log('\n---- Tailchat log ----');
-  console.log(adb('logcat', '-d', '-s', 'TailchatCalls:*').split('\n').slice(-80).join('\n'));
+  console.log(history.join('\n').split('\n').filter((l) => l && !l.startsWith('---------')).join('\n'));
 
   await browser.close();
   await printShots();
