@@ -667,3 +667,29 @@ button.link.small { font-size: 12.5px; padding: 0; margin-top: 4px; background: 
 .colour-row { cursor: pointer; }
 .colour-row input[type="color"] { width: 44px; height: 30px; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); cursor: pointer; flex: none; }
 .sidebar .avatar.lg { width: 160px; height: 160px; font-size: 54px; }
+
+/* Profile photo: camera badge, upload spinner, crop dialog */
+.profile-photo { position: relative; }
+.profile-photo .photo-badge { position: absolute; right: 6%; bottom: 6%; width: 44px; height: 44px; border-radius: 50%; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; box-shadow: 0 0 0 4px var(--panel); transition: transform .15s var(--ease); }
+.profile-photo .photo-badge svg { width: 22px; height: 22px; fill: currentColor; }
+.profile-photo:hover .photo-badge, .profile-photo:focus-visible .photo-badge { transform: scale(1.08); }
+.profile-photo:hover .avatar { filter: brightness(.92); }
+.profile-photo.busy .avatar { filter: brightness(.6); }
+.profile-photo .photo-spinner { position: absolute; inset: 0; margin: auto; width: 48px; height: 48px; border-radius: 50%; border: 4px solid rgba(255, 255, 255, .35); border-top-color: #fff; animation: photo-spin .8s linear infinite; }
+@keyframes photo-spin { to { transform: rotate(360deg); } }
+.profile-card { display: flex; flex-direction: column; align-items: center; }
+.profile-card .photo-change { margin-top: 16px; }
+.profile-card .photo-change + p { margin: 10px 0 0; }
+.sidebar .profile-photo .photo-badge { width: 40px; height: 40px; }
+.crop { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.crop-stage { position: relative; width: 280px; height: 280px; max-width: 100%; border-radius: 16px; overflow: hidden; background: #000; touch-action: none; }
+.crop-canvas { display: block; width: 280px; height: 280px; cursor: grab; touch-action: none; outline: none; }
+.crop-canvas:active { cursor: grabbing; }
+.crop-canvas:focus-visible { box-shadow: inset 0 0 0 3px var(--accent); }
+.crop-mask { position: absolute; inset: 0; pointer-events: none; border-radius: 16px; }
+.crop-stage.round .crop-mask { border-radius: 50%; box-shadow: 0 0 0 200px rgba(0, 0, 0, .6); outline: 2px solid rgba(255, 255, 255, .85); outline-offset: -2px; }
+.crop-zoom { display: flex; align-items: center; gap: 10px; width: 280px; max-width: 100%; color: var(--muted); }
+.crop-zoom svg { width: 16px; height: 16px; fill: currentColor; flex: none; }
+.crop-zoom svg:last-child { width: 24px; height: 24px; }
+.crop-zoom input { flex: 1; accent-color: var(--accent); }
+.crop .center { text-align: center; margin: 0; }
