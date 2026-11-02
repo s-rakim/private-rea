@@ -19,11 +19,10 @@
 # tailscale container, read-only, over the tailscaled socket the two
 # containers share (the tailscale-socket volume).
 #
-# Voice and video calls run on the calls container, built from the peer-calls
-# source in ./calls and served at https://tailchat.<your-tailnet>.ts.net:3443. Tailchat rings your devices and
-# opens the call's room inside the app; the room connects the devices to each
-# other with WebRTC, directly across the tailnet. To keep calls built into
-# Tailchat instead, set TAILCHAT_CALLS_PORT=0 in .env.
+# Voice and video calls are part of Tailchat itself: the tailchat container
+# only rings and passes each call's sealed setup messages between your
+# devices, and the audio and video go straight from device to device across
+# the tailnet. No STUN, TURN or other outside servers are used.
 services:
   tailscale:
     image: tailscale/tailscale:stable
@@ -71,8 +70,6 @@ services:
       # Your machines, from the tailscale container (off to turn the list off).
       TAILCHAT_TAILNET: ${TAILCHAT_TAILNET:-localapi}
       TAILSCALE_SOCKET: /var/run/tailscale/tailscaled.sock
-      # The port docker/serve.json serves the calls container on.
-      TAILCHAT_CALLS_PORT: ${TAILCHAT_CALLS_PORT:-3443}
     volumes:
       - tailchat-data:/data
       # Tailchat runs as an unprivileged user, so tailscaled only lets it
@@ -81,36 +78,6 @@ services:
     read_only: true
     tmpfs:
       - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    pids_limit: 256
-    restart: unless-stopped
-
-  # The call service: peer-calls (Apache-2.0), built here from its source in
-  # ./calls, so no outside image is used. Only reachable through tailscale
-  # serve on port 3443. It only passes call setup between browsers ("mesh");
-  # the audio and video go device to device. No STUN or TURN servers: your
-  # devices reach each other on their tailnet addresses, so nothing about a
-  # call leaves the tailnet.
-  calls:
-    build: ./calls
-    image: tailchat-calls:latest
-    network_mode: service:tailscale
-    depends_on:
-      tailscale:
-        condition: service_started
-        restart: true
-    environment:
-      PEERCALLS_BIND_HOST: 127.0.0.1
-      PEERCALLS_BIND_PORT: "3000"
-      PEERCALLS_NETWORK_TYPE: mesh
-      PEERCALLS_STORE_TYPE: memory
-      # Empty: no STUN or TURN servers at all.
-      PEERCALLS_ICE_SERVER_URLS: ""
-    user: "65534:65534"
-    read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:

@@ -9,6 +9,9 @@ import * as O from './overlays.js';
 import * as T from './themes.js';
 import { renderConversation, drafts, clearChat, deleteChat, exitGroup, exitLabel, attachDialog, canSend, followChannel, openCommunity } from './conversation.js';
 import { renderDetails, starredRow, inviteDialog, addMembers, deactivateCommunity } from './details.js';
+import { QUALITIES, DEFAULT_QUALITY } from './rtc.js';
+import * as tones from './tones.js';
+import * as native from './native.js';
 
 const slots = new Slots();
 let root;
@@ -735,7 +738,7 @@ function callsTab() {
       deviceCallRows(),
       h('div', { class: 'list-section' }, 'Recent'),
       rows.length ? rows : h('div', { class: 'empty' }, 'No calls yet'),
-      h('div', { class: 'empty small' }, icon('lock'), S.callService ? ' Calls go device to device across your tailnet' : ' Calls go device to device across your tailnet and are end-to-end encrypted'),
+      h('div', { class: 'empty small' }, icon('lock'), ' Calls go straight between devices across your tailnet, end-to-end encrypted'),
     ),
   ];
 }
@@ -754,7 +757,7 @@ async function logout() {
 }
 
 const VIEW_TITLES = { chats: 'Chats', status: 'Updates', communities: 'Communities', calls: 'Calls' };
-const SETTINGS_PANELS = new Set(['settings', 'profile', 'privacy', 'chat-settings', 'themes', 'theme-editor', 'notifications', 'help']);
+const SETTINGS_PANELS = new Set(['settings', 'profile', 'privacy', 'chat-settings', 'call-settings', 'themes', 'theme-editor', 'notifications', 'help']);
 
 // The heading over the list: the section's name and what you can start there.
 function topbar() {
@@ -1058,6 +1061,7 @@ function settingsPanel() {
     settingsRow('lock', 'Privacy', 'Last seen, read receipts, blocked contacts', () => openPanel('privacy')),
     settingsRow('theme', 'Themes', `${A.activeTheme().name} · ${MODE_LABELS[S.prefs.theme] || MODE_LABELS.system}`, () => openPanel('themes')),
     settingsRow('chat', 'Chats', 'Enter to send', () => openPanel('chat-settings')),
+    settingsRow('phone', 'Calls', callSettingsSummary(), () => openPanel('call-settings')),
     settingsRow('bell', 'Notifications', S.prefs.notifications ? 'On' : 'Off', () => openPanel('notifications')),
     settingsRow('devices', 'Linked devices', null, () => openPanel('devices')),
     settingsRow('shield', 'Security', 'How Tailchat protects your messages', () => openPanel('help')),
@@ -1124,6 +1128,91 @@ function chatSettingsPanel() {
     settingsRow('theme', 'Themes', `${A.activeTheme().name} · ${MODE_LABELS[S.prefs.theme] || MODE_LABELS.system}`, () => openPanel('themes')),
     h('div', { class: 'list-section' }, 'Keyboard'),
     h('div', { class: 'menu-row' }, icon('send'), h('div', { class: 'grow' }, h('div', null, 'Enter is send'), h('div', { class: 'sub' }, 'Shift+Enter adds a new line')), toggle(S.prefs.enterToSend, (on) => A.savePrefs({ enterToSend: on }), 'Enter is send')),
+  ], 'settings');
+}
+
+// ---------- call settings ----------
+
+const QUALITY_NOTES = {
+  best: 'The sharpest picture both cameras and your connection allow',
+  fhd: 'Sharp, and lighter on the connection',
+  hd: 'For slower connections',
+  saver: 'Uses the least data',
+};
+
+const callQuality = () => (S.prefs.callQuality in QUALITIES ? S.prefs.callQuality : DEFAULT_QUALITY);
+
+function callSettingsSummary() {
+  return `${QUALITIES[callQuality()].short} video · ${S.prefs.hdAudio !== false ? 'HD audio' : 'standard audio'}`;
+}
+
+let ringPreview = null;
+function previewRingtone() {
+  clearTimeout(ringPreview);
+  if (tones.playing('ringtone') && ringPreview) {
+    tones.stop('ringtone');
+    ringPreview = null;
+  } else {
+    tones.ringtone({ sound: true, vibrate: S.prefs.vibrate !== false });
+    ringPreview = setTimeout(() => {
+      tones.stop('ringtone');
+      ringPreview = null;
+      render();
+    }, 4800);
+  }
+  render();
+}
+
+function callAlertsToggle(on) {
+  if (!on) return A.savePrefs({ callAlerts: false });
+  if (!('Notification' in window)) return toast("This browser can't show notifications");
+  Notification.requestPermission().then((p) => {
+    A.savePrefs({ callAlerts: p === 'granted' });
+    if (p !== 'granted') toast('Notifications are blocked in your browser settings');
+  });
+}
+
+function callSettingsPanel() {
+  const q = callQuality();
+  const line = (iconName, label, sub, control) => h('div', { class: 'menu-row' }, icon(iconName), h('div', { class: 'grow' }, h('div', null, label), sub ? h('div', { class: 'sub' }, sub) : null), control);
+  const supported = 'Notification' in window;
+  const incoming = [];
+  if (native.app) {
+    // What Android lets the app do, as it last told us. Each one opens the
+    // right page of the phone's settings.
+    const st = native.status;
+    const allow = (what, ok, label = 'Allow') => (ok
+      ? h('span', { class: 'call-allowed' }, icon('check'), 'On')
+      : h('button', { type: 'button', class: 'btn plain small', onclick: () => native.post('open-settings', { what }) }, label));
+    incoming.push(
+      line('ringer', 'Ring when Tailchat is closed', 'Keeps a connection to your server so calls ring like phone calls. Android shows a small notification while it does.', toggle(!!st.background, (on) => native.post('keep-alive', { on }), 'Ring when Tailchat is closed')),
+      line('layers', 'Show calls over other apps', 'A call that comes in while you use another app fills the screen, so you can answer it there', allow('overlay', st.overlay)),
+      line('fullscreen', 'Ring on the lock screen', 'Incoming calls show full screen when your phone is locked', allow('full-screen', st.fullScreen !== false)),
+      line('bell', 'Call notifications', 'Answer and Decline in the notification, and missed calls', allow('notifications', st.notifications !== false)),
+      line('battery', 'No battery limits', "So Android doesn't put Tailchat to sleep and miss calls", allow('battery', st.battery, 'Remove')),
+      line('pip', 'Picture in picture', 'Leave the app in a video call and it carries on in a small window', allow('pip', st.pip !== false)),
+    );
+  } else {
+    const perm = supported ? Notification.permission : 'denied';
+    incoming.push(line('bell', 'Ringing notifications', !supported ? "This browser can't show notifications" : perm === 'denied' ? 'Blocked in your browser settings' : 'With Answer and Decline, when Tailchat is in the background', supported ? toggle(S.prefs.callAlerts !== false && perm === 'granted', callAlertsToggle, 'Ringing notifications') : null));
+  }
+  return panelShell('Calls', [
+    h('div', { class: 'list-section' }, 'Video quality'),
+    Object.entries(QUALITIES).map(([key, v]) => h(
+      'button',
+      { type: 'button', class: 'menu-row', 'aria-pressed': String(q === key), onclick: () => A.savePrefs({ callQuality: key }) },
+      icon(key === 'saver' ? 'battery' : 'hd'),
+      h('div', { class: 'grow' }, h('div', null, v.label), h('div', { class: 'sub' }, QUALITY_NOTES[key])),
+      q === key ? icon('check') : null,
+    )),
+    h('div', { class: 'list-section' }, 'Sound'),
+    line('mic', 'HD audio', 'Full-band, studio-quality voice. Turn it off on a slow connection.', toggle(S.prefs.hdAudio !== false, (on) => A.savePrefs({ hdAudio: on }), 'HD audio')),
+    line('ringer', 'Ringtone', native.app ? "Your phone's ringtone, for incoming calls" : 'Plays while a call rings and Tailchat is open', toggle(S.prefs.ringtone !== false, (on) => A.savePrefs({ ringtone: on }), 'Ringtone')),
+    native.app ? null : line('music', 'Hear the ringtone', null, h('button', { type: 'button', class: 'btn plain small', onclick: previewRingtone }, ringPreview ? 'Stop' : 'Play')),
+    line('vibrate', 'Vibrate', 'When a call rings, on phones that can', toggle(S.prefs.vibrate !== false, (on) => A.savePrefs({ vibrate: on }), 'Vibrate')),
+    h('div', { class: 'list-section' }, 'Incoming calls'),
+    incoming,
+    h('div', { class: 'empty small' }, icon('lock'), ' Audio and video go straight between your devices across your tailnet, encrypted end to end. Your server only rings them.'),
   ], 'settings');
 }
 
@@ -1270,7 +1359,8 @@ function themeEditorPanel() {
 function notificationsPanel() {
   const supported = 'Notification' in window;
   return panelShell('Notifications', [
-    h('div', { class: 'menu-row' }, icon('bell'), h('div', { class: 'grow' }, h('div', null, 'Desktop notifications'), h('div', { class: 'sub' }, !supported ? "This browser can't show notifications" : Notification.permission === 'denied' ? 'Blocked in your browser settings' : 'Show new messages and calls while Tailchat is in the background')), supported ? toggle(S.prefs.notifications && Notification.permission === 'granted', (on) => (on ? enableNotifications() : A.savePrefs({ notifications: false })), 'Desktop notifications') : null),
+    h('div', { class: 'menu-row' }, icon('bell'), h('div', { class: 'grow' }, h('div', null, 'Desktop notifications'), h('div', { class: 'sub' }, !supported ? "This browser can't show notifications" : Notification.permission === 'denied' ? 'Blocked in your browser settings' : 'Show new messages while Tailchat is in the background')), supported ? toggle(S.prefs.notifications && Notification.permission === 'granted', (on) => (on ? enableNotifications() : A.savePrefs({ notifications: false })), 'Desktop notifications') : null),
+    settingsRow('phone', 'Calls', 'Ringing notifications, ringtone and vibration', () => openPanel('call-settings')),
     h('div', { class: 'empty small' }, 'Notifications show the sender and a preview. They are generated on this device after decryption; the server never sees message text.'),
   ], 'settings');
 }
@@ -1453,6 +1543,8 @@ function panelNodes() {
       return privacyPanel();
     case 'chat-settings':
       return chatSettingsPanel();
+    case 'call-settings':
+      return callSettingsPanel();
     case 'themes':
       return themesPanel();
     case 'theme-editor':
@@ -1592,6 +1684,7 @@ export function mount() {
   welcomeEl = welcome();
   root.replaceChildren(railEl, sidebarEl, mainEl);
   A.onRender(update);
+  native.on('status', () => render());
   document.addEventListener('keydown', onKey);
   // Files dropped on the open chat go to the attach dialog.
   convEl.addEventListener('dragover', (e) => e.preventDefault());

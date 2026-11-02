@@ -7,7 +7,8 @@ import { connectUser, startServer } from './helpers.js';
 let server;
 
 before(async () => {
-  server = await startServer({ TAILCHAT_CALLS_PORT: '3443' });
+  // Short ring and reconnect times, so the tests don't wait 45 seconds.
+  server = await startServer({ TAILCHAT_RING_MS: '2500', TAILCHAT_CALL_GRACE_MS: '1500' });
 });
 
 after(async () => {
@@ -16,23 +17,15 @@ after(async () => {
 
 const frame = (user, msg) => user.ws.send(JSON.stringify({ type: 'call', ...msg }));
 const callEvent = (callId, action) => (e) => e.type === 'call' && e.callId === callId && e.action === action;
-const quiet = () => new Promise((r) => setTimeout(r, 200));
+const quiet = (ms = 200) => new Promise((r) => setTimeout(r, ms));
 
-test('the call service is announced, and only it may be framed', async () => {
+test('calls are Tailchat\'s own: no call service and nothing else may be framed', async () => {
   const me = await connectUser(server.base, 'cal');
-  assert.deepEqual((await me.call('GET', '/api/me')).calls, { port: 3443 });
+  assert.equal((await me.call('GET', '/api/me')).calls, undefined);
   const res = await fetch(`${server.base}/`, { headers: me.headers });
-  assert.match(res.headers.get('content-security-policy'), /; frame-src https:\/\/127\.0\.0\.1:3443$/);
-  assert.match(res.headers.get('permissions-policy'), /camera=\(self "https:\/\/127\.0\.0\.1:3443"\)/);
-  // A Host that isn't a plain hostname never makes it into the policy.
-  const { port } = new URL(server.base);
-  const csp = await new Promise((resolve, reject) => {
-    http.get({ host: '127.0.0.1', port, path: '/', headers: { ...me.headers, Host: `x"; script-src *:${port}` } }, (res) => {
-      res.resume();
-      resolve(res.headers['content-security-policy'] || '');
-    }).on('error', reject);
-  });
-  assert.doesNotMatch(csp, /frame-src|\*/);
+  assert.match(res.headers.get('content-security-policy'), /frame-ancestors 'none'/);
+  assert.doesNotMatch(res.headers.get('content-security-policy'), /frame-src/);
+  assert.equal(res.headers.get('permissions-policy'), 'camera=(self), microphone=(self), geolocation=(self), display-capture=(self)');
 });
 
 test('a device chat call rings the other device only', async () => {
@@ -132,4 +125,150 @@ test('calls between people are unchanged: one device picking up stops the others
   await ann.waitFor(callEvent(callId, 'peer-joined'));
   frame(ann, { action: 'hangup', callId });
   await bobPhone.waitFor(callEvent(callId, 'ended'));
+});
+
+// Two people in a direct chat, both connected.
+async function pair(a, b) {
+  const one = await connectUser(server.base, a);
+  const two = await connectUser(server.base, b);
+  await Promise.all([one.socket(), two.socket()]);
+  const { chat } = await one.call('POST', '/api/chats/direct', { userId: two.id });
+  return { one, two, chat };
+}
+
+test('a ringing device tells the caller, so the caller hears it ring', async () => {
+  const { one: amy, two: ben, chat } = await pair('amy', 'ben');
+  const callId = newMessageId();
+  frame(amy, { action: 'ring', callId, chatId: chat.id, video: true });
+  const ring = await ben.waitFor(callEvent(callId, 'ring'));
+  assert.equal(ring.ongoing, false);
+  frame(ben, { action: 'ringing', callId });
+  const ringing = await amy.waitFor(callEvent(callId, 'ringing'));
+  assert.equal(ringing.deviceId, ben.deviceId);
+  assert.equal(ringing.userId, ben.id);
+  // Someone who wasn't rung can't pretend to ring.
+  const eve = await connectUser(server.base, 'eva');
+  await eve.socket();
+  frame(eve, { action: 'ringing', callId });
+  await quiet();
+  assert.equal(amy.events.filter(callEvent(callId, 'ringing')).length, 1);
+
+  // Busy: declined with a reason, and the call ends with it.
+  frame(ben, { action: 'decline', callId, reason: 'busy' });
+  assert.equal((await amy.waitFor(callEvent(callId, 'declined'))).reason, 'busy');
+  assert.equal((await amy.waitFor(callEvent(callId, 'ended'))).reason, 'busy');
+});
+
+test('nobody answering ends the call as missed', async () => {
+  const { one: cy, two: di, chat } = await pair('cyd', 'dia');
+  const callId = newMessageId();
+  frame(cy, { action: 'ring', callId, chatId: chat.id, video: false });
+  await di.waitFor(callEvent(callId, 'ring'));
+  assert.equal((await di.waitFor(callEvent(callId, 'ended'), 5000)).reason, 'missed');
+  const log = (await cy.call('GET', '/api/calls')).calls.find((c) => c.id === callId);
+  assert.ok(log.endedAt && !log.answeredAt);
+});
+
+test('a device whose connection drops stays in the call and carries on when it is back', async () => {
+  const { one: fay, two: gus, chat } = await pair('fay', 'gus');
+  const callId = newMessageId();
+  frame(fay, { action: 'ring', callId, chatId: chat.id, video: true });
+  await gus.waitFor(callEvent(callId, 'ring'));
+  frame(gus, { action: 'accept', callId });
+  await fay.waitFor(callEvent(callId, 'peer-joined'));
+
+  // gus loses his connection and gets it back within the grace time.
+  gus.ws.close();
+  await quiet(500);
+  gus.events.length = 0;
+  await gus.socket();
+  frame(gus, { action: 'rejoin', callId });
+  const back = await gus.waitFor(callEvent(callId, 'rejoined'));
+  assert.deepEqual(back.peers, [{ deviceId: fay.deviceId, userId: fay.id }]);
+  await quiet(1600);
+  assert.ok(!fay.events.some(callEvent(callId, 'peer-left')), 'gus was never dropped');
+
+  // Signals still reach him on his new connection.
+  frame(fay, { action: 'signal', callId, toDevice: gus.deviceId, data: { sealed: 'x' } });
+  await gus.waitFor(callEvent(callId, 'signal'));
+
+  // This time he doesn't come back: the call ends once the grace time is up.
+  gus.ws.close();
+  await fay.waitFor(callEvent(callId, 'peer-left'), 4000);
+  assert.equal((await fay.waitFor(callEvent(callId, 'ended'))).reason, 'ended');
+
+  // A device that was away when the call ended hears so when it rejoins.
+  await gus.socket();
+  frame(gus, { action: 'rejoin', callId });
+  await gus.waitFor(callEvent(callId, 'ended'));
+});
+
+test('a device that was ringing hears the call was answered elsewhere when it reconnects', async () => {
+  const hal = await connectUser(server.base, 'hal');
+  const ivy1 = await connectUser(server.base, 'ivy');
+  const ivy2 = await connectUser(server.base, 'ivy');
+  await Promise.all([hal.socket(), ivy1.socket(), ivy2.socket()]);
+  const { chat } = await hal.call('POST', '/api/chats/direct', { userId: 'ivy@dev' });
+  const callId = newMessageId();
+  frame(hal, { action: 'ring', callId, chatId: chat.id, video: false });
+  await ivy2.waitFor(callEvent(callId, 'ring'));
+  ivy2.ws.close();
+  frame(ivy1, { action: 'accept', callId });
+  await hal.waitFor(callEvent(callId, 'peer-joined'));
+  ivy2.events.length = 0;
+  await ivy2.socket();
+  frame(ivy2, { action: 'rejoin', callId });
+  await ivy2.waitFor(callEvent(callId, 'answered-elsewhere'));
+  frame(hal, { action: 'hangup', callId });
+});
+
+test('in a group call whoever has not answered stops ringing, and can be rung again', async () => {
+  const jo = await connectUser(server.base, 'jo');
+  const kim = await connectUser(server.base, 'kim');
+  const lou = await connectUser(server.base, 'lou');
+  await Promise.all([jo.socket(), kim.socket(), lou.socket()]);
+  const { chat } = await jo.call('POST', '/api/chats/group', { name: 'Band', members: [kim.id, lou.id] });
+  const callId = newMessageId();
+  frame(jo, { action: 'ring', callId, chatId: chat.id, video: true });
+  await Promise.all([kim.waitFor(callEvent(callId, 'ring')), lou.waitFor(callEvent(callId, 'ring'))]);
+  frame(kim, { action: 'accept', callId });
+  await jo.waitFor(callEvent(callId, 'peer-joined'));
+
+  // lou never picks up: his ringing stops, the call goes on.
+  await lou.waitFor(callEvent(callId, 'missed'), 5000);
+  assert.ok(!jo.events.some(callEvent(callId, 'ended')));
+
+  // Only someone in the call can ring people again.
+  frame(lou, { action: 'invite', callId });
+  await quiet();
+  assert.equal(lou.events.filter(callEvent(callId, 'ring')).length, 1);
+  frame(kim, { action: 'invite', callId });
+  const again = await lou.waitFor((e) => callEvent(callId, 'ring')(e) && e.ongoing);
+  assert.equal(again.from, kim.id);
+  assert.ok(!jo.events.some(callEvent(callId, 'ring')), 'people in the call are not rung');
+  frame(lou, { action: 'accept', callId });
+  const joined = await lou.waitFor(callEvent(callId, 'joined'));
+  assert.deepEqual(joined.peers.map((p) => p.userId).sort(), [jo.id, kim.id].sort());
+
+  // Nobody left to ring.
+  frame(jo, { action: 'invite', callId });
+  assert.match((await jo.waitFor(callEvent(callId, 'error'))).message, /already in the call/);
+  for (const u of [jo, kim, lou]) frame(u, { action: 'hangup', callId });
+  await quiet();
+});
+
+test('a revoked device is dropped from its call at once', async () => {
+  const mo = await connectUser(server.base, 'mo');
+  const ned1 = await connectUser(server.base, 'ned');
+  const ned2 = await connectUser(server.base, 'ned');
+  await Promise.all([mo.socket(), ned1.socket(), ned2.socket()]);
+  const { chat } = await mo.call('POST', '/api/chats/direct', { userId: 'ned@dev' });
+  const callId = newMessageId();
+  frame(mo, { action: 'ring', callId, chatId: chat.id, video: false });
+  await ned2.waitFor(callEvent(callId, 'ring'));
+  frame(ned2, { action: 'accept', callId });
+  await mo.waitFor(callEvent(callId, 'peer-joined'));
+  await ned1.call('DELETE', `/api/devices/${encodeURIComponent(ned2.deviceId)}`);
+  await mo.waitFor(callEvent(callId, 'peer-left'), 1000);
+  await mo.waitFor(callEvent(callId, 'ended'));
 });
