@@ -1,0 +1,60 @@
+{
+  "name": "tailchat-desktop",
+  "productName": "Tailchat",
+  "version": "0.1.0",
+  "description": "Tailchat for Windows: the Tailchat web app in its own window",
+  "main": "src/main.js",
+  "private": true,
+  "author": "Malcolm Opondo",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --publish never"
+  },
+  "devDependencies": {
+    "electron": "44.10.1",
+    "electron-builder": "26.17.0"
+  },
+  "build": {
+    "appId": "net.tailchat.desktop",
+    "productName": "Tailchat",
+    "copyright": "Malcolm Opondo",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Tailchat",
+      "artifactName": "Tailchat-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Tailchat-${version}-portable.${ext}"
+    }
+  }
+}

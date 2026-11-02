@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' file:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tailchat</title>
+  <link rel="stylesheet" href="setup.css">
+</head>
+<body>
+  <main>
+    <img class="logo" src="assets/icon.png" alt="">
+
+    <form id="form" hidden>
+      <h1>Tailchat</h1>
+      <p>Connect this computer to your tailnet with Tailscale, then enter the address of your Tailchat server.</p>
+      <input id="server" type="text" inputmode="url" autocomplete="url" spellcheck="false"
+             placeholder="https://tailchat.your-tailnet.ts.net" aria-label="Server address">
+      <p id="error" class="error" role="alert"></p>
+      <button type="submit">Connect</button>
+    </form>
+
+    <section id="failed" hidden>
+      <h1>Can't reach Tailchat</h1>
+      <p>Couldn't open <strong id="where"></strong>. Check that Tailscale is connected on this computer and the server is running.</p>
+      <button id="retry" type="button">Try again</button>
+      <button id="change" type="button" class="link">Change server</button>
+    </section>
+  </main>
+  <script src="setup.js"></script>
+</body>
+</html>

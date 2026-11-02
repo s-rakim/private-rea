@@ -1,0 +1,89 @@
+name: Windows desktop app
+
+# Builds Tailchat for Windows: an installer and a portable .exe.
+#
+# * Pull requests that touch tailchat/desktop build it and attach both files
+#   to the run as an artifact, so they can be tried before merging.
+# * Running it from the Actions tab, or pushing a tag such as desktop-v0.1.0,
+#   also publishes a GitHub release with both files attached. Without a tag,
+#   the release is named after the version in tailchat/desktop/package.json.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        required: false
+  push:
+    tags:
+      - 'desktop-v*'
+  pull_request:
+    paths:
+      - 'tailchat/desktop/**'
+      - '.github/workflows/desktop-windows.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: tailchat/desktop
+    env:
+      TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tailchat/desktop/package-lock.json
+
+      - run: npm ci
+
+      - name: Build the installer and the portable app
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run dist
+
+      - name: List the files
+        run: ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tailchat-windows
+          path: |
+            tailchat/desktop/dist/*.exe
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          [ -n "$TAG" ] || TAG="desktop-v$version"
+          cat > notes.md <<NOTES
+          Tailchat for Windows $version.
+
+          * **Tailchat-Setup-$version.exe** installs Tailchat for your Windows account, with Start menu and desktop shortcuts.
+          * **Tailchat-$version-portable.exe** runs without installing.
+
+          Install Tailscale on the PC and sign in to your tailnet, then open Tailchat and enter your server address, such as https://tailchat.your-tailnet.ts.net. The files aren't code-signed, so Windows SmartScreen may warn the first time: choose **More info > Run anyway**.
+          NOTES
+          files=(dist/Tailchat-Setup-"$version".exe dist/Tailchat-"$version"-portable.exe)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" "${files[@]}" --target "$GITHUB_SHA" --title "Tailchat for Windows ${TAG#desktop-}" --notes-file notes.md
+          fi
