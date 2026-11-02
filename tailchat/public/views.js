@@ -3,7 +3,7 @@
 import * as A from './app.js';
 import { S, api, render } from './app.js';
 import { kvDelete } from './api.js';
-import { h, icon, iconButton, avatar, toast, menu, dialog, confirmDialog, promptDialog, listTime, duration, lastSeenText, reconcile, Slots, toggle, viewer } from './ui.js';
+import { h, icon, iconButton, avatar, toast, menu, dialog, confirmDialog, promptDialog, listTime, duration, lastSeenText, reconcile, Slots, toggle, viewer, chooseFiles } from './ui.js';
 import { kindFor } from './media.js';
 import { pickPhoto, cropPhoto } from './photo.js';
 import * as O from './overlays.js';
@@ -1437,14 +1437,11 @@ function broadcastDialog(list) {
       h('label', { class: 'field' }, ta),
       fileLine,
       h('button', { type: 'button', class: 'btn plain', onclick: () => {
-        const input = h('input', { type: 'file', multiple: true, class: 'hidden' });
-        input.addEventListener('change', () => {
-          files = [...input.files].filter((f) => !O.fileTooBig(f));
+        chooseFiles({ multiple: true }).then((picked) => {
+          if (!picked.length) return;
+          files = picked.filter((f) => !O.fileTooBig(f));
           fileLine.textContent = files.map((f) => f.name).join(', ');
-          input.remove();
-        });
-        document.body.append(input);
-        input.click();
+        }, (err) => toast(err?.message || "Couldn't open that file"));
       } }, icon('attach'), ' Attach files'),
     ],
     actions: [

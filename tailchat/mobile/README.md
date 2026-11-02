@@ -7,8 +7,10 @@ Tailscale app.
 
 * Camera, microphone and location requests from the page go through Android's
   permission prompts.
+* Attaching a document opens the phone's own file picker. The app copies the
+  file you pick and hands it to Tailchat, which encrypts and sends it as usual.
 * Saving a file opens the share sheet, so you can keep it in Files or send it
-  to another app.
+  to another app. Big files are passed over in pieces.
 * Copy buttons (addresses, theme codes) use the phone's clipboard.
 * Links to other sites open in the browser.
 * If the server can't be reached, the error screen lets you retry or change
