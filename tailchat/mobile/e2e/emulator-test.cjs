@@ -102,16 +102,31 @@ function part(name) {
 const pidOf = () => shell(`pidof ${PKG}`).trim().split(/\s+/)[0] || '';
 let appPid = '';
 
+// The content providers (other apps' data and files) Tailchat holds open.
+// When the process behind one it holds firmly ("s1" or more) dies, Android
+// stops Tailchat too.
+function providerLinks() {
+  const found = [];
+  let name = '';
+  for (const line of shell('dumpsys activity providers').split('\n')) {
+    const rec = /ContentProviderRecord\{\S+ u\d+ ([^}\s]+)\}/.exec(line);
+    if (rec) name = rec[1];
+    if (/->\s*\d+:/.test(line) && line.includes(`:${PKG}/`)) found.push(`${name} ${line.trim()}`);
+  }
+  return found.join('; ') || 'none';
+}
+
 // Why Tailchat stopped: how its process ended, and where its main thread
 // was stuck if it stopped responding.
 function whyStopped() {
   const exits = shell(`dumpsys activity exit-info ${PKG}`).split('\n').slice(0, 30).join('\n');
-  const events = adb('logcat', '-d', '-b', 'events').split('\n').filter((l) => /am_(anr|crash|kill|proc_died)/.test(l) && l.includes(PKG)).slice(-10).join('\n');
+  const events = adb('logcat', '-d', '-b', 'events').split('\n').filter((l) => /am_(anr|crash|kill|proc_died)/.test(l) && (l.includes(PKG) || l.includes('com.google.android.gms'))).slice(-12).join('\n');
+  const gms = shell('dumpsys activity exit-info com.google.android.gms').split('\n').filter((l) => /timestamp=|process=com\.google\.android\.gms\.persistent|description=/.test(l)).slice(0, 9).join('\n');
   const anr = shell('ls -t /data/anr').trim().split(/\s+/).find((f) => /^anr_/.test(f)) || '';
   const trace = anr ? shell(`cat /data/anr/${anr}`).split('\n') : [];
   const at = trace.findIndex((l) => l.startsWith('"main"'));
   const main = at >= 0 ? `main thread when it stopped responding (${anr}):\n${trace.slice(at, at + 25).join('\n')}` : '';
-  return [exits, events, main].filter(Boolean).join('\n');
+  return [exits, events, main, gms && `Google Play services' recent exits:\n${gms}`].filter(Boolean).join('\n');
 }
 
 // If Android stopped Tailchat, or the WebView's page, during the last part:
@@ -256,6 +271,12 @@ async function printShots() {
   }
   appPid = pidOf();
   await sleep(4000);
+  console.log(`providers Tailchat holds: ${providerLinks()}`);
+  // A garbage collection in the app (the signal makes Android run one), to
+  // see whether what it holds is only waiting to be collected.
+  shell(`kill -10 ${appPid}`);
+  await sleep(4000);
+  console.log(`after a garbage collection: ${providerLinks()}`);
   shot('chats');
   check(note('tailchat_connection'), 'it stays connected in the background, with a small notification', JSON.stringify(notifications().map((n) => n.channel)), tailchatNotes);
 
@@ -353,6 +374,7 @@ async function printShots() {
   check(await until(() => logged(/their video arrived/), 30000, 1000), "Dana's video arrives in the app");
   await sleep(4000);
   shot('in-the-call');
+  console.log(`providers Tailchat holds in the call: ${providerLinks()}`);
   check(active, 'the call connects', `Dana's call: ${await callStatus()}`, () => `${onScreen()}\n${logs()}`);
   const ongoing = await until(() => note('tailchat_ongoing'), 10000, 1000);
   check(ongoing && ongoing.actions.some((a) => /Hang up/i.test(a)), 'an ongoing call notification with Hang up keeps the call going in the background', JSON.stringify(ongoing));
@@ -374,6 +396,7 @@ async function printShots() {
   check(!note('tailchat_ongoing'), 'the ongoing call notification goes away');
   check(!logged(/picture in picture on/) || await until(() => logged(/picture in picture off/), 8000, 1000), 'the small window closes');
   shot('after-the-call');
+  console.log(`providers Tailchat holds after the call: ${providerLinks()}`);
 
   // ---- Decline on the pop-up ----
   part('Decline on the pop-up');
