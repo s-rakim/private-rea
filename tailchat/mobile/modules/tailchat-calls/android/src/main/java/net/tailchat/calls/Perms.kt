@@ -29,6 +29,15 @@ internal object Perms {
 
   fun notifications(context: Context): Boolean = NotificationManagerCompat.from(context).areNotificationsEnabled()
 
+  // Messages drop down from the top only while their channel is "pop on
+  // screen" (high importance); a person can turn that down in the settings.
+  fun messagePopups(context: Context): Boolean {
+    if (Build.VERSION.SDK_INT < 26) return true
+    val manager = context.getSystemService(NotificationManager::class.java) ?: return true
+    val channel = manager.getNotificationChannel(Notices.CH_MESSAGES) ?: return true
+    return channel.importance >= NotificationManager.IMPORTANCE_HIGH
+  }
+
   fun battery(context: Context): Boolean {
     val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
     return power.isIgnoringBatteryOptimizations(context.packageName)
@@ -72,5 +81,12 @@ internal object Prefs {
 
   fun setAskedNotifications(context: Context) {
     prefs(context).edit().putBoolean("askedNotifications", true).apply()
+  }
+
+  // The last call pop-up was hidden by the phone.
+  fun popupBlocked(context: Context): Boolean = prefs(context).getBoolean("popupBlocked", false)
+
+  fun setPopupBlocked(context: Context, on: Boolean) {
+    prefs(context).edit().putBoolean("popupBlocked", on).apply()
   }
 }

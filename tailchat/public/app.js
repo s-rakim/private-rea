@@ -78,10 +78,25 @@ export function render() {
 
 function loadPrefs() {
   try {
-    return { theme: 'system', notifications: false, enterToSend: true, ...JSON.parse(localStorage.getItem('tailchat-prefs') || '{}') };
+    return { theme: 'system', enterToSend: true, ...JSON.parse(localStorage.getItem('tailchat-prefs') || '{}') };
   } catch {
-    return { theme: 'system', notifications: false, enterToSend: true };
+    return { theme: 'system', enterToSend: true };
   }
+}
+
+// Message notifications are on once the browser allows them, until they're
+// turned off in Settings > Notifications. (An older "notifications" setting
+// was off until switched on, so most people never got any.)
+export const messageAlertsOn = () => S.prefs.messageAlerts !== false;
+
+// Whether you're looking at Tailchat right now: on screen and, on a
+// computer, the window in front. A window that's open but behind other
+// windows still counts as visible, and still needs to pop up. In the Android
+// app the app says whether it's in front.
+export function inFront() {
+  if (document.visibilityState !== 'visible') return false;
+  if (native.app) return native.status.front !== false;
+  return document.hasFocus();
 }
 
 export function savePrefs(changes) {
@@ -241,9 +256,16 @@ export async function boot(setStatus) {
     if (typeof m.chatId === 'string') markRead(m.chatId, { always: true });
   });
   realtime.connect();
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && S.active) markRead(S.active);
-  });
+  // Back to Tailchat: the open chat is read now, and the connection gets
+  // checked at once rather than at its next beat.
+  const back = () => {
+    if (inFront() && S.active) markRead(S.active);
+    if (document.visibilityState === 'visible') realtime.check();
+  };
+  document.addEventListener('visibilitychange', back);
+  window.addEventListener('focus', back);
+  window.addEventListener('online', () => realtime.check());
+  native.on('status', back);
   setInterval(expireTyping, 2000);
   setInterval(() => render(), 60_000); // relative times, disappearing messages
   // Which machines are online, and new ones joining the tailnet.
@@ -1452,7 +1474,7 @@ function handleEvent(e) {
 function newMessage(m, chat) {
   if (!chat || m.kind !== 'msg' || sentHere(m, chat)) return;
   S.typing.get(m.chatId)?.delete(m.senderId);
-  const looking = S.active === m.chatId && document.visibilityState === 'visible';
+  const looking = S.active === m.chatId && inFront();
   if (looking) markRead(m.chatId);
   else markDelivered(m.chatId, m.seq);
   if (looking || chat.me.mutedUntil > Date.now()) return;
@@ -1469,8 +1491,8 @@ export function notify(title, body, chatId, m = null) {
     appNotify(title, body, chatId, m);
     return;
   }
-  if (!S.prefs.notifications || !('Notification' in window) || Notification.permission !== 'granted') return;
-  if (document.visibilityState === 'visible' && S.active === chatId) return;
+  if (!messageAlertsOn() || !('Notification' in window) || Notification.permission !== 'granted') return;
+  if (inFront() && S.active === chatId) return;
   const options = { body: body.slice(0, 160), tag: chatId, renotify: true, icon: '/icon-192.png', data: { chatId } };
   // Phones and the installed app only show notifications through the service
   // worker; desktop browsers can show them from the page.
@@ -1493,7 +1515,7 @@ export function notify(title, body, chatId, m = null) {
 // picture and a preview, with Reply and Mark as read.
 function appNotify(title, body, chatId, m) {
   if (S.prefs.appNotifications === false) return;
-  if (document.visibilityState === 'visible' && S.active === chatId) return;
+  if (inFront() && S.active === chatId) return;
   const chat = S.chats.get(chatId);
   const group = !!chat && chat.type !== 'direct';
   const sender = m ? senderName(m, chat) : title;
@@ -1537,11 +1559,7 @@ export function openChat(chatId, { highlight } = {}) {
     S.editing = null;
     if (S.details !== 'info' || !chatId) S.details = null;
   }
-  // Stay on the tab that lists the chat: channels under Updates, a
-  // community's chats under Communities.
-  const chat = S.chats.get(chatId);
-  if (isChannel(chat)) S.view = 'status';
-  else if (!(S.view === 'communities' && (chat?.type === 'community' || chat?.communityId))) S.view = 'chats';
+  S.view = 'chats';
   S.highlight = highlight || null;
   if (chatId && !box(chatId).loaded) loadMessages(chatId).then(() => markRead(chatId));
   else if (chatId) markRead(chatId);

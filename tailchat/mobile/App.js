@@ -442,6 +442,10 @@ function Chat({ server, onChangeServer }) {
       onNavigationStateChange={(s) => { canGoBack.current = s.canGoBack; }}
       onError={() => setFailed(true)}
       onLoadStart={pageGone}
+      // Android may stop the page's process while Tailchat is in the
+      // background. Without this the whole app closes; with it the page
+      // starts again, so calls keep ringing and messages keep popping up.
+      onRenderProcessGone={() => { pageGone(); setAttempt((n) => n + 1); }}
       onMessage={onMessage}
       injectedJavaScriptBeforeContentLoaded={PAGE_BRIDGE}
       javaScriptEnabled

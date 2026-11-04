@@ -2,7 +2,7 @@
   "expo": {
     "name": "Tailchat",
     "slug": "tailchat",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -14,7 +14,7 @@
     },
     "android": {
       "package": "net.tailchat.app",
-      "versionCode": 4,
+      "versionCode": 5,
       "adaptiveIcon": {
         "backgroundColor": "#3f5db3",
         "foregroundImage": "./assets/android-icon-foreground.png",

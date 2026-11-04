@@ -72,6 +72,16 @@ export class Api {
 
 // Reconnecting WebSocket. Events go to onEvent; onOpen fires after every
 // (re)connect so the app can catch up on anything it missed.
+//
+// A connection can die without either end hearing about it: a computer
+// waking from sleep, a phone moving between Wi-Fi and mobile data, Tailscale
+// reconnecting. The browser then keeps a socket that looks open but gets
+// nothing, and no message, call or notification arrives until a reload. So
+// the page pings the server every little while, and a socket that doesn't
+// answer is dropped and opened again.
+const PING_MS = 20_000;
+const ANSWER_MS = 8_000;
+
 export class Realtime {
   constructor(api, { onEvent, onOpen, onStatus }) {
     this.api = api;
@@ -81,22 +91,36 @@ export class Realtime {
     this.backoff = 500;
     this.queue = [];
     this.stopped = false;
+    this.heardAt = 0; // when the open socket last got anything
+    this.pingAt = 0; // when it was last pinged
+    this.retry = null;
+    this.beat = setInterval(() => this.check(), PING_MS);
   }
 
   connect() {
+    clearTimeout(this.retry);
+    this.retry = null;
+    if (this.stopped) return;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${location.host}/ws`);
     this.ws = ws;
+    this.ready = false;
+    this.heardAt = Date.now();
+    this.pingAt = 0;
     ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', token: this.api.token }));
     ws.onmessage = (e) => {
+      if (this.ws !== ws) return;
+      this.heardAt = Date.now();
       let msg;
       try {
         msg = JSON.parse(e.data);
       } catch {
         return;
       }
+      if (msg.type === 'pong') return;
       if (msg.type === 'ready') {
         this.backoff = 500;
+        this.ready = true;
         this.onStatus?.(true);
         for (const m of this.queue.splice(0)) ws.send(m);
         this.onOpen?.();
@@ -105,15 +129,76 @@ export class Realtime {
       this.onEvent(msg);
     };
     ws.onclose = (e) => {
+      if (this.ws !== ws) return; // one we already gave up on
+      this.ws = null;
+      this.ready = false;
       this.onStatus?.(false);
       if (this.stopped) return;
       if (e.code === 4003) {
         this.onEvent({ type: 'auth-failed' });
         return;
       }
-      setTimeout(() => this.connect(), this.backoff);
-      this.backoff = Math.min(this.backoff * 2, 15_000);
+      this.later();
     };
+  }
+
+  later() {
+    if (this.retry || this.stopped) return;
+    this.retry = setTimeout(() => this.connect(), this.backoff);
+    this.backoff = Math.min(this.backoff * 2, 15_000);
+  }
+
+  // Is the connection still alive? Called on a timer, and straight away when
+  // the page comes back on screen or the network comes back.
+  check() {
+    if (this.stopped) return;
+    const ws = this.ws;
+    if (!ws) {
+      // Waiting to reconnect: don't wait out the backoff once you're back.
+      if (this.retry && document.visibilityState === 'visible') {
+        clearTimeout(this.retry);
+        this.retry = null;
+        this.backoff = 500;
+        this.connect();
+      }
+      return;
+    }
+    const now = Date.now();
+    // Pinged, and nothing came back in time: this socket is dead.
+    if (this.pingAt && this.heardAt < this.pingAt && now - this.pingAt > ANSWER_MS) {
+      this.drop(ws);
+      return;
+    }
+    // Still connecting for too long counts the same.
+    if (ws.readyState === WebSocket.CONNECTING && now - this.heardAt > PING_MS) {
+      this.drop(ws);
+      return;
+    }
+    if (ws.readyState !== WebSocket.OPEN || !this.ready) return;
+    if (this.pingAt && this.heardAt < this.pingAt) return; // still waiting for the answer
+    this.pingAt = now;
+    try {
+      ws.send('{"type":"ping"}');
+    } catch {
+      this.drop(ws);
+      return;
+    }
+    // Check the answer without waiting for the next beat.
+    setTimeout(() => this.check(), ANSWER_MS + 500);
+  }
+
+  drop(ws) {
+    if (this.ws !== ws) return;
+    this.ws = null;
+    this.ready = false;
+    try {
+      ws.close();
+    } catch {
+      // already gone
+    }
+    this.onStatus?.(false);
+    this.backoff = 500;
+    this.connect();
   }
 
   send(msg) {
@@ -124,6 +209,8 @@ export class Realtime {
 
   stop() {
     this.stopped = true;
+    clearInterval(this.beat);
+    clearTimeout(this.retry);
     this.ws?.close();
   }
 }

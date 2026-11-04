@@ -10,7 +10,10 @@ const bridge = typeof window !== 'undefined' && window.TailchatApp && typeof win
 export const app = bridge ? { platform: String(bridge.platform || 'android'), version: Number(bridge.version) || 1 } : null;
 
 // What the app has been allowed to do, as it last told us.
-export const status = { overlay: null, fullScreen: null, notifications: null, background: null, battery: null, pip: null };
+// front: Tailchat is on screen (not behind another app or in a small window).
+// popupBlocked: the phone hid the last call pop-up. messagePopups: new
+// messages drop down from the top of the screen.
+export const status = { overlay: null, fullScreen: null, notifications: null, background: null, battery: null, pip: null, popupBlocked: null, messagePopups: null, front: null };
 
 const handlers = new Map(); // type -> Set of functions
 

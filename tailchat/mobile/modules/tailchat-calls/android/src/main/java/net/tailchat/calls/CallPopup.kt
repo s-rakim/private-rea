@@ -10,6 +10,8 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.text.TextUtils
 import android.util.Log
 import android.view.Gravity
@@ -40,6 +42,14 @@ internal class CallPopup(private val context: Context) {
   private var answerButton: FrameLayout? = null
   private var pulse: ObjectAnimator? = null
   private var callId: String? = null
+  private var drawn = false
+  private val main = Handler(Looper.getMainLooper())
+
+  // Whether a card that was added really came up on screen: some phones
+  // (Xiaomi's "Display pop-up windows while running in the background", and
+  // similar settings from other makers) let the app add its window but never
+  // show it. Called once per card, a moment after it was added.
+  var onResult: ((callId: String, shown: Boolean) -> Unit)? = null
 
   val showing: Boolean get() = root != null
 
@@ -60,6 +70,14 @@ internal class CallPopup(private val context: Context) {
     } catch (e: Exception) {
       Log.w(TAG, "couldn't remove the call pop-up", e)
     }
+  }
+
+  private fun check(view: FrameLayout) {
+    if (root !== view) return
+    val id = callId ?: return
+    val shown = drawn && view.isShown && view.windowVisibility == View.VISIBLE && view.width > 0
+    if (!shown) Log.w(TAG, "the call pop-up was added but isn't on screen")
+    onResult?.invoke(id, shown)
   }
 
   private fun bind(ring: Ring) {
@@ -89,10 +107,13 @@ internal class CallPopup(private val context: Context) {
     )
     params.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
     params.y = statusBarHeight() + context.dp(4)
+    drawn = false
+    view.viewTreeObserver.addOnDrawListener { drawn = true }
     return try {
       windows.addView(view, params)
       root = view
       slideIn()
+      main.postDelayed({ check(view) }, CHECK_MS)
       true
     } catch (e: Exception) {
       // No permission to draw over other apps after all.
@@ -257,6 +278,10 @@ internal class CallPopup(private val context: Context) {
       return
     }
     v.animate().translationY(-v.height.toFloat() - context.dp(40)).alpha(0f).setDuration(180).withEndAction { done() }.start()
+  }
+
+  companion object {
+    private const val CHECK_MS = 1500L
   }
 
   private fun statusBarHeight(): Int {
