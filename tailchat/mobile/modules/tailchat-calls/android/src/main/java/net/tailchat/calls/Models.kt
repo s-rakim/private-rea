@@ -28,6 +28,9 @@ internal class Ring(val callId: String) {
   // Swiped the pop-up away: the call stays in the notification shade.
   var popupDismissed = false
 
+  // The phone didn't let the pop-up show: ring with the call notification.
+  var popupBlocked = false
+
   private var picture: Bitmap? = null
   private var pictureKey = ""
 

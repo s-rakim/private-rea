@@ -94,7 +94,7 @@ internal object CallCenter {
       Log.w(TAG, "couldn't set up notification channels", e)
     }
     ringer = Ringer(ctx)
-    popup = CallPopup(ctx)
+    popup = CallPopup(ctx).also { it.onResult = ::popupResult }
     (ctx as? Application)?.registerActivityLifecycleCallbacks(lifecycle)
     val filter = IntentFilter()
     filter.addAction(Intent.ACTION_SCREEN_OFF)
@@ -171,6 +171,7 @@ internal object CallCenter {
     pending.clear()
     for (m in waiting) toPage(m)
     sendStatus()
+    keepPageAwake()
     askForNotifications(false)
     TailchatService.sync(ctx)
   }
@@ -218,6 +219,19 @@ internal object CallCenter {
     return found
   }
 
+  // Android lowers the page's process when Tailchat isn't on screen, and
+  // kills it first when memory runs low; then nothing rings or pops up until
+  // the app is opened again. Keep it as important as the app itself.
+  private fun keepPageAwake() {
+    if (Build.VERSION.SDK_INT < 26) return
+    val view = webView() ?: return
+    try {
+      view.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+    } catch (e: Exception) {
+      Log.w(TAG, "couldn't keep the page awake", e)
+    }
+  }
+
   private fun findWebView(v: View): WebView? {
     if (v is WebView) return v
     if (v is ViewGroup) {
@@ -237,6 +251,9 @@ internal object CallCenter {
       .put("background", Prefs.keepAlive(ctx))
       .put("battery", Perms.battery(ctx))
       .put("pip", Perms.pip(ctx))
+      .put("popupBlocked", Prefs.popupBlocked(ctx))
+      .put("messagePopups", Perms.messagePopups(ctx))
+      .put("front", started && !inPip)
     toPage(JSONObject().put("type", "status").put("status", status))
   }
 
@@ -291,6 +308,7 @@ internal object CallCenter {
       safely {
         setPip(false)
         refreshRing()
+        if (pageThere) sendStatus()
       }
     }
 
@@ -340,6 +358,7 @@ internal object CallCenter {
     setPip(a.isInPictureInPictureMode)
     sendAfterResume()
     if (pageThere) sendStatus()
+    keepPageAwake()
     refreshRing()
     applyWindow()
     TailchatService.sync(ctx)
@@ -428,6 +447,7 @@ internal object CallCenter {
   }
 
   private fun dropRing(ctx: Context, callId: String) {
+    ringStyles.remove(callId)
     rings.remove(callId)?.let { main.removeCallbacksAndMessages(it) }
     if (ringNotes.remove(callId)) Notices.cancel(ctx, callId, Notices.ID_INCOMING)
   }
@@ -473,7 +493,7 @@ internal object CallCenter {
         postRing(ctx, ring, Notices.RingStyle.QUIET)
         shown("full screen")
       }
-      !locked && Perms.overlay(ctx) -> {
+      !locked && Perms.overlay(ctx) && !ring.popupBlocked -> {
         if (ring.popupDismissed) popup?.hide() else popup?.show(ring)
         postRing(ctx, ring, Notices.RingStyle.QUIET)
         shown(if (popup?.showing == true) "pop-up" else "notification")
@@ -505,8 +525,14 @@ internal object CallCenter {
     Log.i(TAG, if (how == null) "ringing stopped" else "ringing: $how")
   }
 
+  private val ringStyles = HashMap<String, Notices.RingStyle>()
+
   private fun postRing(ctx: Context, ring: Ring, style: Notices.RingStyle) {
     ringNotes.add(ring.callId)
+    // An update only alerts once, so a quiet notification that becomes a
+    // loud one is posted afresh to drop down from the top.
+    val before = ringStyles.put(ring.callId, style)
+    if (before != null && before != style && style == Notices.RingStyle.LOUD) Notices.cancel(ctx, ring.callId, Notices.ID_INCOMING)
     Notices.post(ctx, ring.callId, Notices.ID_INCOMING, Notices.incoming(ctx, ring, style))
   }
 
@@ -526,6 +552,24 @@ internal object CallCenter {
 
   fun fullScreenShown(on: Boolean) {
     fullScreenUp = on
+    safely { refreshRing() }
+  }
+
+  // The pop-up came up, or the phone hid it. A hidden one rings with the
+  // call notification instead (heads-up, with Answer and Decline), and the
+  // page is told so it can point at the phone's setting.
+  private fun popupResult(callId: String, shown: Boolean) {
+    val ctx = app ?: return
+    // The screen went off meanwhile: that says nothing about the pop-up.
+    if (locked(ctx)) return
+    if (Prefs.popupBlocked(ctx) != !shown) {
+      Prefs.setPopupBlocked(ctx, !shown)
+      sendStatus()
+    }
+    if (shown) return
+    Log.w(TAG, "the phone hides the call pop-up: ringing with the call notification")
+    popup?.hide()
+    rings[callId]?.popupBlocked = true
     safely { refreshRing() }
   }
 
@@ -863,6 +907,13 @@ internal object CallCenter {
           return
         }
         Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+      }
+      "message-popups" -> if (Build.VERSION.SDK_INT >= 26) {
+        Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+          .putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+          .putExtra(Settings.EXTRA_CHANNEL_ID, Notices.CH_MESSAGES)
+      } else {
+        details
       }
       else -> details
     }

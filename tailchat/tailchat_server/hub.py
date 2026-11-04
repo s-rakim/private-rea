@@ -90,6 +90,10 @@ class Hub:
                     continue
                 if not isinstance(msg, dict):
                     continue
+                # The page checks now and then that its connection still works.
+                if msg.get("type") == "ping":
+                    sock.send('{"type":"pong"}')
+                    continue
                 try:
                     self.on_message(sock, msg)
                 except Exception as err:  # a bad frame must not kill the socket

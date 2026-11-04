@@ -186,13 +186,6 @@ shares its key and its chats. The Android APK is a device of its own.
   with the media).
 * **Groups**: admins, "only admins send" and "only admins edit info", invite
   links, descriptions and photos.
-* **Communities**: related groups under one community with an announcements
-  group. Members join the groups they want; admins add new or existing
-  groups.
-* **Channels**: one-way broadcasts anyone on your tailnet can find and follow.
-  Followers react and vote but can't post or see each other.
-* **Status**: text, photo and video updates that disappear after 24 hours,
-  with a viewer list and replies.
 * **Calls**: voice and video up to 4K with HD audio, one-to-one and groups of
   up to 8, with ringing, missed calls, call waiting and a call log. You can
   also call any of your own devices, or ring all of them at once from the
@@ -203,10 +196,11 @@ shares its key and its chats. The Android APK is a device of its own.
   encrypted to a device you link later.
 * **Settings**: profile name, about and photo, enter is send, and
   notifications for new messages (on phones and the installed app too, where
-  the app icon also shows how many chats are unread). Turn them on in
-  Settings > Notifications or from the banner above the chat list.
-* **Layout**: on a computer, a rail down the left (Chats, Updates,
-  Communities, Calls, Starred, Devices, Settings and your profile) beside the
+  the app icon also shows how many chats are unread). They're on once you
+  allow notifications from the banner above the chat list; turn them off in
+  Settings > Notifications.
+* **Layout**: on a computer, a rail down the left (Chats, Calls, Starred,
+  Devices, Settings and your profile) beside the
   chat list and the open chat; on a phone, one screen at a time with those
   sections in a tab bar along the bottom. Green dots show who is online.
 * **Themes**: Tailscale (the default), Ocean, Forest, Sunset, Grape, Rose and

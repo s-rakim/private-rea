@@ -8,7 +8,7 @@ import { kindFor } from './media.js';
 import { pickPhoto, cropPhoto } from './photo.js';
 import * as O from './overlays.js';
 import * as T from './themes.js';
-import { renderConversation, drafts, clearChat, deleteChat, exitGroup, exitLabel, attachDialog, canSend, followChannel, openCommunity } from './conversation.js';
+import { renderConversation, drafts, clearChat, deleteChat, exitGroup, exitLabel, attachDialog, canSend, openCommunity } from './conversation.js';
 import { renderDetails, starredRow, inviteDialog, addMembers, deactivateCommunity } from './details.js';
 import { QUALITIES, DEFAULT_QUALITY } from './rtc.js';
 import * as tones from './tones.js';
@@ -30,7 +30,7 @@ let ng = null; // new group draft: { step, members, name, photo, photoUrl }
 // ---------- small pieces ----------
 
 function setView(view) {
-  S.view = view;
+  S.view = VIEW_TITLES[view] ? view : 'chats';
   S.panel = null;
   render();
 }
@@ -50,10 +50,6 @@ function tickIcon(state) {
 function presenceAvatar(av, online) {
   const el = avatar(av, 'md');
   return online ? h('div', { class: 'av-wrap' }, el, h('span', { class: 'presence', title: 'Online' })) : el;
-}
-
-function ringAvatar(user, seen, size = 'md') {
-  return h('div', { class: `status-ring${seen ? ' seen' : ''}` }, avatar(user, size));
 }
 
 const prefs = (chat, body) => api.patch(`/api/chats/${encodeURIComponent(chat.id)}/prefs`, body).catch((e) => toast(e.message));
@@ -238,10 +234,7 @@ function chatsTab() {
     [['all', 'All'], ['unread', 'Unread'], ['groups', 'Groups']].map(([k, label]) =>
       h('button', { type: 'button', class: `chip${S.filter === k ? ' active' : ''}`, onclick: () => { S.filter = k; render(); } }, label)),
   ));
-  const showBanner = 'Notification' in window && Notification.permission !== 'denied' && !S.prefs.notifications && !S.prefs.bannerDismissed;
-  // In the Android app: calls can only pop up over other apps once Android
-  // allows it, so ask once.
-  const showOverlay = native.app && native.status.overlay === false && !S.prefs.overlayDismissed;
+  const showBanner = !native.app && 'Notification' in window && Notification.permission === 'default' && !S.prefs.bannerDismissed;
   const banner = showBanner
     ? slots.get('banner', '1', () => h(
       'div',
@@ -250,15 +243,7 @@ function chatsTab() {
       h('div', { class: 'grow' }, h('div', null, 'Get notified of new messages'), h('button', { type: 'button', class: 'link', onclick: enableNotifications }, 'Turn on desktop notifications')),
       iconButton('close', 'Dismiss', () => A.savePrefs({ bannerDismissed: true })),
     ))
-    : showOverlay
-      ? slots.get('banner', 'overlay', () => h(
-        'div',
-        { class: 'banner' },
-        icon('layers'),
-        h('div', { class: 'grow' }, h('div', null, 'Let calls pop up over other apps'), h('button', { type: 'button', class: 'link', onclick: () => native.post('open-settings', { what: 'overlay' }) }, 'Allow Tailchat to display over other apps')),
-        iconButton('close', 'Dismiss', () => A.savePrefs({ overlayDismissed: true })),
-      ))
-      : null;
+    : appBanner();
   const offline = !S.online ? slots.get('offline', '1', () => h('div', { class: 'banner warn' }, icon('info'), h('div', null, "Connecting to Tailchat… Messages you send now go out when you're back online."))) : null;
   const linked = S.prefs.securityAlerts?.devices || [];
   const linkedBanner = linked.length ? slots.get('linked', JSON.stringify(linked), () => h(
@@ -357,200 +342,92 @@ function chatsTab() {
   ];
 }
 
+// In the Android app: what stops calls and messages popping up on this
+// phone, worst first, each with a button to the right setting. Android
+// reports all but one of them; the last is the app's own finding that the
+// phone hid its call pop-up.
+const APP_BANNERS = [
+  {
+    key: 'notifications',
+    when: (st) => st.notifications === false,
+    icon: 'bell',
+    title: "Tailchat isn't allowed to show notifications",
+    sub: 'Calls only ring, and new messages stay silent, until you allow them.',
+    button: 'Allow notifications',
+    open: 'notifications',
+  },
+  {
+    key: 'overlay',
+    when: (st) => st.overlay === false,
+    icon: 'layers',
+    title: 'Let calls pop up over other apps',
+    button: 'Allow Tailchat to display over other apps',
+    open: 'overlay',
+  },
+  {
+    key: 'popupBlocked',
+    when: (st) => st.overlay !== false && st.popupBlocked === true,
+    icon: 'layers',
+    title: 'Your phone hid the last call pop-up',
+    sub: 'Calls ring with a notification instead. To get the pop-up back, open the app settings, then Other permissions (or Pop-ups), and allow "Display pop-up windows while running in the background" and "Show on lock screen".',
+    button: 'Open app settings',
+    open: 'app',
+  },
+  {
+    key: 'messagePopups',
+    when: (st) => st.notifications !== false && st.messagePopups === false,
+    icon: 'chat',
+    title: "New messages don't pop up",
+    sub: 'Turn on "Pop on screen" (or "Floating notifications") for Messages.',
+    button: 'Open message notification settings',
+    open: 'message-popups',
+  },
+  {
+    key: 'battery',
+    when: (st) => st.battery === false,
+    icon: 'battery',
+    title: 'Android may put Tailchat to sleep',
+    sub: 'Then calls and messages only arrive when you open the app.',
+    button: 'Remove battery limits',
+    open: 'battery',
+  },
+];
+
+function appBanner() {
+  if (!native.app) return null;
+  const st = native.status;
+  const dismissed = S.prefs.appBannersDismissed || {};
+  const b = APP_BANNERS.find((x) => x.when(st) && !dismissed[x.key] && !(x.key === 'overlay' && S.prefs.overlayDismissed));
+  if (!b) return null;
+  return slots.get('banner', `app:${b.key}`, () => h(
+    'div',
+    { class: 'banner' },
+    icon(b.icon),
+    h(
+      'div',
+      { class: 'grow' },
+      h('div', null, b.title),
+      b.sub ? h('div', { class: 'muted small' }, b.sub) : null,
+      h('button', { type: 'button', class: 'link', onclick: () => native.post('open-settings', { what: b.open }) }, b.button),
+    ),
+    iconButton('close', 'Dismiss', () => A.savePrefs({ appBannersDismissed: { ...(S.prefs.appBannersDismissed || {}), [b.key]: true } })),
+  ));
+}
+
 function enableNotifications() {
   if (!('Notification' in window)) return toast("This browser can't show notifications");
   Notification.requestPermission().then((p) => {
-    A.savePrefs({ notifications: p === 'granted' });
-    if (p !== 'granted') toast('Notifications are blocked in your browser settings');
+    if (p === 'granted') A.savePrefs({ messageAlerts: true });
+    else render();
+    if (p === 'denied') toast('Notifications are blocked in your browser settings');
   });
-}
-
-// ---------- status tab ----------
-
-function pickStatusMedia() {
-  const input = h('input', { type: 'file', accept: 'image/*,video/*', class: 'hidden' });
-  input.addEventListener('change', () => {
-    const file = input.files[0];
-    input.remove();
-    if (file && !O.fileTooBig(file)) O.mediaStatusDialog(file);
-  });
-  document.body.append(input);
-  input.click();
-}
-
-function statusSection() {
-  const groups = O.statusGroups();
-  const mine = groups.get(S.me.id) || [];
-  const others = [...groups.entries()].filter(([u]) => !A.isMe(u));
-  const recent = others.filter(([, l]) => l.some((s) => !s.seen));
-  const viewed = others.filter(([, l]) => l.every((s) => s.seen));
-  const personRow = ([uid, l]) => {
-    const u = S.users.get(uid) || { id: uid, name: A.nameOf(uid) };
-    return h(
-      'div',
-      { class: 'row', onclick: () => O.openStatus(uid) },
-      ringAvatar(u, l.every((s) => s.seen)),
-      h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, u.name), h('div', { class: 'preview' }, `${l.length > 1 ? `${l.length} updates · ` : ''}${listTime(l.at(-1).createdAt)}`)),
-    );
-  };
-  return [
-    h('div', { class: 'list-section' }, 'Status'),
-    h(
-      'div',
-      { class: 'row', onclick: () => (mine.length ? O.openStatus(S.me.id) : O.textStatusDialog()) },
-      mine.length ? ringAvatar(S.me, true) : avatar(S.me, 'md'),
-      h('div', { class: 'body' }, h('div', { class: 'name' }, 'My status'), h('div', { class: 'preview' }, mine.length ? `${mine.length} update${mine.length === 1 ? '' : 's'} · ${listTime(mine.at(-1).createdAt)}` : 'Click to add a status update')),
-      iconButton('camera', 'Photo or video status', (e) => { e.stopPropagation(); pickStatusMedia(); }),
-      iconButton('edit', 'Text status', (e) => { e.stopPropagation(); O.textStatusDialog(); }),
-    ),
-    recent.length ? [h('div', { class: 'list-section sub' }, 'Recent updates'), recent.map(personRow)] : null,
-    viewed.length ? [h('div', { class: 'list-section sub' }, 'Viewed updates'), viewed.map(personRow)] : null,
-    !others.length ? h('div', { class: 'empty small' }, 'No updates from others yet. Status updates disappear after 24 hours.') : null,
-    h('div', { class: 'empty small' }, icon('lock'), ' Your status updates are end-to-end encrypted'),
-  ];
 }
 
 function action(iconName, label, onClick, sub) {
   return h('div', { class: 'row short', onclick: onClick }, h('div', { class: 'row-icon accent' }, icon(iconName)), h('div', { class: 'body' }, h('div', null, label), sub ? h('div', { class: 'preview' }, sub) : null));
 }
 
-function channelsSection() {
-  const followed = sortChats([...S.chats.values()].filter((c) => A.isChannel(c) && !c.me.left));
-  return [
-    h('div', { class: 'list-section' }, 'Channels'),
-    followed.map(chatRow),
-    !followed.length ? h('div', { class: 'empty small' }, 'Follow channels to get updates on topics that matter to you, from people on your tailnet.') : null,
-    action('search', 'Find channels', () => openPanel('channels')),
-    action('add', 'Create channel', newChannel),
-  ];
-}
-
-function updatesTab() {
-  return [h('div', { class: 'list' }, statusSection(), channelsSection())];
-}
-
-// ---------- channels ----------
-
-function newChannel() {
-  const name = h('input', { maxlength: 100, placeholder: 'Channel name' });
-  const description = h('textarea', { rows: 3, maxlength: 2048, placeholder: 'Describe your channel (optional)' });
-  dialog({
-    title: 'New channel',
-    content: [
-      h('label', { class: 'field' }, name),
-      h('label', { class: 'field' }, description),
-      h('p', { class: 'muted small' }, icon('info'), " Anyone on your tailnet can find and follow your channel. Channel posts aren't end-to-end encrypted, and followers can't see each other."),
-    ],
-    actions: [
-      { label: 'Cancel', onClick: (close) => close() },
-      {
-        label: 'Create channel',
-        kind: 'primary',
-        onClick: async (close) => {
-          if (!name.value.trim()) return toast('Give the channel a name');
-          try {
-            const { chat } = await api.post('/api/chats/channel', { name: name.value.trim(), description: description.value });
-            S.chats.set(chat.id, chat);
-            close();
-            S.panel = null;
-            A.openChat(chat.id);
-          } catch (err) {
-            toast(err.message);
-          }
-        },
-      },
-    ],
-  });
-}
-
-let directory = null; // { list } for the channel directory panel
-
-function channelsPanel() {
-  if (!directory) {
-    directory = { list: null };
-    api.get('/api/channels').then(({ channels }) => {
-      if (directory) directory.list = channels;
-      render();
-    }).catch((e) => toast(e.message));
-  }
-  const q = panelSearchEl?.value.trim().toLowerCase() || '';
-  const list = (directory.list || []).filter((c) => !q || c.name.toLowerCase().includes(q) || (c.description || '').toLowerCase().includes(q));
-  const open = async (c) => {
-    const chat = c.following ? S.chats.get(c.id) || (await A.chatOf(c.id)) : await followChannel(c.id, true);
-    if (!chat) return;
-    S.panel = null;
-    A.openChat(chat.id);
-  };
-  return panelShell('Find channels', [
-    panelSearch('Search channels'),
-    action('add', 'Create channel', newChannel),
-    directory.list === null ? h('div', { class: 'empty' }, 'Loading channels…') : null,
-    directory.list && !list.length ? h('div', { class: 'empty' }, q ? 'No channels found' : 'Nobody on your tailnet has made a channel yet.') : null,
-    list.map((c) => h(
-      'div',
-      { class: 'row', onclick: () => open(c) },
-      avatar({ id: c.id, name: c.name, src: c.avatar, group: 'channel' }, 'md'),
-      h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, c.name), h('div', { class: 'preview ellipsis' }, `${c.followers} follower${c.followers === 1 ? '' : 's'}${c.description ? ` · ${c.description}` : ''}`)),
-      c.following ? h('span', { class: 'tag' }, 'Following') : h('button', { type: 'button', class: 'btn primary small', onclick: (e) => { e.stopPropagation(); open(c); } }, 'Follow'),
-    )),
-  ]);
-}
-
 // ---------- communities ----------
-
-function newCommunity() {
-  const name = h('input', { maxlength: 100, placeholder: 'Community name' });
-  const description = h('textarea', { rows: 3, maxlength: 2048, placeholder: "What's this community about?" });
-  dialog({
-    title: 'New community',
-    content: [
-      h('p', { class: 'muted' }, 'Bring related groups together under one community, with an announcements group that only admins post in.'),
-      h('label', { class: 'field' }, name),
-      h('label', { class: 'field' }, description),
-    ],
-    actions: [
-      { label: 'Cancel', onClick: (close) => close() },
-      {
-        label: 'Create community',
-        kind: 'primary',
-        onClick: async (close) => {
-          if (!name.value.trim()) return toast('Give the community a name');
-          try {
-            const { chat } = await api.post('/api/chats/community', { name: name.value.trim(), description: description.value });
-            S.chats.set(chat.id, chat);
-            close();
-            openCommunity(chat.id);
-          } catch (err) {
-            toast(err.message);
-          }
-        },
-      },
-    ],
-  });
-}
-
-function communitiesTab() {
-  const communities = [...S.chats.values()].filter((c) => c.type === 'community' && !c.me.left).sort((a, b) => a.name.localeCompare(b.name));
-  return [
-    h(
-      'div',
-      { class: 'list' },
-      action('community', 'New community', newCommunity),
-      communities.map((c) => {
-        const groups = sortChats([...S.chats.values()].filter((g) => g.communityId === c.id && !g.me.left));
-        return h(
-          'div',
-          { class: 'community-block' },
-          h('div', { class: 'row', onclick: () => openCommunity(c.id) }, avatar(A.chatAvatar(c), 'md'), h('div', { class: 'body' }, h('div', { class: 'name ellipsis' }, c.name), h('div', { class: 'preview' }, `${(c.groups || []).length} group${(c.groups || []).length === 1 ? '' : 's'}`))),
-          chatRow(c, 'Announcements'),
-          groups.slice(0, 3).map((g) => chatRow(g)),
-          h('div', { class: 'row short', onclick: () => openCommunity(c.id) }, h('div', { class: 'row-icon' }, icon('forward')), h('div', { class: 'body' }, 'View all')),
-        );
-      }),
-      !communities.length ? h('div', { class: 'empty' }, "Communities bring members together in topic-based groups, with announcements from admins. You're not in any community yet.") : null,
-    ),
-  ];
-}
 
 function communityPanel() {
   const c = S.chats.get(S.community);
@@ -768,7 +645,7 @@ async function logout() {
   location.reload();
 }
 
-const VIEW_TITLES = { chats: 'Chats', status: 'Updates', communities: 'Communities', calls: 'Calls' };
+const VIEW_TITLES = { chats: 'Chats', calls: 'Calls' };
 const SETTINGS_PANELS = new Set(['settings', 'profile', 'privacy', 'chat-settings', 'call-settings', 'themes', 'theme-editor', 'notifications', 'help']);
 
 // The heading over the list: the section's name and what you can start there.
@@ -779,13 +656,18 @@ function topbar() {
     return h(
       'header',
       { class: 'topbar list-head' },
-      h('div', { class: 'title' }, h('h1', { class: 'view-title' }, VIEW_TITLES[S.view] || 'Chats'), S.online ? null : h('div', { class: 'sub' }, 'Connecting…')),
+      h(
+        'div',
+        { class: 'title' },
+        S.view === 'chats'
+          ? h('h1', { class: 'view-title list-logo', title: 'Tailchat', 'aria-label': 'Chats' }, logoMark())
+          : h('h1', { class: 'view-title' }, VIEW_TITLES[S.view] || 'Chats'),
+        S.online ? null : h('div', { class: 'sub' }, 'Connecting…'),
+      ),
       S.view === 'chats' ? iconButton('group', 'New group', () => startNewGroup()) : null,
       S.view === 'chats' ? iconButton('edit', 'New chat', () => openPanel('new-chat')) : null,
       (more = iconButton('more', 'Menu', () => menu(more, [
         { label: 'New group', icon: 'group', onClick: () => startNewGroup() },
-        { label: 'New community', icon: 'community', onClick: newCommunity },
-        { label: 'New channel', icon: 'channel', onClick: newChannel },
         { label: 'Broadcast lists', icon: 'broadcast', onClick: () => openPanel('broadcasts') },
         { label: 'Archived', icon: 'archive', onClick: () => openPanel('archived') },
         { label: 'Starred messages', icon: 'star', onClick: () => openPanel('starred') },
@@ -797,18 +679,14 @@ function topbar() {
   });
 }
 
-// Unread chats, unseen updates and missed calls, for the badges on the rail.
+// Unread chats and missed calls, for the badges on the rail.
 function navCounts() {
   let unread = 0;
-  let channelUnread = false;
   for (const c of S.chats.values()) {
-    const has = !c.me.archived && (c.unread || c.me.markedUnread);
-    if (has && A.isChannel(c)) channelUnread = true;
-    else if (has) unread++;
+    if (!A.isChannel(c) && !c.me.archived && (c.unread || c.me.markedUnread)) unread++;
   }
-  const unseen = channelUnread || [...S.statuses.values()].some((s) => !s.seen && !A.isMe(s.userId));
   const missed = S.calls.filter((c) => !c.answeredAt && !A.callOutgoing(c) && c.startedAt > (S.prefs.callsSeenAt || 0)).length;
-  return { unread, unseen, missed };
+  return { unread, missed };
 }
 
 function logoMark() {
@@ -824,8 +702,8 @@ function logoMark() {
 // The navigation: a rail down the left on a computer, a tab bar along the
 // bottom on a phone.
 function rail() {
-  const { unread, unseen, missed } = navCounts();
-  const sig = JSON.stringify([S.view, S.panel, unread, unseen, missed, S.me, S.online]);
+  const { unread, missed } = navCounts();
+  const sig = JSON.stringify([S.view, S.panel, unread, missed, S.me, S.online]);
   return slots.get('rail', sig, () => {
     const item = (iconName, label, onClick, active, badge = null, extra = '') => h(
       'button',
@@ -841,8 +719,6 @@ function rail() {
     return [
       h('div', { class: 'rail-logo', title: 'Tailchat' }, logoMark()),
       view('chats', 'chat', 'Chats', count(unread)),
-      view('status', 'status', 'Updates', unseen ? h('span', { class: 'badge dot' }) : null),
-      view('communities', 'community', 'Communities'),
       view('calls', 'phone', 'Calls', count(missed)),
       h('div', { class: 'rail-spacer' }),
       item('star', 'Starred', () => openPanel('starred'), S.panel === 'starred', null, ' rail-extra'),
@@ -1076,7 +952,7 @@ function settingsPanel() {
     settingsRow('theme', 'Themes', `${A.activeTheme().name} · ${MODE_LABELS[S.prefs.theme] || MODE_LABELS.system}`, () => openPanel('themes')),
     settingsRow('chat', 'Chats', 'Enter to send', () => openPanel('chat-settings')),
     settingsRow('phone', 'Calls', callSettingsSummary(), () => openPanel('call-settings')),
-    settingsRow('bell', 'Notifications', (native.app ? S.prefs.appNotifications !== false && native.status.notifications !== false : S.prefs.notifications) ? 'On' : 'Off', () => openPanel('notifications')),
+    settingsRow('bell', 'Notifications', (native.app ? S.prefs.appNotifications !== false && native.status.notifications !== false : A.messageAlertsOn() && 'Notification' in window && Notification.permission === 'granted') ? 'On' : 'Off', () => openPanel('notifications')),
     settingsRow('devices', 'Linked devices', null, () => openPanel('devices')),
     settingsRow('shield', 'Security', 'How Tailchat protects your messages', () => openPanel('help')),
     settingsRow('exit', 'Log out', null, logout, true),
@@ -1420,7 +1296,7 @@ function notificationsPanel() {
   if (native.app) return appNotificationsPanel();
   const supported = 'Notification' in window;
   return panelShell('Notifications', [
-    h('div', { class: 'menu-row' }, icon('bell'), h('div', { class: 'grow' }, h('div', null, 'Desktop notifications'), h('div', { class: 'sub' }, !supported ? "This browser can't show notifications" : Notification.permission === 'denied' ? 'Blocked in your browser settings' : 'Show new messages while Tailchat is in the background')), supported ? toggle(S.prefs.notifications && Notification.permission === 'granted', (on) => (on ? enableNotifications() : A.savePrefs({ notifications: false })), 'Desktop notifications') : null),
+    h('div', { class: 'menu-row' }, icon('bell'), h('div', { class: 'grow' }, h('div', null, 'Desktop notifications'), h('div', { class: 'sub' }, !supported ? "This browser can't show notifications" : Notification.permission === 'denied' ? 'Blocked in your browser settings' : 'Show new messages while Tailchat is in the background')), supported ? toggle(A.messageAlertsOn() && Notification.permission === 'granted', (on) => (on ? enableNotifications() : A.savePrefs({ messageAlerts: false })), 'Desktop notifications') : null),
     settingsRow('phone', 'Calls', 'Ringing notifications, ringtone and vibration', () => openPanel('call-settings')),
     h('div', { class: 'empty small' }, 'Notifications show the sender and a preview. They are generated on this device after decryption; the server never sees message text.'),
   ], 'settings');
@@ -1630,8 +1506,6 @@ function panelNodes() {
       return helpPanel();
     case 'broadcasts':
       return broadcastsPanel();
-    case 'channels':
-      return channelsPanel();
     case 'community':
       return communityPanel();
     default:
@@ -1646,16 +1520,13 @@ function renderSidebar() {
     panelSearchEl = null;
     if (S.panel !== 'devices') devicesCache = null;
     if (S.panel !== 'new-group') ng = null;
-    if (S.panel !== 'channels') directory = null;
     S.themePreview = S.panel === 'theme-editor' ? themeEdit.mode : null;
     A.applyTheme();
   }
   let nodes = S.panel ? panelNodes() : null;
   if (!nodes) {
     let body;
-    if (S.view === 'status') body = updatesTab();
-    else if (S.view === 'communities') body = communitiesTab();
-    else if (S.view === 'calls') body = callsTab();
+    if (S.view === 'calls') body = callsTab();
     else body = chatsTab();
     nodes = [topbar(), body];
   }
